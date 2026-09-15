@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
+import { mkdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { Router } from 'express';
+import express, { Router } from 'express';
 import semver from 'semver';
 import { requireAuth, requireScope } from '../auth.js';
 import { forbidden, HttpError, fieldErrors, notFound } from '../errors.js';
@@ -15,6 +16,7 @@ import {
   normalizeSemver,
 } from '../util.js';
 import { extensionDetailFromRow, versionToObject } from '../serialize.js';
+import { requireObjectBody } from './shared.js';
 
 export function makePackagesRouter({ sql, config, termsGate }) {
   const router = Router();
@@ -22,15 +24,6 @@ export function makePackagesRouter({ sql, config, termsGate }) {
   const publishChain = [requireAuth, termsGate, requireScope('publish')];
   const yankChain = [requireAuth, termsGate, requireScope('yank')];
   const ownerChain = [requireAuth, termsGate];
-
-  function requireObjectBody(req) {
-    if (!isPlainObject(req.body)) {
-      throw new HttpError(422, {
-        title: 'Validation Error',
-        detail: 'Request body must be a JSON object.',
-      });
-    }
-  }
 
   async function loadVersion(namespace, id, version) {
     const [row] = await sql`
@@ -50,7 +43,7 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     return rows.find((row) => row.version === ceiling);
   }
 
-  async function resolveVersion(params, _req) {
+  async function resolveVersion(params) {
     const { namespace, id, version } = params;
     const row =
       version === 'latest'
@@ -60,75 +53,86 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     return row;
   }
 
-  router.post('/@:namespace/:id/versions', publishChain, async (req, res) => {
-    const { namespace, id } = req.params;
-    requireObjectBody(req);
-    if (!isValidExtensionId(id)) {
-      throw fieldErrors([{ field: 'id', message: 'Invalid extension id.' }]);
-    }
+  router.post(
+    '/@:namespace/:id/versions',
+    express.json({ limit: '25mb' }),
+    ...publishChain,
+    async (req, res) => {
+      const { namespace, id } = req.params;
+      requireObjectBody(req);
+      if (!isValidExtensionId(id)) {
+        throw fieldErrors([{ field: 'id', message: 'Invalid extension id.' }]);
+      }
 
-    const { manifest, code } = req.body;
-    const errors = [];
-    if (!isPlainObject(manifest)) {
-      errors.push({ field: 'manifest', message: 'Manifest is required.' });
-    } else {
-      if (!isValidExtensionId(manifest.id)) {
-        errors.push({
-          field: 'manifest.id',
-          message: 'Must match a-z and 0-9, up to 64 characters.',
-        });
-      }
-      if (manifest.id !== id) {
-        errors.push({ field: 'manifest.id', message: `Must equal the id in the path ("${id}").` });
-      }
-      if (!normalizeSemver(manifest.version)) {
-        errors.push({ field: 'manifest.version', message: 'Must be a valid SemVer string.' });
-      }
-      if (typeof manifest.license !== 'string' || manifest.license.length === 0) {
-        errors.push({
-          field: 'manifest.license',
-          message: 'License (SPDX identifier) is required.',
-        });
-      }
-      if (typeof manifest.description !== 'string') {
-        errors.push({ field: 'manifest.description', message: 'Description is required.' });
-      }
-      if (
-        manifest.name !== undefined &&
-        (typeof manifest.name !== 'string' || manifest.name.length === 0)
-      ) {
-        errors.push({
-          field: 'manifest.name',
-          message: 'Must be a non-empty string when provided.',
-        });
-      }
-      if (manifest.author !== undefined && typeof manifest.author !== 'string') {
-        errors.push({ field: 'manifest.author', message: 'Must be a string when provided.' });
-      }
-      for (const color of ['color1', 'color2', 'color3']) {
+      const { manifest, code } = req.body;
+      const errors = [];
+      if (!isPlainObject(manifest)) {
+        errors.push({ field: 'manifest', message: 'Manifest is required.' });
+      } else {
+        if (!isValidExtensionId(manifest.id)) {
+          errors.push({
+            field: 'manifest.id',
+            message: 'Must match a-z and 0-9, up to 64 characters.',
+          });
+        }
+        if (manifest.id !== id) {
+          errors.push({
+            field: 'manifest.id',
+            message: `Must equal the id in the path ("${id}").`,
+          });
+        }
+        if (!normalizeSemver(manifest.version)) {
+          errors.push({ field: 'manifest.version', message: 'Must be a valid SemVer string.' });
+        }
+        if (typeof manifest.license !== 'string' || manifest.license.length === 0) {
+          errors.push({
+            field: 'manifest.license',
+            message: 'License (SPDX identifier) is required.',
+          });
+        }
+        if (typeof manifest.description !== 'string') {
+          errors.push({ field: 'manifest.description', message: 'Description is required.' });
+        }
         if (
-          manifest[color] !== undefined &&
-          (typeof manifest[color] !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(manifest[color]))
+          manifest.name !== undefined &&
+          (typeof manifest.name !== 'string' || manifest.name.length === 0)
         ) {
-          errors.push({ field: `manifest.${color}`, message: `Must be "#RRGGBB" when provided.` });
+          errors.push({
+            field: 'manifest.name',
+            message: 'Must be a non-empty string when provided.',
+          });
+        }
+        if (manifest.author !== undefined && typeof manifest.author !== 'string') {
+          errors.push({ field: 'manifest.author', message: 'Must be a string when provided.' });
+        }
+        for (const color of ['color1', 'color2', 'color3']) {
+          if (
+            manifest[color] !== undefined &&
+            (typeof manifest[color] !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(manifest[color]))
+          ) {
+            errors.push({
+              field: `manifest.${color}`,
+              message: `Must be "#RRGGBB" when provided.`,
+            });
+          }
         }
       }
-    }
-    if (typeof code !== 'string' || code.length === 0) {
-      errors.push({ field: 'code', message: 'The compiled Twext output is required.' });
-    }
-    if (errors.length > 0) throw fieldErrors(errors);
+      if (typeof code !== 'string' || code.length === 0) {
+        errors.push({ field: 'code', message: 'The compiled Twext output is required.' });
+      }
+      if (errors.length > 0) throw fieldErrors(errors);
 
-    if (!isValidNamespace(namespace)) throw notFound();
-    const [owner] = await sql`SELECT * FROM users WHERE namespace = ${namespace}`;
-    if (!owner) throw notFound('No such publishing account.');
-    if (req.auth.user.namespace !== namespace && req.auth.user.role !== 'admin') {
-      throw forbidden('You can only publish to your own namespace.');
-    }
+      if (!isValidNamespace(namespace)) throw notFound();
+      const [owner] = await sql`SELECT * FROM users WHERE namespace = ${namespace}`;
+      if (!owner) throw notFound('No such publishing account.');
+      if (req.auth.user.namespace !== namespace && req.auth.user.role !== 'admin') {
+        throw forbidden('You can only publish to your own namespace.');
+      }
 
-    const row = await publishVersion(sql, config, owner, { id, manifest, code });
-    res.status(201).json(versionToObject(row, config));
-  });
+      const row = await publishVersion(sql, config, owner, { id, manifest, code });
+      res.status(201).json(versionToObject(row, config));
+    },
+  );
 
   router.get('/@:namespace/:id/versions/:version', async (req, res) => {
     const row = await resolveVersion(req.params);
@@ -247,7 +251,7 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
   const blobRelative = path.join('blobs', owner.namespace, id, `${version}.js`);
   const blobAbs = path.join(config.dataDir, blobRelative);
   const tmpDir = path.join(config.dataDir, 'tmp');
-  mkdirSync(tmpDir, { recursive: true });
+  await mkdir(tmpDir, { recursive: true });
   const tmpPath = path.join(tmpDir, `upload-${randomBytes(8).toString('hex')}.tmp`);
 
   const searchText = buildSearchText({
@@ -258,6 +262,7 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
   });
 
   const finalStatus = owner.has_published ? 'published' : 'pending';
+  let renamed = false;
 
   try {
     return await sql.begin(async (tx) => {
@@ -294,9 +299,10 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
         RETURNING *
       `;
 
-      writeFileSync(tmpPath, code);
-      mkdirSync(path.dirname(blobAbs), { recursive: true });
-      renameSync(tmpPath, blobAbs);
+      await writeFile(tmpPath, code);
+      await mkdir(path.dirname(blobAbs), { recursive: true });
+      await rename(tmpPath, blobAbs);
+      renamed = true;
 
       const [row] = await tx`
         UPDATE versions
@@ -308,7 +314,11 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
       return row;
     });
   } catch (error) {
-    rmSync(tmpPath, { force: true });
+    if (renamed) {
+      rmSync(blobAbs, { force: true });
+    } else {
+      rmSync(tmpPath, { force: true });
+    }
     if (error.code === '23505') {
       if (error.constraint === 'versions_one_pending_idx') {
         throw forbidden('The owner already has a version awaiting review.');

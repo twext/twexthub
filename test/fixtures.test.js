@@ -15,7 +15,7 @@ before(async () => {
 });
 beforeEach(resetDb);
 after(async () => {
-  (await boot()).sql.end();
+  await (await boot()).sql.end();
 });
 
 test('fixture greeter round-trips byte-for-byte', async () => {
@@ -24,7 +24,8 @@ test('fixture greeter round-trips byte-for-byte', async () => {
   const ns = owner.user.namespace;
 
   const manifest = YAML.parse(fs.readFileSync(path.join(FIXTURES, 'greeter', 'twext.yml'), 'utf8'));
-  const code = fs.readFileSync(path.join(FIXTURES, 'greeter', 'dist', 'Greeter.js'), 'latin1');
+  const compiled = fs.readFileSync(path.join(FIXTURES, 'greeter', 'dist', 'Greeter.js'));
+  const code = compiled.toString('latin1');
   const id = manifest.extension.id;
   const version = manifest.version;
 
@@ -65,7 +66,11 @@ test('fixture greeter round-trips byte-for-byte', async () => {
 
   const dl = await request(app).get(`/v0/@${ns}/${id}/versions/${version}/download`).expect(200);
   assert.match(dl.headers['content-type'], /javascript/);
-  assert.equal(dl.text, code, 'downloaded bytes must match the compiled fixture exactly');
+  assert.deepEqual(
+    Buffer.from(dl.text, 'latin1'),
+    compiled,
+    'downloaded bytes must match the compiled fixture exactly',
+  );
 
   // extension detail exposes colors and latest version
   const detail = await request(app).get(`/v0/@${ns}/${id}`).expect(200);
@@ -80,7 +85,9 @@ test('fixture hello auto-publishes after first approval', async () => {
   const ns = owner.user.namespace;
 
   const manifest = YAML.parse(fs.readFileSync(path.join(FIXTURES, 'hello', 'twext.yml'), 'utf8'));
-  const code = fs.readFileSync(path.join(FIXTURES, 'hello', 'dist', 'Hello.js'), 'latin1');
+  const compiled = fs.readFileSync(path.join(FIXTURES, 'hello', 'dist', 'Hello.js'));
+  const code = compiled.toString('latin1');
+  const replaced = code.replace('hello, world', 'hello again');
   const id = manifest.extension.id;
   const version = manifest.version;
 
@@ -117,11 +124,11 @@ test('fixture hello auto-publishes after first approval', async () => {
     .set(bearer(owner.token))
     .send({
       manifest: { ...publishBody, version: '0.2.0' },
-      code: code.replace('hello, world', 'hello again'),
+      code: replaced,
     })
     .expect(201);
   assert.equal(pub2.body.status, 'published');
 
   const dl = await request(app).get(`/v0/@${ns}/${id}/versions/0.2.0/download`).expect(200);
-  assert.equal(dl.text, code.replace('hello, world', 'hello again'));
+  assert.deepEqual(Buffer.from(dl.text, 'latin1'), Buffer.from(replaced, 'latin1'));
 });

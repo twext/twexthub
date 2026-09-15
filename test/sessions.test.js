@@ -9,7 +9,7 @@ before(async () => {
 });
 beforeEach(resetDb);
 after(async () => {
-  (await boot()).sql.end();
+  await (await boot()).sql.end();
 });
 
 test('sessions lists only the current session for a user', async () => {
@@ -37,10 +37,11 @@ test('deleting a session revokes it', async () => {
   const { user, token } = await signupAndAccept(app, uniqNs());
   const ns = user.namespace;
 
-  await request(app)
+  const login = await request(app)
     .post('/v0/auth/login')
     .send({ namespace: ns, password: 'password123' })
     .expect(200);
+  const secondToken = login.body.token;
 
   const list = await request(app).get('/v0/sessions').set(bearer(token)).expect(200);
   assert.equal(list.body.data.length, 2);
@@ -50,6 +51,8 @@ test('deleting a session revokes it', async () => {
 
   const after = await request(app).get('/v0/sessions').set(bearer(token)).expect(200);
   assert.equal(after.body.data.length, 1);
+
+  await request(app).get('/v0/auth/me').set(bearer(secondToken)).expect(401);
 });
 
 test('automation tokens cannot list sessions', async () => {

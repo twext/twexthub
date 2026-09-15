@@ -44,7 +44,7 @@ CI can publish with automation tokens created at `POST /v0/tokens`; the `publish
 
 ## Installation
 
-The server runs on Node.js >= 24 (ESM) and needs a Postgres database it can reach; `database.url` in `config.yaml` is the only setting that has no default.
+The server runs on Node.js >= 24 (ESM) and needs a Postgres database it can reach. The checked-in `config.yaml` points at a local development database (`localhost:5432`); deployments must override `database.url` — or set `TWEXTHUB_DATABASE_URL` — since the server refuses to boot without one.
 
 ```sh
 npm install

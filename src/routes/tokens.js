@@ -1,35 +1,14 @@
 import { Router } from 'express';
 import { hashToken, newToken, requireSession } from '../auth.js';
 import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
-import { fieldErrors, forbidden, HttpError, notFound } from '../errors.js';
-import { isPlainObject } from '../util.js';
+import { fieldErrors, forbidden, notFound } from '../errors.js';
 import { automationTokenToObject } from '../serialize.js';
+import { requireObjectBody, resolveTargetUser } from './shared.js';
 
 const SCOPES = ['publish', 'yank'];
 
 export function makeTokensRouter({ sql, config }) {
   const router = Router();
-
-  async function resolveTargetUser(req) {
-    const me = req.auth.user;
-    const ns = req.query.namespace;
-    if (ns === undefined) return me;
-    if (me.role !== 'admin' && ns !== me.namespace) {
-      throw forbidden('Only an admin can inspect another account.');
-    }
-    const [user] = await sql`SELECT * FROM users WHERE namespace = ${ns}`;
-    if (!user) throw notFound('No such user.');
-    return user;
-  }
-
-  function validateTokenBody(body) {
-    if (!isPlainObject(body)) {
-      throw new HttpError(422, {
-        title: 'Validation Error',
-        detail: 'Request body must be a JSON object.',
-      });
-    }
-  }
 
   function validateScopes(scopes) {
     const errors = [];
@@ -47,7 +26,7 @@ export function makeTokensRouter({ sql, config }) {
   }
 
   router.get('/', requireSession, async (req, res) => {
-    const user = await resolveTargetUser(req);
+    const user = await resolveTargetUser(sql, req);
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor);
 
@@ -71,7 +50,7 @@ export function makeTokensRouter({ sql, config }) {
   });
 
   router.post('/', requireSession, async (req, res) => {
-    validateTokenBody(req.body);
+    requireObjectBody(req);
     const { name, scopes, expiresInDays } = req.body;
 
     const errors = [];
@@ -101,7 +80,7 @@ export function makeTokensRouter({ sql, config }) {
   });
 
   router.patch('/:id', requireSession, async (req, res) => {
-    validateTokenBody(req.body);
+    requireObjectBody(req);
     const { name, scopes } = req.body;
     if (name === undefined && scopes === undefined) {
       throw fieldErrors([{ field: 'body', message: 'Provide at least name or scopes.' }]);
@@ -109,7 +88,7 @@ export function makeTokensRouter({ sql, config }) {
 
     const targetId = Number(req.params.id);
     const [row] =
-      Number.isInteger(targetId) && targetId > 0
+      Number.isSafeInteger(targetId) && targetId > 0
         ? await sql`SELECT * FROM automation_tokens WHERE id = ${targetId}`
         : [];
     if (!row) throw notFound();
@@ -125,12 +104,10 @@ export function makeTokensRouter({ sql, config }) {
         { field: 'name', message: 'Name must be a non-empty string of at most 80 characters.' },
       ]);
     }
-    const cleanName = name === undefined ? undefined : name;
-
     const patch = {};
     const columns = [];
-    if (cleanName !== undefined) {
-      patch.name = cleanName;
+    if (name !== undefined) {
+      patch.name = name;
       columns.push('name');
     }
     if (scopes !== undefined) {
@@ -151,7 +128,7 @@ export function makeTokensRouter({ sql, config }) {
   router.delete('/:id', requireSession, async (req, res) => {
     const targetId = Number(req.params.id);
     const [row] =
-      Number.isInteger(targetId) && targetId > 0
+      Number.isSafeInteger(targetId) && targetId > 0
         ? await sql`SELECT * FROM automation_tokens WHERE id = ${targetId}`
         : [];
     if (!row) throw notFound();

@@ -9,7 +9,7 @@ before(async () => {
 });
 beforeEach(resetDb);
 after(async () => {
-  (await boot()).sql.end();
+  await (await boot()).sql.end();
 });
 
 function manifest(obj = {}) {

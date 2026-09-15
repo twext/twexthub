@@ -1,23 +1,15 @@
 import { Router } from 'express';
 import { hashToken, newToken, requireAuth } from '../auth.js';
 import { hashPassword, verifyPassword } from '../password.js';
-import { fieldErrors, HttpError, conflict, unauthorized } from '../errors.js';
-import { isPlainObject, isValidNamespace } from '../util.js';
+import { fieldErrors, conflict, unauthorized } from '../errors.js';
+import { isValidNamespace } from '../util.js';
 import { userToObject } from '../serialize.js';
+import { requireObjectBody } from './shared.js';
 
 export function makeAuthRouter({ sql, config, rateLimiter }) {
   const router = Router();
   const scrypt = config.auth.scrypt;
   const sessionTtlMs = config.auth.sessionTtlDays * 86_400_000;
-
-  function requireObjectBody(req) {
-    if (!isPlainObject(req.body)) {
-      throw new HttpError(422, {
-        title: 'Validation Error',
-        detail: 'Request body must be a JSON object.',
-      });
-    }
-  }
 
   async function createSession(tx, userId) {
     const token = newToken();
@@ -57,21 +49,22 @@ export function makeAuthRouter({ sql, config, rateLimiter }) {
     const effectiveDisplayName =
       typeof displayName === 'string' && displayName.length > 0 ? displayName : namespace;
 
-    const recordSignup = await rateLimiter.signupCheck(`signup:${req.ip}`);
+    await rateLimiter.signupCheck(`signup:${req.ip}`);
+    const passwordHash = await hashPassword(password, scrypt);
 
     let user;
     let token;
     try {
       await sql.begin(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(hashtext('signup-bootstrap'))`;
         const [{ count }] = await tx`SELECT count(*)::int AS count FROM users`;
         const role = count === 0 ? 'admin' : 'normal';
         [user] = await tx`
           INSERT INTO users (namespace, display_name, password_hash, role)
-          VALUES (${namespace}, ${effectiveDisplayName}, ${hashPassword(password, scrypt)}, ${role})
+          VALUES (${namespace}, ${effectiveDisplayName}, ${passwordHash}, ${role})
           RETURNING *
         `;
         token = await createSession(tx, user.id);
-        await recordSignup(tx);
       });
     } catch (error) {
       if (error.code === '23505') throw conflict('That namespace is already taken.');
@@ -84,22 +77,26 @@ export function makeAuthRouter({ sql, config, rateLimiter }) {
   router.post('/login', async (req, res) => {
     requireObjectBody(req);
     const { namespace, password } = req.body;
-    if (typeof namespace !== 'string' || typeof password !== 'string') {
+    if (
+      typeof namespace !== 'string' ||
+      !isValidNamespace(namespace) ||
+      typeof password !== 'string'
+    ) {
       throw unauthorized('Invalid namespace or password.');
     }
 
-    const recordFailure = await rateLimiter.loginCheck(`login:${namespace}|${req.ip}`);
+    const recordFailures = await Promise.all([
+      rateLimiter.loginCheck(`login:${namespace}|${req.ip}`),
+      rateLimiter.loginCheck(`login:ip:${req.ip}`),
+    ]);
 
     const [user] = await sql`SELECT * FROM users WHERE namespace = ${namespace}`;
-    if (!user || !verifyPassword(password, user.password_hash)) {
-      await recordFailure();
+    if (!user || !(await verifyPassword(password, user.password_hash))) {
+      await Promise.all(recordFailures.map((record) => record()));
       throw unauthorized('Invalid namespace or password.');
     }
 
-    const token = await sql.begin(async (tx) => {
-      const tokenText = await createSession(tx, user.id);
-      return tokenText;
-    });
+    const token = await createSession(sql, user.id);
     res.json({ user: userToObject(user), token });
   });
 

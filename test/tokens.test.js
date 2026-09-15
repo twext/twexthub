@@ -9,7 +9,7 @@ before(async () => {
 });
 beforeEach(resetDb);
 after(async () => {
-  (await boot()).sql.end();
+  await (await boot()).sql.end();
 });
 
 function manifest(obj = {}) {
@@ -42,6 +42,8 @@ test('create/list/update/delete automation tokens', async () => {
   await request(app).delete(`/v0/tokens/${id}`).set(bearer(token)).expect(204);
   const after = await request(app).get('/v0/tokens').set(bearer(token)).expect(200);
   assert.equal(after.body.data.length, 0);
+
+  await request(app).get('/v0/auth/me').set(bearer(created.body.token)).expect(401);
 });
 
 test('automation token can publish with publish scope', async () => {

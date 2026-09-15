@@ -718,7 +718,8 @@ components:
     Limit:
       name: limit
       in: query
-      schema: { type: integer, default: 20, maximum: 50 }
+      schema: { type: integer, minimum: 1, default: 20 }
+      description: Values above the server cap are clamped to the cap, not rejected. The default cap is 50.
     NamespacePath:
       name: namespace
       in: path
@@ -852,7 +853,7 @@ components:
         - type: object
           required: [author, license, versions]
           properties:
-            author: { type: string }
+            author: { type: ['string', 'null'] }
             license: { type: string }
             color1: { type: string }
             color2: { type: string }
@@ -872,7 +873,7 @@ components:
         name: { type: string }
         license: { type: string }
         description: { type: string }
-        author: { type: string }
+        author: { type: ['string', 'null'] }
         createdAt: { type: string, format: date-time }
         publishedAt:
           { type: string, format: date-time, description: Absent while pending or rejected. }
@@ -920,8 +921,7 @@ components:
       type: object
       required: [type, title, status]
       properties:
-        type:
-          { type: string, format: uri, example: 'https://hub.twext.dev/errors/validation-error' }
+        type: { type: string, format: uri, example: 'about:blank' }
         title: { type: string, example: 'Validation Error' }
         status: { type: integer, example: 422 }
         detail: { type: string }

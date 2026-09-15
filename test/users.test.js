@@ -9,7 +9,7 @@ before(async () => {
 });
 beforeEach(resetDb);
 after(async () => {
-  (await boot()).sql.end();
+  await (await boot()).sql.end();
 });
 
 test('users list is public and includes created users', async () => {

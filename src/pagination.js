@@ -15,13 +15,20 @@ export function encodeCursor(payload) {
 }
 
 export function decodeCursor(raw) {
-  if (typeof raw !== 'string' || raw.length === 0) return null;
-  try {
-    const parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
-    return parsed && typeof parsed === 'object' ? parsed : null;
-  } catch {
-    return null;
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== 'string' || raw.length === 0) {
+    throw new HttpError(400, { title: 'Bad Request', detail: 'Invalid cursor.' });
   }
+  let parsed;
+  try {
+    parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
+  } catch {
+    throw new HttpError(400, { title: 'Bad Request', detail: 'Invalid cursor.' });
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    throw new HttpError(400, { title: 'Bad Request', detail: 'Invalid cursor.' });
+  }
+  return parsed;
 }
 
 export function cursorResponse(page, hasMore, keysFromLast) {

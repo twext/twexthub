@@ -19,8 +19,13 @@ export function createApp(opts = {}) {
 
   const app = express();
   app.disable('x-powered-by');
-  app.set('trust proxy', opts.trustProxy ?? false);
-  app.use(express.json({ limit: '25mb' }));
+  app.set('trust proxy', opts.trustProxy ?? config.trustProxy ?? false);
+
+  const jsonBody = express.json({ limit: '100kb' });
+  app.use((req, res, next) => {
+    const isPublish = req.method === 'POST' && /\/@[^/?]+\/[^/?]+\/versions$/.test(req.path);
+    return isPublish ? next() : jsonBody(req, res, next);
+  });
   app.use(makeAuthenticate(sql));
 
   const rateLimiter = makeRateLimiter(sql, config);

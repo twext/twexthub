@@ -1,7 +1,7 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAccept } from './helpers.mjs';
+import { boot, resetDb, bearer, uniqNs, signup, signupAccept } from './helpers.mjs';
 
 let app;
 before(async () => {
@@ -9,7 +9,7 @@ before(async () => {
 });
 beforeEach(resetDb);
 after(async () => {
-  (await boot()).sql.end();
+  await (await boot()).sql.end();
 });
 
 test('login with correct password returns a session', async () => {
@@ -45,7 +45,7 @@ test('login rate limit: failed attempts produce 429', async () => {
   }
   const limited = await request(app)
     .post('/v0/auth/login')
-    .send({ namespace: ns, password: 'password123' })
+    .send({ namespace: ns, password: 'wrong-password' })
     .expect(429);
   assert.ok(limited.headers['retry-after']);
 });
@@ -110,12 +110,19 @@ test('me: valid token 200, garbage 401, none 401', async () => {
 });
 
 test('terms gate: 403 until accept', async () => {
-  const { token } = await signupAccept(app, uniqNs());
+  const res = await signup(app, uniqNs());
+  const { token } = res.body;
+  const ns = res.body.user.namespace;
   await request(app).get('/v0/auth/me').set(bearer(token)).expect(200);
-  await request(app).get('/v0/extensions').set(bearer(token)).expect(403);
+  await request(app)
+    .patch(`/v0/users/${ns}`)
+    .set(bearer(token))
+    .send({ displayName: 'Updated' })
+    .expect(403);
   await request(app).post('/v0/terms/accept').set(bearer(token)).expect(204);
-  await request(app).get('/v0/extensions').set(bearer(token)).expect(200);
-});
-after(async () => {
-  process.exit(0);
+  await request(app)
+    .patch(`/v0/users/${ns}`)
+    .set(bearer(token))
+    .send({ displayName: 'Updated' })
+    .expect(200);
 });

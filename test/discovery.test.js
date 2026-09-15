@@ -9,7 +9,7 @@ before(async () => {
 });
 beforeEach(resetDb);
 after(async () => {
-  (await boot()).sql.end();
+  await (await boot()).sql.end();
 });
 
 function manifest(id, version, extra = {}) {
@@ -53,6 +53,10 @@ test('extensions lists published extensions, newest first, latest version each',
   await publish(owner.token, ns, 'alpha', '1.1.0').expect(201);
 
   const r = await request(app).get('/v0/extensions').expect(200);
+  assert.deepEqual(
+    r.body.data.map((e) => e.id),
+    ['alpha', 'beta'],
+  );
   const byId = Object.fromEntries(r.body.data.map((e) => [e.id, e.version]));
   assert.deepEqual(Object.keys(byId).sort(), ['alpha', 'beta']);
   assert.equal(byId.alpha, '1.1.0');

@@ -72,7 +72,8 @@ export function tooManyRequests(retryAfterSeconds) {
   });
 }
 
-export function errorHandler(error, req, res, _next) {
+export function errorHandler(error, req, res, next) {
+  if (res.headersSent) return next(error);
   if (error instanceof HttpError) {
     if (error.retryAfter) res.set('Retry-After', String(Math.ceil(error.retryAfter)));
     return res.status(error.status).type('application/problem+json').json(error.toJSON());
@@ -89,7 +90,7 @@ export function errorHandler(error, req, res, _next) {
       .type('application/problem+json')
       .json(new HttpError(413, { title: 'Payload Too Large' }).toJSON());
   }
-  console.error(error);
+  console.error({ message: error?.message, code: error?.code, stack: error?.stack });
   return res
     .status(500)
     .type('application/problem+json')

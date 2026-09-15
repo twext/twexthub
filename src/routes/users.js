@@ -4,9 +4,10 @@ import { Router } from 'express';
 import { hashPassword } from '../password.js';
 import { requireSession } from '../auth.js';
 import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
-import { fieldErrors, forbidden, HttpError, notFound } from '../errors.js';
-import { isPlainObject, isValidNamespace } from '../util.js';
+import { fieldErrors, forbidden, notFound } from '../errors.js';
+import { isValidNamespace } from '../util.js';
 import { userToObject } from '../serialize.js';
+import { requireObjectBody } from './shared.js';
 
 export function makeUsersRouter({ sql, config, termsGate }) {
   const router = Router();
@@ -45,12 +46,7 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     if (req.auth.user.namespace !== target.namespace && req.auth.user.role !== 'admin') {
       throw forbidden('Only an admin can update another account.');
     }
-    if (!isPlainObject(req.body)) {
-      throw new HttpError(422, {
-        title: 'Validation Error',
-        detail: 'Request body must be a JSON object.',
-      });
-    }
+    requireObjectBody(req);
 
     const { displayName, password, role } = req.body;
     if (displayName === undefined && password === undefined && role === undefined) {
@@ -84,7 +80,7 @@ export function makeUsersRouter({ sql, config, termsGate }) {
       columns.push('role');
     }
     if (password !== undefined) {
-      patch.password_hash = hashPassword(password, config.auth.scrypt);
+      patch.password_hash = await hashPassword(password, config.auth.scrypt);
       columns.push('password_hash');
     }
 

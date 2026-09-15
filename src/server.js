@@ -15,7 +15,7 @@ export async function bootstrap(config = loadConfig()) {
   const sql = createDb(config);
   await runMigrations(sql);
   await seedLegalDocuments(sql);
-  await reconcileOnBoot(sql, config.dataDir);
+  await reconcileOnBoot(sql, config);
   const { app } = createApp({ config, sql });
   return { app, sql, config };
 }
@@ -28,8 +28,13 @@ if (isMain) {
   const server = app.listen(config.port, () => {
     console.log(`${product.name} v${product.version} listening on http://localhost:${config.port}`);
   });
+  let shuttingDown = false;
   const shutdown = async () => {
-    server.close();
+    if (shuttingDown) return;
+    shuttingDown = true;
+    const force = setTimeout(() => server.closeAllConnections(), 5000);
+    await new Promise((resolve) => server.close(resolve));
+    clearTimeout(force);
     await sql.end();
     process.exit(0);
   };

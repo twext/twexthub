@@ -10,6 +10,7 @@ export const DEFAULTS = {
   apiRoot: product.defaults?.apiRoot ?? '/v0',
   publicBaseUrl: 'http://localhost:3000',
   requireHttps: false,
+  trustProxy: false,
   database: {
     url: null,
     maxConnections: 10,
@@ -34,7 +35,7 @@ function mergeDeep(base, override) {
   if (override === undefined || override === null) return base;
   if (Array.isArray(base)) return override;
   if (typeof base === 'object' && base !== null) {
-    const out = { ...base };
+    const out = structuredClone(base);
     for (const [key, value] of Object.entries(override)) {
       if (value !== undefined) out[key] = mergeDeep(base[key], value);
     }
@@ -49,6 +50,7 @@ const ENV_OVERRIDES = [
   ['apiRoot', 'TWEXTHUB_API_ROOT'],
   ['publicBaseUrl', 'TWEXTHUB_PUBLIC_BASE_URL'],
   ['requireHttps', 'TWEXTHUB_REQUIRE_HTTPS'],
+  ['trustProxy', 'TWEXTHUB_TRUST_PROXY'],
   ['database.url', 'TWEXTHUB_DATABASE_URL'],
   ['database.maxConnections', 'TWEXTHUB_DATABASE_MAX_CONNECTIONS'],
   ['auth.sessionTtlDays', 'TWEXTHUB_SESSION_TTL_DAYS'],
@@ -60,13 +62,27 @@ const ENV_OVERRIDES = [
   ['pagination.maxLimit', 'TWEXTHUB_PAGINATION_MAX_LIMIT'],
 ];
 
-function coerceEnvValue(raw, current) {
-  if (typeof current === 'boolean') return raw === 'true';
-  if (typeof current === 'number') return Number(raw);
+function coerceEnvValue(raw, current, envName) {
+  if (typeof current === 'boolean') {
+    if (raw === 'true' || raw === '1') return true;
+    if (raw === 'false' || raw === '0') return false;
+    throw new Error(`${envName} must be "true" or "false" (got "${raw}")`);
+  }
+  if (typeof current === 'number') {
+    const n = Number(raw);
+    if (!Number.isFinite(n)) throw new Error(`${envName} must be a number (got "${raw}")`);
+    return n;
+  }
   return raw;
 }
 
-// "v0", "/v0", "/v0/" all mean the same thing; "''" or "/" means "no prefix".
+function coerceTrustProxy(raw) {
+  if (raw === 'true') return true;
+  if (raw === 'false' || raw === '0') return false;
+  if (/^[1-9]\d*$/.test(raw)) return Number(raw);
+  return raw;
+}
+
 function applyEnvOverrides(config) {
   for (const [key, envName] of ENV_OVERRIDES) {
     const raw = process.env[envName];
@@ -74,7 +90,11 @@ function applyEnvOverrides(config) {
     const parts = key.split('.');
     const target = parts.slice(0, -1).reduce((acc, part) => acc[part], config);
     const last = parts[parts.length - 1];
-    target[last] = coerceEnvValue(raw, target[last]);
+    if (key === 'trustProxy') {
+      target[last] = coerceTrustProxy(raw);
+      continue;
+    }
+    target[last] = coerceEnvValue(raw, target[last], envName);
   }
 }
 

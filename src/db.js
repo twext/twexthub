@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
@@ -15,28 +15,30 @@ export function createDb(config) {
 }
 
 export async function runMigrations(sql, migrationsDir = MIGRATIONS_DIR) {
-  await sql.unsafe(`
-    CREATE TABLE IF NOT EXISTS schema_migrations (
-      version TEXT PRIMARY KEY,
-      applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    )
-  `);
-
   const files = readdirSync(migrationsDir)
     .filter((file) => /^\d+.*\.sql$/.test(file))
     .sort();
 
-  const appliedRows = await sql`SELECT version FROM schema_migrations`;
-  const applied = new Set(appliedRows.map((row) => row.version));
+  await sql.begin(async (tx) => {
+    await tx`SELECT pg_advisory_xact_lock(32001)`;
 
-  for (const file of files) {
-    if (applied.has(file)) continue;
-    const body = readFileSync(path.join(migrationsDir, file), 'utf8');
-    await sql.begin(async (tx) => {
+    await tx.unsafe(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version TEXT PRIMARY KEY,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+
+    const appliedRows = await tx`SELECT version FROM schema_migrations`;
+    const applied = new Set(appliedRows.map((row) => row.version));
+
+    for (const file of files) {
+      if (applied.has(file)) continue;
+      const body = readFileSync(path.join(migrationsDir, file), 'utf8');
       await tx.unsafe(body);
       await tx`INSERT INTO schema_migrations (version) VALUES (${file})`;
-    });
-  }
+    }
+  });
 }
 
 export async function seedLegalDocuments(sql) {
@@ -48,7 +50,8 @@ export async function seedLegalDocuments(sql) {
   `;
 }
 
-export async function reconcileOnBoot(sql, dataDir) {
+export async function reconcileOnBoot(sql, config) {
+  const dataDir = config.dataDir;
   const staging = await sql`SELECT * FROM versions WHERE status = 'staging'`;
   for (const row of staging) {
     const blobAbs = path.join(dataDir, row.blob_path);
@@ -72,8 +75,26 @@ export async function reconcileOnBoot(sql, dataDir) {
   }
 
   const tmpDir = path.join(dataDir, 'tmp');
-  rmSync(tmpDir, { recursive: true, force: true });
   mkdirSync(tmpDir, { recursive: true });
+  const cutoff = Date.now() - 3600_000;
+  for (const entry of readdirSync(tmpDir)) {
+    const entryPath = path.join(tmpDir, entry);
+    try {
+      const st = statSync(entryPath);
+      if (st.isFile() && st.mtimeMs < cutoff) unlinkSync(entryPath);
+    } catch {
+      // another process may have already removed it
+    }
+  }
+
+  const maxWindow = Math.max(
+    config.rateLimits.loginWindowMinutes,
+    config.rateLimits.signupWindowMinutes,
+  );
+  const rateCutoff = new Date(Date.now() - maxWindow * 60_000);
+  await sql`DELETE FROM rate_limit_entries WHERE window_start < ${rateCutoff}`;
+
+  await sql`DELETE FROM sessions WHERE expires_at < now()`;
 }
 
 export function ensureDataDirs(dataDir) {

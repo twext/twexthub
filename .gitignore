@@ -81,6 +81,9 @@ out
 # Nuxt.js build / generate output
 .nuxt
 dist
+# The compiled twext fixtures are checked in so the suite runs from a clean clone.
+!test-fixtures/*/dist/
+!test-fixtures/*/dist/**
 .output
 
 # Gatsby files
@@ -141,3 +144,7 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# TwextHub runtime data
+data/
+*.db

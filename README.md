@@ -49,8 +49,11 @@ The server runs on Node.js >= 24 (ESM) and needs a Postgres database it can reac
 ```sh
 npm install
 createdb twexthub
+export TWEXTHUB_DATABASE_URL=postgres://user:pass@localhost:5432/twexthub
 npm start
 ```
+
+`TWEXTHUB_DATABASE_URL` (or the `database.url` key in `config.yaml`) must point at the database created above — use the same user, password, and host as the `createdb` invocation (a local `postgres` superuser with no password maps to `postgres://postgres@localhost:5432/twexthub`).
 
 Migrations in `migrations/*.sql` run in order on boot, or ahead of time with `npm run migrate`. The first account created on a fresh database gets role `admin`.
 

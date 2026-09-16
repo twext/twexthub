@@ -190,6 +190,7 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     const row = await resolveVersion(req.params);
+    if (row.status !== 'published') throw notFound();
     if (req.auth.user.namespace !== namespace && req.auth.user.role !== 'admin') {
       throw forbidden('You can only yank your own extensions.');
     }

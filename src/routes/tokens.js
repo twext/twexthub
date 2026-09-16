@@ -131,6 +131,7 @@ export function makeTokensRouter({ sql, config }) {
       WHERE id = ${targetId}
       RETURNING *
     `;
+    if (!updated) throw notFound();
 
     res.json(automationTokenToObject(updated));
   });

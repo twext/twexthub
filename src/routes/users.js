@@ -98,6 +98,7 @@ export function makeUsersRouter({ sql, config, termsGate }) {
       }
       return tx`SELECT * FROM users WHERE id = ${target.id}`;
     });
+    if (!updated) throw notFound();
 
     res.json(userToObject(updated));
   });

@@ -4,12 +4,13 @@ import request from 'supertest';
 import { boot, resetDb, bearer, uniqNs, signupAndAccept } from './helpers.mjs';
 
 let app;
+let sql;
 before(async () => {
-  ({ app } = await boot());
+  ({ app, sql } = await boot());
 });
 beforeEach(resetDb);
 after(async () => {
-  await (await boot()).sql.end();
+  await sql.end();
 });
 
 test('admin can update terms and privacy; version bumps', async () => {

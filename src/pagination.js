@@ -25,10 +25,18 @@ export function decodeCursor(raw) {
   } catch {
     throw new HttpError(400, { title: 'Bad Request', detail: 'Invalid cursor.' });
   }
-  if (!parsed || typeof parsed !== 'object') {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new HttpError(400, { title: 'Bad Request', detail: 'Invalid cursor.' });
   }
   return parsed;
+}
+
+export function requireCursorKeys(cursor, keys) {
+  for (const key of keys) {
+    if (cursor[key] === undefined || cursor[key] === null || cursor[key] === '') {
+      throw new HttpError(400, { title: 'Bad Request', detail: 'Invalid cursor.' });
+    }
+  }
 }
 
 export function cursorResponse(page, hasMore, keysFromLast) {

@@ -106,13 +106,13 @@ export function requireAdmin(req, res, next) {
 }
 
 export function makeRequireTerms(sql) {
-  let cachedVersion = null;
+  let cachedVersion;
   let cachedAt = 0;
 
   async function requireTerms(req, res, next) {
     requireAuth(req, res, () => {});
     const now = Date.now();
-    if (cachedVersion === null || now - cachedAt > 60_000) {
+    if (cachedVersion === undefined || now - cachedAt > 60_000) {
       const [terms] = await sql`SELECT version FROM legal_documents WHERE kind = 'terms'`;
       cachedVersion = terms ? terms.version : null;
       cachedAt = now;
@@ -125,7 +125,7 @@ export function makeRequireTerms(sql) {
   }
 
   requireTerms.invalidate = () => {
-    cachedVersion = null;
+    cachedVersion = undefined;
     cachedAt = 0;
   };
 

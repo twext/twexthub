@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { hashToken, newToken, requireSession } from '../auth.js';
-import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
+import { decodeCursor, encodeCursor, parseLimit, requireCursorKeys } from '../pagination.js';
 import { fieldErrors, forbidden, notFound } from '../errors.js';
 import { automationTokenToObject } from '../serialize.js';
 import { requireObjectBody, resolveTargetUser } from './shared.js';
@@ -29,6 +29,7 @@ export function makeTokensRouter({ sql, config }) {
     const user = await resolveTargetUser(sql, req);
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor);
+    if (cursor) requireCursorKeys(cursor, ['i']);
 
     const rows = await sql`
       SELECT * FROM automation_tokens
@@ -60,8 +61,18 @@ export function makeTokensRouter({ sql, config }) {
         message: 'Name must be a non-empty string of at most 80 characters.',
       });
     }
-    if (expiresInDays !== undefined && (!Number.isInteger(expiresInDays) || expiresInDays < 1)) {
-      errors.push({ field: 'expiresInDays', message: 'Must be a positive integer when provided.' });
+    if (expiresInDays !== undefined) {
+      if (!Number.isInteger(expiresInDays) || expiresInDays < 1) {
+        errors.push({
+          field: 'expiresInDays',
+          message: 'Must be a positive integer when provided.',
+        });
+      } else {
+        const expiry = new Date(Date.now() + expiresInDays * 86_400_000);
+        if (!Number.isFinite(expiry.getTime())) {
+          errors.push({ field: 'expiresInDays', message: 'Expiration is too far in the future.' });
+        }
+      }
     }
     if (errors.length > 0) throw fieldErrors(errors);
 

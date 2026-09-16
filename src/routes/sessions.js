@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { requireSession } from '../auth.js';
 import { forbidden, notFound } from '../errors.js';
-import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
+import { decodeCursor, encodeCursor, parseLimit, requireCursorKeys } from '../pagination.js';
 import { sessionToObject } from '../serialize.js';
 import { resolveTargetUser } from './shared.js';
 
@@ -12,6 +12,7 @@ export function makeSessionsRouter({ sql, config }) {
     const user = await resolveTargetUser(sql, req);
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor);
+    if (cursor) requireCursorKeys(cursor, ['i']);
 
     const rows = await sql`
       SELECT * FROM sessions

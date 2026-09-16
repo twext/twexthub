@@ -111,7 +111,7 @@ export function loadConfig(configPath = product.defaults?.configFilename ?? 'con
   config.apiRoot = normalizeApiRoot(config.apiRoot);
   if (!config.database.url) {
     throw new Error(
-      `config.yaml: database.url is required (edit ${configPath} or pass a file via --config)`,
+      `database.url is required (set it in ${configPath}, pass a file via --config, or set TWEXTHUB_DATABASE_URL)`,
     );
   }
   config.dataDir = path.resolve(process.cwd(), config.dataDir);

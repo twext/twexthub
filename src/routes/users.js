@@ -3,7 +3,7 @@ import path from 'node:path';
 import { Router } from 'express';
 import { hashPassword } from '../password.js';
 import { requireSession } from '../auth.js';
-import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
+import { decodeCursor, encodeCursor, parseLimit, requireCursorKeys } from '../pagination.js';
 import { fieldErrors, forbidden, notFound } from '../errors.js';
 import { isValidNamespace } from '../util.js';
 import { userToObject } from '../serialize.js';
@@ -15,6 +15,7 @@ export function makeUsersRouter({ sql, config, termsGate }) {
   router.get('/', async (req, res) => {
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor);
+    if (cursor) requireCursorKeys(cursor, ['i']);
 
     const rows = await sql`
       SELECT * FROM users
@@ -84,12 +85,13 @@ export function makeUsersRouter({ sql, config, termsGate }) {
       columns.push('password_hash');
     }
 
-    await sql`UPDATE users SET ${sql(patch, columns)} WHERE id = ${target.id}`;
-
-    if (password !== undefined) {
-      await sql`DELETE FROM sessions WHERE user_id = ${target.id}`;
-      await sql`DELETE FROM automation_tokens WHERE user_id = ${target.id}`;
-    }
+    await sql.begin(async (tx) => {
+      await tx`UPDATE users SET ${sql(patch, columns)} WHERE id = ${target.id}`;
+      if (password !== undefined) {
+        await tx`DELETE FROM sessions WHERE user_id = ${target.id}`;
+        await tx`DELETE FROM automation_tokens WHERE user_id = ${target.id}`;
+      }
+    });
 
     const [updated] = await sql`SELECT * FROM users WHERE id = ${target.id}`;
     res.json(userToObject(updated));

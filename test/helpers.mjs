@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import request from 'supertest';
+import assert from 'node:assert/strict';
 import { bootstrap } from '../src/server.js';
 
 export const TEST_DATABASE_URL =
@@ -38,7 +39,14 @@ export function makeConfig(overrides = {}) {
 }
 
 export async function boot(overrides = {}) {
-  if (cached) return cached;
+  if (cached) {
+    if (Object.keys(overrides).length > 0) {
+      throw new Error(
+        'boot() was already called; overrides are ignored. Use a separate test file.',
+      );
+    }
+    return cached;
+  }
   const config = makeConfig(overrides);
   const { app, sql } = await bootstrap(config);
   cached = { app, sql, config };
@@ -67,8 +75,9 @@ export async function signup(app, namespace, password = 'password123', displayNa
 
 export async function signupAndAccept(app, namespace, password = 'password123') {
   const r = await signup(app, namespace, password);
-  if (r.status !== 201) return r;
-  await request(app).post('/v0/terms/accept').set(bearer(r.body.token));
+  assert.equal(r.status, 201, `signup failed: ${JSON.stringify(r.body)}`);
+  const accepted = await request(app).post('/v0/terms/accept').set(bearer(r.body.token));
+  assert.equal(accepted.status, 204, `terms accept failed: ${JSON.stringify(accepted.body)}`);
   return r.body;
 }
 

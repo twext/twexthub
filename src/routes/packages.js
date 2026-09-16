@@ -267,6 +267,7 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
   const tmpDir = path.join(config.dataDir, 'tmp');
   await mkdir(tmpDir, { recursive: true });
   const tmpPath = path.join(tmpDir, `upload-${randomBytes(8).toString('hex')}.tmp`);
+  const lockKey = `${owner.namespace}/${id}`;
 
   const searchText = buildSearchText({
     name,
@@ -281,6 +282,10 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
     await writeFile(tmpPath, code);
 
     const row = await sql.begin(async (tx) => {
+      // Serialize per namespace/extension so concurrent publishes cannot both
+      // validate against the same ceiling snapshot.
+      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+
       const [pending] = await tx`
         SELECT 1 FROM versions
         WHERE owner_id = ${owner.id} AND status IN ('staging', 'pending')

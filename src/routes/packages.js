@@ -311,6 +311,11 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
       return row;
     });
 
+    // The row commits before the blob is placed: uniqueness checks in the
+    // transaction reject duplicate/lower-version publishes, so only the
+    // committed version may write blobAbs. Renaming inside the transaction
+    // would let a rolled-back request leave its bytes at a concurrently
+    // committed version's blob path.
     await mkdir(path.dirname(blobAbs), { recursive: true });
     await rename(tmpPath, blobAbs);
     return row;

@@ -87,7 +87,7 @@ docker run -d --name twexthub \
   ghcr.io/twext/twexthub:latest
 ```
 
-Every `TWEXTHUB_*` variable corresponds to a `config.yaml` key in upper-case (e.g. `TWEXTHUB_API_ROOT`, `TWEXTHUB_REQUIRE_HTTPS`, `TWEXTHUB_SESSION_TTL_DAYS`).
+Every documented `TWEXTHUB_*` configuration variable corresponds to a `config.yaml` key in upper-case (e.g. `TWEXTHUB_API_ROOT`, `TWEXTHUB_REQUIRE_HTTPS`, `TWEXTHUB_SESSION_TTL_DAYS`). Test-only variables such as `TWEXTHUB_TEST_DATABASE_URL` are consumed by the test suite and CI only, and are not part of the configuration surface.
 
 ## Feedback and Contributing
 

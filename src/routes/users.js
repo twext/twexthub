@@ -107,11 +107,11 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     if (req.auth.user.namespace !== target.namespace && req.auth.user.role !== 'admin') {
       throw forbidden('Only an admin can delete another account.');
     }
+    await sql`DELETE FROM users WHERE id = ${target.id}`;
     await rm(path.join(config.dataDir, 'blobs', target.namespace), {
       recursive: true,
       force: true,
     });
-    await sql`DELETE FROM users WHERE id = ${target.id}`;
     res.status(204).end();
   });
 

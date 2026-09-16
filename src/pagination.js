@@ -8,8 +8,11 @@ const CURSOR_KEY_TYPES = {
     else return null;
     return Number.isSafeInteger(n) && n > 0 ? n : null;
   },
-  timestamp: (value) =>
-    typeof value === 'string' && !Number.isNaN(Date.parse(value)) ? value : null,
+  timestamp: (value) => {
+    if (typeof value !== 'string') return null;
+    const ms = Date.parse(value);
+    return Number.isNaN(ms) ? null : new Date(ms).toISOString();
+  },
   string: (value) => (typeof value === 'string' && value.length > 0 ? value : null),
 };
 

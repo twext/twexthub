@@ -331,7 +331,7 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
     await mkdir(path.dirname(blobAbs), { recursive: true });
     await rename(tmpPath, blobAbs);
 
-    const [row] = await sql.begin(async (tx) => {
+    const row = await sql.begin(async (tx) => {
       const promoted = await tx`
         UPDATE versions
         SET status = ${finalStatus},

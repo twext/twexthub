@@ -21,6 +21,7 @@ export function makeAdminRouter({ sql, termsGate }) {
         RETURNING *
       `;
       if (!row) throw notFound(`No ${kind} document to update.`);
+      termsGate.invalidate?.();
       res.json(legalDocumentToObject(row));
     };
   }

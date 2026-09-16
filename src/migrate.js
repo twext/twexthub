@@ -3,6 +3,9 @@ import { createDb, ensureDataDirs, runMigrations, seedLegalDocuments } from './d
 
 const args = process.argv.slice(2);
 const flagIndex = args.indexOf('--config');
+if (flagIndex !== -1 && args[flagIndex + 1] === undefined) {
+  throw new Error('--config requires a file path');
+}
 const configPath = flagIndex === -1 ? args[0] : args[flagIndex + 1];
 const config = loadConfig(configPath);
 ensureDataDirs(config.dataDir);

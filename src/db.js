@@ -9,6 +9,8 @@ export const MIGRATIONS_DIR = path.join(moduleDir, '..', 'migrations');
 export function createDb(config) {
   const sql = postgres(config.database.url, {
     max: config.database.maxConnections,
+    connect_timeout: config.database.connectTimeoutSeconds,
+    idle_timeout: config.database.idleTimeoutSeconds,
     onnotice: () => {},
   });
   return sql;

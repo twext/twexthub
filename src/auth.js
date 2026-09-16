@@ -106,15 +106,30 @@ export function requireAdmin(req, res, next) {
 }
 
 export function makeRequireTerms(sql) {
-  return async function requireTerms(req, res, next) {
+  let cachedVersion = null;
+  let cachedAt = 0;
+
+  async function requireTerms(req, res, next) {
     requireAuth(req, res, () => {});
-    const [terms] = await sql`SELECT version FROM legal_documents WHERE kind = 'terms'`;
+    const now = Date.now();
+    if (cachedVersion === null || now - cachedAt > 60_000) {
+      const [terms] = await sql`SELECT version FROM legal_documents WHERE kind = 'terms'`;
+      cachedVersion = terms ? terms.version : null;
+      cachedAt = now;
+    }
     const accepted = req.auth.user.terms_accepted_version;
-    if (!terms || !accepted || accepted < terms.version) {
+    if (cachedVersion === null || !accepted || accepted < cachedVersion) {
       throw forbidden('The current Terms of Service have not been accepted yet.');
     }
     next();
+  }
+
+  requireTerms.invalidate = () => {
+    cachedVersion = null;
+    cachedAt = 0;
   };
+
+  return requireTerms;
 }
 
 export function requireScope(scope) {

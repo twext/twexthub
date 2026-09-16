@@ -32,10 +32,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     `;
   }
 
-  router.get('/extensions', async (req, res) => {
-    const limit = parseLimit(config, req.query.limit);
-    const cursor = decodeCursor(req.query.cursor);
-
+  async function listLatestVersions({ limit, cursor, searchFilter = sql`` }) {
     const rows = await sql`
       SELECT * FROM (
         SELECT v.*,
@@ -45,6 +42,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
           ) AS rn
         FROM versions v
         WHERE status = 'published'
+          ${searchFilter}
       ) s
       WHERE rn = 1
         ${recentCursorCondition(cursor)}
@@ -56,10 +54,16 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     const page = hasMore ? rows.slice(0, limit) : rows;
     const nextCursor = hasMore ? encodeCursor(latestCursor(page[page.length - 1])) : null;
 
-    res.json({
+    return {
       data: page.map(extensionSummaryFromRow),
       pagination: { nextCursor, hasMore },
-    });
+    };
+  }
+
+  router.get('/extensions', async (req, res) => {
+    const limit = parseLimit(config, req.query.limit);
+    const cursor = decodeCursor(req.query.cursor);
+    res.json(await listLatestVersions({ limit, cursor }));
   });
 
   router.get('/search', async (req, res) => {
@@ -67,32 +71,10 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     const folded = query && query.length > 0 ? foldText(query) : null;
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor);
-
-    const rows = await sql`
-      SELECT * FROM (
-        SELECT v.*,
-          row_number() OVER (
-            PARTITION BY namespace, extension_id
-            ORDER BY published_at DESC, id DESC
-          ) AS rn
-        FROM versions v
-        WHERE status = 'published'
-          ${folded ? sql`AND search_text LIKE ${'%' + escapeLike(folded) + '%'}` : sql``}
-      ) s
-      WHERE rn = 1
-        ${recentCursorCondition(cursor)}
-      ORDER BY published_at DESC, namespace ASC, extension_id ASC
-      LIMIT ${limit + 1}
-    `;
-
-    const hasMore = rows.length > limit;
-    const page = hasMore ? rows.slice(0, limit) : rows;
-    const nextCursor = hasMore ? encodeCursor(latestCursor(page[page.length - 1])) : null;
-
-    res.json({
-      data: page.map(extensionSummaryFromRow),
-      pagination: { nextCursor, hasMore },
-    });
+    const searchFilter = folded
+      ? sql`AND search_text LIKE ${'%' + escapeLike(folded) + '%'}`
+      : sql``;
+    res.json(await listLatestVersions({ limit, cursor, searchFilter }));
   });
 
   router.get('/meta', (req, res) => {

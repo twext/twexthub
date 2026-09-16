@@ -90,6 +90,10 @@ export function errorHandler(error, req, res, next) {
       .type('application/problem+json')
       .json(new HttpError(413, { title: 'Payload Too Large' }).toJSON());
   }
+  const status = error?.status ?? error?.statusCode;
+  if (Number.isInteger(status) && status >= 400 && status < 500) {
+    return res.status(status).type('application/problem+json').json(new HttpError(status).toJSON());
+  }
   console.error({ message: error?.message, code: error?.code, stack: error?.stack });
   return res
     .status(500)

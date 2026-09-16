@@ -160,6 +160,7 @@ paths:
                   pagination: { $ref: '#/components/schemas/CursorPage' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '400': { $ref: '#/components/responses/BadRequest' }
 
   /sessions/{id}:
     parameters:
@@ -205,6 +206,7 @@ paths:
                   pagination: { $ref: '#/components/schemas/CursorPage' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '400': { $ref: '#/components/responses/BadRequest' }
     post:
       summary: Create an automation token
       operationId: createAutomationToken
@@ -707,6 +709,7 @@ paths:
                   pagination: { $ref: '#/components/schemas/CursorPage' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '400': { $ref: '#/components/responses/BadRequest' }
 
 components:
   parameters:
@@ -823,7 +826,7 @@ components:
 
     Manifest:
       type: object
-      required: [id, version, license, description]
+      required: [id, name, version, license, description]
       description: Mirrors the fields in twext.yml that TwextHub needs to store; not the whole manifest.
       properties:
         id: { $ref: '#/components/schemas/ExtensionId' }

@@ -14,6 +14,8 @@ export const DEFAULTS = {
   database: {
     url: null,
     maxConnections: 10,
+    connectTimeoutSeconds: 30,
+    idleTimeoutSeconds: 60,
   },
   auth: {
     sessionTtlDays: 7,

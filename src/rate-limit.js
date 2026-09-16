@@ -8,7 +8,7 @@ function windowStartFor(now, windowMinutes) {
 export function makeRateLimiter(sql, config) {
   const limits = config.rateLimits;
 
-  async function secondsUntilReset(windowMinutes) {
+  function secondsUntilReset(windowMinutes) {
     const windowStart = windowStartFor(new Date(), windowMinutes);
     const remaining = windowStart.getTime() + windowMinutes * 60_000 - Date.now();
     return Math.max(1, Math.ceil(remaining / 1000));

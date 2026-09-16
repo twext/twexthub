@@ -1,4 +1,4 @@
-import { rmSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import { Router } from 'express';
 import { hashPassword } from '../password.js';
@@ -108,7 +108,14 @@ export function makeUsersRouter({ sql, config, termsGate }) {
       throw forbidden('Only an admin can delete another account.');
     }
     await sql`DELETE FROM users WHERE id = ${target.id}`;
-    rmSync(path.join(config.dataDir, 'blobs', target.namespace), { recursive: true, force: true });
+    try {
+      await rm(path.join(config.dataDir, 'blobs', target.namespace), {
+        recursive: true,
+        force: true,
+      });
+    } catch (error) {
+      console.error(`failed to remove blobs for ${target.namespace}: ${error.message}`);
+    }
     res.status(204).end();
   });
 

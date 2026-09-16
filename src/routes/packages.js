@@ -263,9 +263,13 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
   });
 
   const finalStatus = owner.has_published ? 'published' : 'pending';
-  let renamed = false;
+  let committed = false;
 
   try {
+    await writeFile(tmpPath, code);
+    await mkdir(path.dirname(blobAbs), { recursive: true });
+    await rename(tmpPath, blobAbs);
+
     const row = await sql.begin(async (tx) => {
       const [pending] = await tx`
         SELECT 1 FROM versions
@@ -309,17 +313,13 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
       `;
       return row;
     });
-
-    await mkdir(path.dirname(blobAbs), { recursive: true });
-    await rename(tmpPath, blobAbs);
-    renamed = true;
+    committed = true;
     return row;
   } catch (error) {
-    if (renamed) {
+    if (!committed) {
       rmSync(blobAbs, { force: true });
-    } else {
-      rmSync(tmpPath, { force: true });
     }
+    rmSync(tmpPath, { force: true });
     if (error.code === '23505') {
       if (error.constraint === 'versions_one_pending_idx') {
         throw forbidden('The owner already has a version awaiting review.');

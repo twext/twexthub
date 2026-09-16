@@ -69,13 +69,23 @@ test('search filters by name/id/namespace', async () => {
   const owner = await signupAndAccept(app, uniqNs());
   const ns = owner.user.namespace;
 
-  await publish(owner.token, ns, 'banana', '1.0.0', { description: 'yellow fruit' }).expect(201);
+  await publish(owner.token, ns, 'banana', '1.0.0', {
+    description: 'yellow fruit',
+    name: 'Sweet Banana',
+  }).expect(201);
   await approvePending(admin.token, ns, 'banana');
   await publish(owner.token, ns, 'grape', '1.0.0', { description: 'purple fruit' }).expect(201);
 
-  const hit = await request(app).get('/v0/search?query=banana').expect(200);
-  assert.equal(hit.body.data.length, 1);
-  assert.equal(hit.body.data[0].id, 'banana');
+  const id = await request(app).get('/v0/search?query=banana').expect(200);
+  assert.equal(id.body.data.length, 1);
+  assert.equal(id.body.data[0].id, 'banana');
+
+  const byName = await request(app).get('/v0/search?query=Sweet').expect(200);
+  assert.equal(byName.body.data.length, 1);
+  assert.equal(byName.body.data[0].id, 'banana');
+
+  const byNs = await request(app).get(`/v0/search?query=${ns}`).expect(200);
+  assert.deepEqual(byNs.body.data.map((e) => e.id).sort(), ['banana', 'grape']);
 
   const desc = await request(app).get('/v0/search?query=purple').expect(200);
   assert.equal(desc.body.data[0].id, 'grape');

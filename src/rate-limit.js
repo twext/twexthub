@@ -35,11 +35,11 @@ export function makeRateLimiter(sql, config) {
       WHERE bucket = ${bucket} AND window_start = ${windowStart}
     `;
     if (existing && Number(existing.count) >= max) {
-      throw tooManyRequests(await secondsUntilReset(windowMinutes));
+      throw tooManyRequests(secondsUntilReset(windowMinutes));
     }
     return async () => {
       const count = await record(bucket, windowMinutes);
-      if (count > max) throw tooManyRequests(await secondsUntilReset(windowMinutes));
+      if (count > max) throw tooManyRequests(secondsUntilReset(windowMinutes));
     };
   }
 
@@ -47,7 +47,7 @@ export function makeRateLimiter(sql, config) {
     const max = limits.signupsPerIpPerWindow;
     const windowMinutes = limits.signupWindowMinutes;
     const count = await record(bucket, windowMinutes);
-    if (count > max) throw tooManyRequests(await secondsUntilReset(windowMinutes));
+    if (count > max) throw tooManyRequests(secondsUntilReset(windowMinutes));
   }
 
   const maxWindow = Math.max(limits.loginWindowMinutes, limits.signupWindowMinutes);
@@ -61,5 +61,11 @@ export function makeRateLimiter(sql, config) {
   }, 60_000);
   cleanupInterval.unref();
 
-  return { loginCheck, signupCheck };
+  return {
+    loginCheck,
+    signupCheck,
+    stop() {
+      clearInterval(cleanupInterval);
+    },
+  };
 }

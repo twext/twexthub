@@ -54,27 +54,33 @@ export async function seedLegalDocuments(sql) {
 
 export async function reconcileOnBoot(sql, config) {
   const dataDir = config.dataDir;
-  const staging = await sql`SELECT * FROM versions WHERE status = 'staging'`;
-  for (const row of staging) {
-    const blobAbs = path.join(dataDir, row.blob_path);
-    if (existsSync(blobAbs)) {
-      const [owner] = await sql`SELECT has_published FROM users WHERE id = ${row.owner_id}`;
-      const status = owner?.has_published ? 'published' : 'pending';
-      await sql`
-        UPDATE versions
-        SET status = ${status}, published_at = ${status === 'published' ? new Date() : null}
-        WHERE id = ${row.id}
-      `;
-      console.log(
-        `reconciled staging version ${row.namespace}/${row.extension_id}@${row.version} -> ${status}`,
-      );
-    } else {
-      await sql`DELETE FROM versions WHERE id = ${row.id}`;
-      console.log(
-        `removed staging version ${row.namespace}/${row.extension_id}@${row.version} (blob missing)`,
-      );
+  await sql.begin(async (tx) => {
+    await tx`SELECT pg_advisory_xact_lock(32002)`;
+    const staging = await tx`
+      SELECT * FROM versions
+      WHERE status = 'staging' AND created_at < now() - interval '1 hour'
+    `;
+    for (const row of staging) {
+      const blobAbs = path.join(dataDir, row.blob_path);
+      if (existsSync(blobAbs)) {
+        const [owner] = await tx`SELECT has_published FROM users WHERE id = ${row.owner_id}`;
+        const status = owner?.has_published ? 'published' : 'pending';
+        await tx`
+          UPDATE versions
+          SET status = ${status}, published_at = ${status === 'published' ? new Date() : null}
+          WHERE id = ${row.id}
+        `;
+        console.log(
+          `reconciled staging version ${row.namespace}/${row.extension_id}@${row.version} -> ${status}`,
+        );
+      } else {
+        await tx`DELETE FROM versions WHERE id = ${row.id}`;
+        console.log(
+          `removed staging version ${row.namespace}/${row.extension_id}@${row.version} (blob missing)`,
+        );
+      }
     }
-  }
+  });
 
   const tmpDir = path.join(dataDir, 'tmp');
   mkdirSync(tmpDir, { recursive: true });

@@ -18,7 +18,9 @@ info:
     Every authenticated (`Userspace`/`Adminspace`) endpoint requires the
     caller to have accepted the current Terms of Service; a caller who
     hasn't gets a `403` (see `Forbidden`) until they call
-    `POST /terms/accept`.
+    `POST /terms/accept`. Exemptions that stay available without
+    re-acceptance: `POST /auth/logout`, `GET /auth/me`, password-only user
+    updates, and account deletion.
 
     Bearer tokens come in two kinds. **Sessions** are created by
     `/auth/login` or `/auth/signup`, expire after 7 days, and implicitly

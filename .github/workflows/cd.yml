@@ -68,6 +68,9 @@ jobs:
             org.opencontainers.image.description=${{ github.event.repository.description }}
             org.opencontainers.image.url=${{ github.event.repository.html_url }}
             org.opencontainers.image.source=${{ github.event.repository.clone_url }}
+      - name: Fail if no image tag was generated
+        if: ${{ steps.meta.outputs.tags == '' }}
+        run: echo "No image tags were generated for ref ${{ github.ref }}." && exit 1
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .

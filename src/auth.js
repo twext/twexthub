@@ -33,7 +33,13 @@ export function makeAuthenticate(sql) {
 
     if (found && shouldTouchLastUsed(found.lastUsedAt)) {
       const table = found.tokenType === 'session' ? 'sessions' : 'automation_tokens';
-      await sql`UPDATE ${sql(table)} SET last_used_at = now() WHERE id = ${found.tokenId}`;
+      try {
+        await sql`UPDATE ${sql(table)} SET last_used_at = now() WHERE id = ${found.tokenId}`;
+      } catch (error) {
+        console.warn(
+          `failed to update last_used_at for ${table} ${found.tokenId}: ${error.message}`,
+        );
+      }
     }
     next();
   };

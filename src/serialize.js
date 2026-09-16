@@ -61,7 +61,8 @@ export function versionToObject(row, config) {
 }
 
 export function downloadUrl(config, namespace, id, version) {
-  const root = `/${normalizeApiRoot(config.apiRoot)}`;
+  const apiRoot = normalizeApiRoot(config.apiRoot);
+  const root = apiRoot ? `/${apiRoot}` : '';
   return `${config.publicBaseUrl.replace(/\/$/, '')}${root}/@${namespace}/${id}/versions/${version}/download`;
 }
 

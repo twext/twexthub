@@ -1,5 +1,5 @@
 import { existsSync, rmSync } from 'node:fs';
-import { mkdir, rename, writeFile } from 'node:fs/promises';
+import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import express, { Router } from 'express';
@@ -21,7 +21,6 @@ import { requireObjectBody } from './shared.js';
 export function makePackagesRouter({ sql, config, termsGate }) {
   const router = Router();
 
-  const publishChain = [requireAuth, termsGate, requireScope('publish')];
   const yankChain = [requireAuth, termsGate, requireScope('yank')];
   const ownerChain = [requireAuth, termsGate];
 
@@ -55,8 +54,10 @@ export function makePackagesRouter({ sql, config, termsGate }) {
 
   router.post(
     '/@:namespace/:id/versions',
+    requireAuth,
     express.json({ limit: '25mb' }),
-    ...publishChain,
+    termsGate,
+    requireScope('publish'),
     async (req, res) => {
       const { namespace, id } = req.params;
       requireObjectBody(req);
@@ -236,9 +237,9 @@ export function makePackagesRouter({ sql, config, termsGate }) {
       throw forbidden('You can only delete your own extensions.');
     }
     await sql`DELETE FROM versions WHERE namespace = ${namespace} AND extension_id = ${id}`;
-    for (const version of rows) {
-      rmSync(path.join(config.dataDir, version.blob_path), { force: true });
-    }
+    await Promise.all(
+      rows.map((version) => rm(path.join(config.dataDir, version.blob_path), { force: true })),
+    );
     res.status(204).end();
   });
 
@@ -253,7 +254,6 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
   const tmpDir = path.join(config.dataDir, 'tmp');
   await mkdir(tmpDir, { recursive: true });
   const tmpPath = path.join(tmpDir, `upload-${randomBytes(8).toString('hex')}.tmp`);
-  await writeFile(tmpPath, code);
 
   const searchText = buildSearchText({
     name,
@@ -263,12 +263,9 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
   });
 
   const finalStatus = owner.has_published ? 'published' : 'pending';
-  let committed = false;
 
   try {
     await writeFile(tmpPath, code);
-    await mkdir(path.dirname(blobAbs), { recursive: true });
-    await rename(tmpPath, blobAbs);
 
     const row = await sql.begin(async (tx) => {
       const [pending] = await tx`
@@ -313,12 +310,11 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
       `;
       return row;
     });
-    committed = true;
+
+    await mkdir(path.dirname(blobAbs), { recursive: true });
+    await rename(tmpPath, blobAbs);
     return row;
   } catch (error) {
-    if (!committed) {
-      rmSync(blobAbs, { force: true });
-    }
     rmSync(tmpPath, { force: true });
     if (error.code === '23505') {
       if (error.constraint === 'versions_one_pending_idx') {

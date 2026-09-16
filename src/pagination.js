@@ -1,7 +1,10 @@
 import { HttpError } from './errors.js';
 
 const CURSOR_KEY_TYPES = {
-  int: (value) => Number.isInteger(Number(value)) && Number(value) > 0,
+  int: (value) =>
+    (typeof value === 'number' || typeof value === 'string') &&
+    Number.isSafeInteger(Number(value)) &&
+    Number(value) > 0,
   timestamp: (value) => typeof value === 'string' && !Number.isNaN(Date.parse(value)),
   string: (value) => typeof value === 'string' && value.length > 0,
 };

@@ -44,5 +44,5 @@ export function createApp(opts = {}) {
   app.use((req, res, next) => next(notFound()));
   app.use(errorHandler);
 
-  return { app, sql, config };
+  return { app, sql, config, rateLimiter };
 }

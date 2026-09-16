@@ -25,7 +25,7 @@ test('fixture greeter round-trips byte-for-byte', async () => {
 
   const manifest = YAML.parse(fs.readFileSync(path.join(FIXTURES, 'greeter', 'twext.yml'), 'utf8'));
   const compiled = fs.readFileSync(path.join(FIXTURES, 'greeter', 'dist', 'Greeter.js'));
-  const code = compiled.toString('latin1');
+  const code = compiled.toString('utf8');
   const id = manifest.extension.id;
   const version = manifest.version;
 
@@ -67,7 +67,7 @@ test('fixture greeter round-trips byte-for-byte', async () => {
   const dl = await request(app).get(`/v0/@${ns}/${id}/versions/${version}/download`).expect(200);
   assert.match(dl.headers['content-type'], /javascript/);
   assert.deepEqual(
-    Buffer.from(dl.text, 'latin1'),
+    Buffer.from(dl.text, 'utf8'),
     compiled,
     'downloaded bytes must match the compiled fixture exactly',
   );
@@ -86,7 +86,7 @@ test('fixture hello auto-publishes after first approval', async () => {
 
   const manifest = YAML.parse(fs.readFileSync(path.join(FIXTURES, 'hello', 'twext.yml'), 'utf8'));
   const compiled = fs.readFileSync(path.join(FIXTURES, 'hello', 'dist', 'Hello.js'));
-  const code = compiled.toString('latin1');
+  const code = compiled.toString('utf8');
   const replaced = code.replace('hello, world', 'hello again');
   const id = manifest.extension.id;
   const version = manifest.version;
@@ -130,5 +130,5 @@ test('fixture hello auto-publishes after first approval', async () => {
   assert.equal(pub2.body.status, 'published');
 
   const dl = await request(app).get(`/v0/@${ns}/${id}/versions/0.2.0/download`).expect(200);
-  assert.deepEqual(Buffer.from(dl.text, 'latin1'), Buffer.from(replaced, 'latin1'));
+  assert.deepEqual(Buffer.from(dl.text, 'utf8'), Buffer.from(replaced, 'utf8'));
 });

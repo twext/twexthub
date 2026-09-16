@@ -19,7 +19,7 @@
 
 ## Highlights
 
-- Public, cursor-paginated discovery of published extensions (`/extensions`, `/search`).
+- Public, cursor-paginated discovery of published extensions (`/v0/extensions`, `/v0/search`).
 - Namespaced publishing with a per-owner moderation gate: a first publish is `pending` until an admin approves; later publishes go straight to `published`.
 - Sessions and scoped automation tokens (`publish`, `yank`).
 - Compiled blobs live on disk, not in the database. Bearer tokens are stored only as SHA-256 hashes.

@@ -5,7 +5,7 @@ import { randomBytes } from 'node:crypto';
 import express, { Router } from 'express';
 import semver from 'semver';
 import { requireAuth, requireScope } from '../auth.js';
-import { forbidden, HttpError, fieldErrors, notFound } from '../errors.js';
+import { conflict, forbidden, HttpError, fieldErrors, notFound } from '../errors.js';
 import {
   buildSearchText,
   compareSemver,
@@ -169,20 +169,32 @@ export function makePackagesRouter({ sql, config, termsGate }) {
       if (typeof reason !== 'string' || reason.trim().length === 0) {
         throw fieldErrors([{ field: 'reason', message: 'A reason is required when rejecting.' }]);
       }
-      const [updated] = await sql`
+      const updated = await sql.begin(async (tx) => {
+        const rows = await tx`
           UPDATE versions SET status = 'rejected', rejection_reason = ${reason}
-          WHERE id = ${row.id}
+          WHERE id = ${row.id} AND status = 'pending'
           RETURNING *
         `;
+        return rows[0];
+      });
+      if (!updated) {
+        throw conflict('That version is no longer pending review.');
+      }
       return res.json(versionToObject(updated, config));
     }
 
-    const [updated] = await sql`
+    const updated = await sql.begin(async (tx) => {
+      const rows = await tx`
         UPDATE versions SET status = 'published', published_at = now()
-        WHERE id = ${row.id}
+        WHERE id = ${row.id} AND status = 'pending'
         RETURNING *
       `;
-    await sql`UPDATE users SET has_published = true WHERE id = ${row.owner_id}`;
+      if (rows[0]) await tx`UPDATE users SET has_published = true WHERE id = ${row.owner_id}`;
+      return rows[0];
+    });
+    if (!updated) {
+      throw conflict('That version is no longer pending review.');
+    }
     res.json(versionToObject(updated, config));
   });
 

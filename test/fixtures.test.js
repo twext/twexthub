@@ -88,6 +88,7 @@ test('fixture hello auto-publishes after first approval', async () => {
   const compiled = fs.readFileSync(path.join(FIXTURES, 'hello', 'dist', 'Hello.js'));
   const code = compiled.toString('utf8');
   const replaced = code.replace('hello, world', 'hello again');
+  assert.notEqual(replaced, code, 'replacing the greeting must actually change the bundle');
   const id = manifest.extension.id;
   const version = manifest.version;
 

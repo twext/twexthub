@@ -1,4 +1,12 @@
-import { mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, existsSync } from 'node:fs';
+import {
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  unlinkSync,
+  existsSync,
+  rmSync,
+} from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
@@ -86,6 +94,19 @@ export async function reconcileOnBoot(sql, config) {
     }
   }
 
+  const quarantineDir = path.join(dataDir, 'quarantine');
+  for (const entry of readdirSync(quarantineDir, { withFileTypes: true })) {
+    const entryPath = path.join(quarantineDir, entry.name);
+    try {
+      const st = statSync(entryPath);
+      if (st.isDirectory() && st.mtimeMs < cutoff) {
+        rmSync(entryPath, { recursive: true, force: true });
+      }
+    } catch {
+      // another process may have already removed it
+    }
+  }
+
   const maxWindow = Math.max(
     config.rateLimits.loginWindowMinutes,
     config.rateLimits.signupWindowMinutes,
@@ -99,4 +120,5 @@ export async function reconcileOnBoot(sql, config) {
 export function ensureDataDirs(dataDir) {
   mkdirSync(path.join(dataDir, 'blobs'), { recursive: true });
   mkdirSync(path.join(dataDir, 'tmp'), { recursive: true });
+  mkdirSync(path.join(dataDir, 'quarantine'), { recursive: true });
 }

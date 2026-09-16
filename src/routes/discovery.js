@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAdmin, requireAuth } from '../auth.js';
+import { requireAdmin, requireSession } from '../auth.js';
 import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
 import { HttpError, notFound } from '../errors.js';
 import { foldText } from '../util.js';
@@ -111,7 +111,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     res.json(legalDocumentToObject(row));
   });
 
-  router.post('/terms/accept', requireAuth, async (req, res) => {
+  router.post('/terms/accept', requireSession, async (req, res) => {
     const [terms] = await sql`SELECT * FROM legal_documents WHERE kind = 'terms'`;
     if (!terms) throw notFound();
     await sql`UPDATE users SET terms_accepted_version = ${terms.version} WHERE id = ${req.auth.user.id}`;

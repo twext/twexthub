@@ -5,10 +5,11 @@ import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
 import { sessionToObject } from '../serialize.js';
 import { resolveTargetUser } from './shared.js';
 
-export function makeSessionsRouter({ sql, config }) {
+export function makeSessionsRouter({ sql, config, termsGate }) {
   const router = Router();
+  const guard = [requireSession, termsGate];
 
-  router.get('/', requireSession, async (req, res) => {
+  router.get('/', guard, async (req, res) => {
     const user = await resolveTargetUser(sql, req);
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor, { i: 'int' });
@@ -32,7 +33,7 @@ export function makeSessionsRouter({ sql, config }) {
     });
   });
 
-  router.delete('/:id', requireSession, async (req, res) => {
+  router.delete('/:id', guard, async (req, res) => {
     const targetId = Number(req.params.id);
     const isNumeric = Number.isSafeInteger(targetId) && targetId > 0;
     const [row] = isNumeric ? await sql`SELECT * FROM sessions WHERE id = ${targetId}` : [];

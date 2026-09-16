@@ -43,15 +43,6 @@ export async function runMigrations(sql, migrationsDir = MIGRATIONS_DIR) {
   });
 }
 
-export async function seedLegalDocuments(sql) {
-  await sql`
-    INSERT INTO legal_documents (kind, version, body)
-    VALUES ('terms', 1, 'Placeholder terms of service.'),
-           ('privacy', 1, 'Placeholder privacy policy.')
-    ON CONFLICT (kind) DO NOTHING
-  `;
-}
-
 export async function reconcileOnBoot(sql, config) {
   const dataDir = config.dataDir;
   await sql.begin(async (tx) => {

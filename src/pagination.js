@@ -1,12 +1,16 @@
 import { HttpError } from './errors.js';
 
 const CURSOR_KEY_TYPES = {
-  int: (value) =>
-    (typeof value === 'number' || typeof value === 'string') &&
-    Number.isSafeInteger(Number(value)) &&
-    Number(value) > 0,
-  timestamp: (value) => typeof value === 'string' && !Number.isNaN(Date.parse(value)),
-  string: (value) => typeof value === 'string' && value.length > 0,
+  int: (value) => {
+    let n;
+    if (typeof value === 'number') n = value;
+    else if (typeof value === 'string' && /^[0-9]+$/.test(value)) n = Number(value);
+    else return null;
+    return Number.isSafeInteger(n) && n > 0 ? n : null;
+  },
+  timestamp: (value) =>
+    typeof value === 'string' && !Number.isNaN(Date.parse(value)) ? value : null,
+  string: (value) => (typeof value === 'string' && value.length > 0 ? value : null),
 };
 
 export function parseLimit(config, raw) {
@@ -38,10 +42,11 @@ export function decodeCursor(raw, requiredKeys = {}) {
     throw new HttpError(400, { title: 'Bad Request', detail: 'Invalid cursor.' });
   }
   for (const [key, type] of Object.entries(requiredKeys)) {
-    const value = parsed[key];
-    if (value === undefined || value === null || !CURSOR_KEY_TYPES[type](value)) {
+    const value = CURSOR_KEY_TYPES[type]?.(parsed[key]);
+    if (value === null || value === undefined) {
       throw new HttpError(400, { title: 'Bad Request', detail: 'Invalid cursor.' });
     }
+    parsed[key] = value;
   }
   return parsed;
 }

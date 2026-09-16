@@ -2,19 +2,12 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig } from './config.js';
 import { product } from './product.js';
 import { createApp } from './app.js';
-import {
-  createDb,
-  ensureDataDirs,
-  reconcileOnBoot,
-  runMigrations,
-  seedLegalDocuments,
-} from './db.js';
+import { createDb, ensureDataDirs, reconcileOnBoot, runMigrations } from './db.js';
 
 export async function bootstrap(config = loadConfig()) {
   ensureDataDirs(config.dataDir);
   const sql = createDb(config);
   await runMigrations(sql);
-  await seedLegalDocuments(sql);
   await reconcileOnBoot(sql, config);
   const { app, rateLimiter } = createApp({ config, sql });
   return { app, sql, config, rateLimiter };

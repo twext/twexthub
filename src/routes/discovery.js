@@ -42,9 +42,9 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
           ) AS rn
         FROM versions v
         WHERE status = 'published'
-          ${searchFilter}
       ) s
       WHERE rn = 1
+        ${searchFilter}
         ${recentCursorCondition(cursor)}
       ORDER BY published_at DESC, namespace ASC, extension_id ASC
       LIMIT ${limit + 1}

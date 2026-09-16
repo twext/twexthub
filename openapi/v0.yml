@@ -1,0 +1,977 @@
+openapi: '3.1.0'
+info:
+  title: TwextHub API
+  version: '0.1.0'
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+  description: >
+    TwextHub is a lightweight registry for publishing and discovering
+    Twext-compiled TurboWarp extensions ("Twexts"). Packages are namespaced
+    to their publishing account (`@namespace/id`) and versioned with SemVer.
+    Because the Twext compiler does not embed manifest metadata into its
+    compiled output (unlike the old Warp/Fluorite `Warp.meta` convention),
+    every publish call must submit its manifest fields explicitly as JSON
+    alongside the compiled code — TwextHub never parses the JS blob to
+    recover metadata.
+
+    Every authenticated (`Userspace`/`Adminspace`) endpoint requires the
+    caller to have accepted the current Terms of Service; a caller who
+    hasn't gets a `403` (see `Forbidden`) until they call
+    `POST /terms/accept`. Exemptions that stay available without
+    re-acceptance: `POST /auth/logout`, `GET /auth/me`, password-only user
+    updates, and account deletion.
+
+    Bearer tokens come in two kinds. **Sessions** are created by
+    `/auth/login` or `/auth/signup`, expire after 7 days, and implicitly
+    satisfy every scope. **Automation tokens** are created explicitly via
+    `POST /tokens`, are scoped to just `publish` and/or `yank` for CI use
+    (e.g. a `twext publish` GitHub Action), and never expire unless the
+    caller sets one. Only a session may manage sessions or automation
+    tokens, act on `/admin/*` endpoints, or change account settings —
+    an automation token calling any of those gets a `403`.
+servers:
+  - url: https://{host}/v0
+    variables:
+      host:
+        default: hub.twext.dev
+
+tags:
+  - name: Open
+    description: No authentication required.
+  - name: Userspace
+    description: Requires a bearer token; self-service, with an admin override on some.
+  - name: Adminspace
+    description: Admin-only.
+
+security:
+  - BearerAuth: []
+
+paths:
+  # ---------------------------------------------------------------- Auth
+  /auth/signup:
+    post:
+      summary: Create an account
+      operationId: signup
+      tags: [Open]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [namespace, password]
+              properties:
+                namespace: { $ref: '#/components/schemas/Namespace' }
+                displayName: { type: string, maxLength: 80 }
+                password: { type: string, minLength: 8, writeOnly: true }
+      responses:
+        '201':
+          description: Account created. The first account ever created becomes an admin.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user, token]
+                properties:
+                  user: { $ref: '#/components/schemas/User' }
+                  token: { type: string }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /auth/login:
+    post:
+      summary: Log in
+      operationId: login
+      tags: [Open]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [namespace, password]
+              properties:
+                namespace: { $ref: '#/components/schemas/Namespace' }
+                password: { type: string, writeOnly: true }
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user, token]
+                properties:
+                  user: { $ref: '#/components/schemas/User' }
+                  token: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /auth/logout:
+    post:
+      summary: Revoke the current bearer token
+      operationId: logout
+      tags: [Userspace]
+      description: Equivalent to `DELETE /sessions/{id}` for the session that authenticated this request.
+      responses:
+        '204': { description: Token revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/me:
+    get:
+      summary: Get the authenticated account
+      operationId: getMe
+      tags: [Userspace]
+      responses:
+        '200':
+          description: The caller's own account
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ---------------------------------------------- Sessions & automation tokens
+  /sessions:
+    get:
+      summary: List a caller's active sessions
+      operationId: listSessions
+      tags: [Userspace]
+      description: Session-authenticated only. `namespace` defaults to the caller; an admin may pass it to inspect another account's sessions.
+      parameters:
+        - name: namespace
+          in: query
+          schema: { $ref: '#/components/schemas/Namespace' }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Paginated sessions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Session' }
+                  pagination: { $ref: '#/components/schemas/CursorPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /sessions/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    delete:
+      summary: Revoke a session
+      operationId: deleteSession
+      tags: [Userspace]
+      description: Self or admin, session-authenticated only. Revoking the session that authenticated this very request behaves like `POST /auth/logout`.
+      responses:
+        '204': { description: Revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /tokens:
+    get:
+      summary: List a caller's automation tokens
+      operationId: listAutomationTokens
+      tags: [Userspace]
+      description: Session-authenticated only. `namespace` defaults to the caller; an admin may pass it to inspect another account's tokens. Never returns token secrets.
+      parameters:
+        - name: namespace
+          in: query
+          schema: { $ref: '#/components/schemas/Namespace' }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Paginated automation tokens
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/AutomationToken' }
+                  pagination: { $ref: '#/components/schemas/CursorPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+    post:
+      summary: Create an automation token
+      operationId: createAutomationToken
+      tags: [Userspace]
+      description: Session-authenticated only. The `token` secret is returned exactly once, in this response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, scopes]
+              properties:
+                name: { type: string, maxLength: 80, description: 'e.g. "CI publish".' }
+                scopes:
+                  type: array
+                  items: { $ref: '#/components/schemas/Scope' }
+                  minItems: 1
+                expiresInDays:
+                  { type: integer, minimum: 1, description: Omit for a token that never expires. }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutomationTokenCreated' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /tokens/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      summary: Rename or rescope an automation token
+      operationId: updateAutomationToken
+      tags: [Userspace]
+      description: Self or admin, session-authenticated only. Never returns or reissues the token secret.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                name: { type: string, maxLength: 80 }
+                scopes:
+                  type: array
+                  items: { $ref: '#/components/schemas/Scope' }
+                  minItems: 1
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutomationToken' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+    delete:
+      summary: Revoke an automation token
+      operationId: deleteAutomationToken
+      tags: [Userspace]
+      description: Self or admin, session-authenticated only.
+      responses:
+        '204': { description: Revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # --------------------------------------------------------------- Users
+  /users:
+    get:
+      summary: List accounts
+      operationId: listUsers
+      tags: [Open]
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Paginated accounts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/User' }
+                  pagination: { $ref: '#/components/schemas/CursorPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /users/{namespace}:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+    get:
+      summary: Get an account
+      operationId: getUser
+      tags: [Open]
+      security: []
+      responses:
+        '200':
+          description: Account found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      summary: Update an account
+      operationId: updateUser
+      tags: [Userspace]
+      description: >
+        Self or admin. Only an admin may set `role`. Changing `password`
+        revokes all of that account's existing tokens.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                displayName: { type: string, maxLength: 80 }
+                password: { type: string, minLength: 8, writeOnly: true }
+                role: { $ref: '#/components/schemas/Role' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+    delete:
+      summary: Delete an account
+      operationId: deleteUser
+      tags: [Userspace]
+      description: Self or admin. Cascades to all of that account's extensions and versions.
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---------------------------------------------------------- Discovery
+  /extensions:
+    get:
+      summary: List published extensions
+      operationId: listExtensions
+      tags: [Open]
+      security: []
+      description: Latest published version per `(namespace, id)`, newest first.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Paginated extensions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/ExtensionSummary' }
+                  pagination: { $ref: '#/components/schemas/CursorPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /search:
+    get:
+      summary: Search published extensions
+      operationId: searchExtensions
+      tags: [Open]
+      security: []
+      description: Matches id, name, namespace, and description. Omit `query` for a recency-ordered fallback.
+      parameters:
+        - name: query
+          in: query
+          schema: { type: string }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Paginated search results
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/ExtensionSummary' }
+                  pagination: { $ref: '#/components/schemas/CursorPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /terms:
+    get:
+      summary: Get the current Terms of Service
+      operationId: getTerms
+      tags: [Open]
+      security: []
+      responses:
+        '200':
+          description: Current Terms of Service
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LegalDocument' }
+
+  /terms/accept:
+    post:
+      summary: Accept the current Terms of Service
+      operationId: acceptTerms
+      tags: [Userspace]
+      description: Records acceptance of whichever `version` of the Terms of Service is current at the time of the call.
+      responses:
+        '204': { description: Recorded }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /privacy:
+    get:
+      summary: Get the current Privacy Policy
+      operationId: getPrivacyPolicy
+      tags: [Open]
+      security: []
+      responses:
+        '200':
+          description: Current Privacy Policy
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LegalDocument' }
+
+  /admin/terms:
+    patch:
+      summary: Publish a new Terms of Service version
+      operationId: updateTerms
+      tags: [Adminspace]
+      description: Replaces the current Terms of Service body and bumps `version`. Previously-accepted versions no longer satisfy the acceptance gate.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { type: string, description: Markdown source. }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LegalDocument' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /admin/privacy:
+    patch:
+      summary: Publish a new Privacy Policy version
+      operationId: updatePrivacyPolicy
+      tags: [Adminspace]
+      description: Replaces the current Privacy Policy body and bumps `version`. Does not itself require re-acceptance (only Terms updates gate `Userspace`/`Adminspace` calls).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { type: string, description: Markdown source. }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LegalDocument' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /stats:
+    get:
+      summary: Registry-wide counters
+      operationId: getStats
+      tags: [Open]
+      security: []
+      responses:
+        '200':
+          description: Counters
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Stats' }
+
+  /meta:
+    get:
+      summary: Product metadata
+      operationId: getMeta
+      tags: [Open]
+      security: []
+      description: Name, version, tagline, and homepage read from product.yml.
+      responses:
+        '200':
+          description: Product info
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Meta' }
+
+  # ---------------------------------------------------- Extensions/Versions
+  /@{namespace}/{id}:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+    get:
+      summary: Get extension info
+      operationId: getExtension
+      tags: [Open]
+      security: []
+      description: Latest metadata plus every published version (SemVer descending). 404 if nothing is published yet.
+      responses:
+        '200':
+          description: Extension found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ExtensionDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      summary: Delete an extension and all of its versions
+      operationId: deleteExtension
+      tags: [Userspace]
+      description: Owner or admin only.
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /@{namespace}/{id}/versions:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+    post:
+      summary: Publish a new version
+      operationId: publishVersion
+      tags: [Userspace]
+      description: >
+        `namespace` in the path must match the authenticated caller (admins
+        may publish on behalf of any namespace). A caller's first-ever
+        publish is held as `pending`; once an admin approves it, all of
+        that caller's later publishes go straight to `published`. Only one
+        `pending` version per owner may exist at a time. `manifest.id` must
+        equal the `id` path segment, and `manifest.version` must be valid
+        SemVer strictly greater than the current highest published version
+        for this package (yanked versions still count toward that check).
+        Requires the `publish` scope (sessions satisfy this implicitly).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [manifest, code]
+              properties:
+                manifest: { $ref: '#/components/schemas/Manifest' }
+                code:
+                  type: string
+                  description: The compiled Twext output (a single IIFE JavaScript file), as text.
+      responses:
+        '201':
+          description: Version created (status reflects moderation state)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VersionInfo' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Namespace mismatch, or the owner already has a version awaiting review
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /@{namespace}/{id}/versions/{version}:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+      - $ref: '#/components/parameters/VersionPath'
+    get:
+      summary: Get version metadata
+      operationId: getVersion
+      tags: [Open]
+      security: []
+      description: >
+        `version` may be a literal SemVer string or the literal `latest`
+        (highest published SemVer, not most-recently-published). Non-owners
+        never see `pending`, `rejected`, or `staging` versions.
+      responses:
+        '200':
+          description: Version found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VersionInfo' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      summary: Approve or reject a version
+      operationId: reviewVersion
+      tags: [Adminspace]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [approved, rejected] }
+                reason: { type: string, description: Required when rejecting. }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VersionInfo' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+    delete:
+      summary: Yank a version
+      operationId: deleteVersion
+      tags: [Userspace]
+      description: >
+        Owner or admin. Yanking hides the version from default listings and
+        search but does not 404 it for callers who already depend on it —
+        use `/download` to keep serving the code. Requires the `yank` scope
+        (sessions satisfy this implicitly).
+      responses:
+        '204': { description: Yanked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /@{namespace}/{id}/versions/{version}/download:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+      - $ref: '#/components/parameters/VersionPath'
+    get:
+      summary: Download the compiled extension
+      operationId: downloadVersion
+      tags: [Open]
+      security: []
+      description: Serves the raw compiled JS, including yanked versions, so existing consumers keep working. 404 only if unpublished/missing.
+      responses:
+        '200':
+          description: Compiled extension
+          content:
+            application/javascript:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # --------------------------------------------------------------- Admin
+  /versions:
+    get:
+      summary: Cross-owner moderation queue
+      operationId: listVersionsForReview
+      tags: [Adminspace]
+      parameters:
+        - name: status
+          in: query
+          required: true
+          schema: { type: string, enum: [pending] }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Paginated pending versions, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/PendingVersion' }
+                  pagination: { $ref: '#/components/schemas/CursorPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+components:
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string }
+      description: Opaque pagination cursor from a previous response.
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, default: 20 }
+      description: Values above the server cap are clamped to the cap, not rejected. The default cap is 50.
+    NamespacePath:
+      name: namespace
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Namespace' }
+    ExtensionIdPath:
+      name: id
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/ExtensionId' }
+    VersionPath:
+      name: version
+      in: path
+      required: true
+      schema:
+        type: string
+        description: SemVer string, or the literal `latest`.
+
+  schemas:
+    Namespace:
+      type: string
+      pattern: '^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$'
+    ExtensionId:
+      type: string
+      pattern: '^[a-z0-9]{1,64}$'
+      description: >
+        Matches TurboWarp's own documented rule for extension `id`s: only
+        `a-z` and `0-9`, no spaces or special characters. The 64-char cap
+        is TwextHub's own storage/URL-length limit, not a TurboWarp
+        requirement. twext.yml's `extension.id` field has no pattern
+        constraint today; the `twext` CLI's own validation should be
+        tightened to match this rather than the other way around.
+    Role:
+      type: string
+      enum: [admin, normal]
+
+    Scope:
+      type: string
+      enum: [publish, yank]
+      description: Only meaningful for automation tokens — sessions implicitly satisfy every scope.
+
+    Session:
+      type: object
+      required: [id, createdAt, expiresAt, lastUsedAt]
+      properties:
+        id: { type: string, description: "The token row's own id, not a hash of the token." }
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time, description: '7 days after creation.' }
+        lastUsedAt: { type: ['string', 'null'], format: date-time }
+
+    AutomationToken:
+      type: object
+      required: [id, name, scopes, createdAt, expiresAt, lastUsedAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        scopes:
+          type: array
+          items: { $ref: '#/components/schemas/Scope' }
+        createdAt: { type: string, format: date-time }
+        expiresAt:
+          {
+            type: ['string', 'null'],
+            format: date-time,
+            description: '`null` if the token never expires.',
+          }
+        lastUsedAt: { type: ['string', 'null'], format: date-time }
+
+    AutomationTokenCreated:
+      allOf:
+        - $ref: '#/components/schemas/AutomationToken'
+        - type: object
+          required: [token]
+          properties:
+            token:
+              {
+                type: string,
+                description: The bearer token secret. Shown only in this one response.,
+              }
+
+    User:
+      type: object
+      required: [namespace, displayName, role, hasPublished, createdAt, termsAcceptedVersion]
+      properties:
+        namespace: { $ref: '#/components/schemas/Namespace' }
+        displayName: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+        hasPublished: { type: boolean }
+        createdAt: { type: string, format: date-time, readOnly: true }
+        termsAcceptedVersion:
+          type: ['integer', 'null']
+          description: Terms of Service `version` this account last accepted, or `null` if never accepted.
+
+    LegalDocument:
+      type: object
+      required: [version, body, updatedAt]
+      properties:
+        version: { type: integer, description: Increments on every publish of a new version. }
+        body: { type: string, description: Markdown source. }
+        updatedAt: { type: string, format: date-time }
+
+    Manifest:
+      type: object
+      required: [id, name, version, license, description]
+      description: Mirrors the fields in twext.yml that TwextHub needs to store; not the whole manifest.
+      properties:
+        id: { $ref: '#/components/schemas/ExtensionId' }
+        name: { type: string }
+        version: { type: string, description: SemVer. }
+        license: { type: string, description: SPDX identifier. }
+        description: { type: string }
+        author: { type: string }
+        color1: { type: string, pattern: '^#[0-9a-fA-F]{6}$' }
+        color2: { type: string, pattern: '^#[0-9a-fA-F]{6}$' }
+        color3: { type: string, pattern: '^#[0-9a-fA-F]{6}$' }
+
+    ExtensionSummary:
+      type: object
+      required: [namespace, id, name, version, description, publishedAt]
+      properties:
+        namespace: { $ref: '#/components/schemas/Namespace' }
+        id: { $ref: '#/components/schemas/ExtensionId' }
+        name: { type: string }
+        version: { type: string }
+        description: { type: string }
+        publishedAt: { type: string, format: date-time }
+
+    ExtensionDetail:
+      allOf:
+        - $ref: '#/components/schemas/ExtensionSummary'
+        - type: object
+          required: [author, license, versions]
+          properties:
+            author: { type: ['string', 'null'] }
+            license: { type: string }
+            color1: { type: string }
+            color2: { type: string }
+            color3: { type: string }
+            versions:
+              type: array
+              items: { $ref: '#/components/schemas/VersionInfo' }
+
+    VersionInfo:
+      type: object
+      required: [namespace, id, version, status, createdAt]
+      properties:
+        namespace: { $ref: '#/components/schemas/Namespace' }
+        id: { $ref: '#/components/schemas/ExtensionId' }
+        version: { type: string }
+        status: { type: string, enum: [staging, pending, published, rejected, yanked] }
+        name: { type: string }
+        license: { type: string }
+        description: { type: string }
+        author: { type: ['string', 'null'] }
+        createdAt: { type: string, format: date-time }
+        publishedAt:
+          { type: string, format: date-time, description: Absent while pending or rejected. }
+        dist:
+          type: object
+          description: Absent while pending or rejected.
+          properties:
+            downloadUrl: { type: string, format: uri }
+
+    PendingVersion:
+      allOf:
+        - $ref: '#/components/schemas/VersionInfo'
+        - type: object
+          required: [ownerNamespace]
+          properties:
+            ownerNamespace: { $ref: '#/components/schemas/Namespace' }
+
+    Stats:
+      type: object
+      required: [published, pending, authors]
+      properties:
+        published:
+          { type: integer, description: 'Distinct (namespace, id) pairs with a published version.' }
+        pending: { type: integer }
+        authors:
+          { type: integer, description: Distinct namespaces with at least one published extension. }
+
+    Meta:
+      type: object
+      required: [name, version, tagline, homepage]
+      properties:
+        name: { type: string }
+        version: { type: string, description: Product version from product.yml. }
+        tagline: { type: string }
+        homepage: { type: string }
+
+    CursorPage:
+      type: object
+      required: [nextCursor, hasMore]
+      properties:
+        nextCursor: { type: ['string', 'null'] }
+        hasMore: { type: boolean }
+
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: { type: string, format: uri, example: 'about:blank' }
+        title: { type: string, example: 'Validation Error' }
+        status: { type: integer, example: 422 }
+        detail: { type: string }
+        instance: { type: string, format: uri }
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              field: { type: string }
+              message: { type: string }
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    Forbidden:
+      description: >
+        Authenticated, but not allowed to perform this action — e.g. not the
+        resource owner or an admin, a namespace mismatch on publish, the
+        current Terms of Service haven't been accepted yet
+        (see `POST /terms/accept`), an automation token missing the
+        required scope, or an automation token used against a
+        session-only endpoint (session/token management, `/admin/*`,
+        account settings).
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    NotFound:
+      description: Resource not found
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    Conflict:
+      description: Resource already exists
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    UnprocessableEntity:
+      description: Semantically invalid input (e.g. non-SemVer version, id mismatch)
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    TooManyRequests:
+      description: Rate limit exceeded
+      headers:
+        Retry-After: { schema: { type: integer } }
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer

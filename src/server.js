@@ -7,10 +7,15 @@ import { createDb, ensureDataDirs, reconcileOnBoot, runMigrations } from './db.j
 export async function bootstrap(config = loadConfig()) {
   ensureDataDirs(config.dataDir);
   const sql = createDb(config);
-  await runMigrations(sql);
-  await reconcileOnBoot(sql, config);
-  const { app, rateLimiter } = createApp({ config, sql });
-  return { app, sql, config, rateLimiter };
+  try {
+    await runMigrations(sql);
+    await reconcileOnBoot(sql, config);
+    const { app, rateLimiter } = createApp({ config, sql });
+    return { app, sql, config, rateLimiter };
+  } catch (error) {
+    await sql.end();
+    throw error;
+  }
 }
 
 const isMain = process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url);

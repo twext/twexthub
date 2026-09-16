@@ -241,15 +241,23 @@ export function makePackagesRouter({ sql, config, termsGate }) {
   router.delete('/@:namespace/:id', ownerChain, async (req, res) => {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
-    const rows = await sql`
-      SELECT blob_path FROM versions
-      WHERE namespace = ${namespace} AND extension_id = ${id}
-    `;
-    if (rows.length === 0) throw notFound();
-    if (req.auth.user.namespace !== namespace && req.auth.user.role !== 'admin') {
-      throw forbidden('You can only delete your own extensions.');
-    }
-    await sql`DELETE FROM versions WHERE namespace = ${namespace} AND extension_id = ${id}`;
+    const lockKey = `${namespace}/${id}`;
+    const rows = await sql.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+      const rows = await tx`
+        SELECT blob_path, status FROM versions
+        WHERE namespace = ${namespace} AND extension_id = ${id}
+      `;
+      if (rows.length === 0) throw notFound();
+      if (rows.some((row) => row.status === 'staging')) {
+        throw conflict('A publish is in progress for this extension.');
+      }
+      if (req.auth.user.namespace !== namespace && req.auth.user.role !== 'admin') {
+        throw forbidden('You can only delete your own extensions.');
+      }
+      await tx`DELETE FROM versions WHERE namespace = ${namespace} AND extension_id = ${id}`;
+      return rows;
+    });
     await Promise.all(
       rows.map((version) => rm(path.join(config.dataDir, version.blob_path), { force: true })),
     );

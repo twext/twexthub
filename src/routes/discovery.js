@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { requireAdmin, requireAuth } from '../auth.js';
 import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
-import { HttpError } from '../errors.js';
+import { HttpError, notFound } from '../errors.js';
 import { foldText } from '../util.js';
 import { product } from '../product.js';
 import {
@@ -62,7 +62,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
 
   router.get('/extensions', async (req, res) => {
     const limit = parseLimit(config, req.query.limit);
-    const cursor = decodeCursor(req.query.cursor, ['p', 'ns', 'id']);
+    const cursor = decodeCursor(req.query.cursor, { p: 'timestamp', ns: 'string', id: 'string' });
     res.json(await listLatestVersions({ limit, cursor }));
   });
 
@@ -70,7 +70,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     const query = typeof req.query.query === 'string' ? req.query.query.trim() : null;
     const folded = query && query.length > 0 ? foldText(query) : null;
     const limit = parseLimit(config, req.query.limit);
-    const cursor = decodeCursor(req.query.cursor, ['p', 'ns', 'id']);
+    const cursor = decodeCursor(req.query.cursor, { p: 'timestamp', ns: 'string', id: 'string' });
     const searchFilter = folded
       ? sql`AND search_text LIKE ${'%' + escapeLike(folded) + '%'}`
       : sql``;
@@ -101,16 +101,19 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
 
   router.get('/terms', async (req, res) => {
     const [row] = await sql`SELECT * FROM legal_documents WHERE kind = 'terms'`;
+    if (!row) throw notFound();
     res.json(legalDocumentToObject(row));
   });
 
   router.get('/privacy', async (req, res) => {
     const [row] = await sql`SELECT * FROM legal_documents WHERE kind = 'privacy'`;
+    if (!row) throw notFound();
     res.json(legalDocumentToObject(row));
   });
 
   router.post('/terms/accept', requireAuth, async (req, res) => {
     const [terms] = await sql`SELECT * FROM legal_documents WHERE kind = 'terms'`;
+    if (!terms) throw notFound();
     await sql`UPDATE users SET terms_accepted_version = ${terms.version} WHERE id = ${req.auth.user.id}`;
     res.status(204).end();
   });
@@ -123,7 +126,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
       });
     }
     const limit = parseLimit(config, req.query.limit);
-    const cursor = decodeCursor(req.query.cursor, ['c', 'i']);
+    const cursor = decodeCursor(req.query.cursor, { c: 'timestamp', i: 'int' });
 
     const rows = await sql`
       SELECT * FROM versions

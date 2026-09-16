@@ -67,6 +67,43 @@ test('changing password revokes existing sessions and tokens', async () => {
   assert.ok(login.body.token);
 });
 
+test('password rotation bypasses terms re-acceptance', async () => {
+  const admin = await signupAndAccept(app, uniqNs());
+  const { user, token } = await signupAndAccept(app, uniqNs());
+
+  await request(app)
+    .patch('/v0/admin/terms')
+    .set(bearer(admin.token))
+    .send({ body: 'Terms v2.' })
+    .expect(200);
+
+  const r = await request(app)
+    .patch(`/v0/users/${user.namespace}`)
+    .set(bearer(token))
+    .send({ password: 'newpassword9' });
+  assert.equal(r.status, 200);
+
+  const login = await request(app)
+    .post('/v0/auth/login')
+    .send({ namespace: user.namespace, password: 'newpassword9' })
+    .expect(200);
+  assert.ok(login.body.token);
+});
+
+test('account deletion bypasses terms re-acceptance', async () => {
+  const admin = await signupAndAccept(app, uniqNs());
+  const { user, token } = await signupAndAccept(app, uniqNs());
+
+  await request(app)
+    .patch('/v0/admin/terms')
+    .set(bearer(admin.token))
+    .send({ body: 'Terms v2.' })
+    .expect(200);
+
+  await request(app).delete(`/v0/users/${user.namespace}`).set(bearer(token)).expect(204);
+  await request(app).get(`/v0/users/${user.namespace}`).expect(404);
+});
+
 test('non-owner cannot update another user', async () => {
   const admin = await signupAndAccept(app, uniqNs());
   const { token } = await signupAndAccept(app, uniqNs());

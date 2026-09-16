@@ -28,7 +28,7 @@ export function makeTokensRouter({ sql, config }) {
   router.get('/', requireSession, async (req, res) => {
     const user = await resolveTargetUser(sql, req);
     const limit = parseLimit(config, req.query.limit);
-    const cursor = decodeCursor(req.query.cursor, ['i']);
+    const cursor = decodeCursor(req.query.cursor, { i: 'int' });
 
     const rows = await sql`
       SELECT * FROM automation_tokens

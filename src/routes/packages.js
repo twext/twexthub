@@ -253,6 +253,7 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
   const tmpDir = path.join(config.dataDir, 'tmp');
   await mkdir(tmpDir, { recursive: true });
   const tmpPath = path.join(tmpDir, `upload-${randomBytes(8).toString('hex')}.tmp`);
+  await writeFile(tmpPath, code);
 
   const searchText = buildSearchText({
     name,
@@ -265,7 +266,7 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
   let renamed = false;
 
   try {
-    return await sql.begin(async (tx) => {
+    const row = await sql.begin(async (tx) => {
       const [pending] = await tx`
         SELECT 1 FROM versions
         WHERE owner_id = ${owner.id} AND status IN ('staging', 'pending')
@@ -299,11 +300,6 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
         RETURNING *
       `;
 
-      await writeFile(tmpPath, code);
-      await mkdir(path.dirname(blobAbs), { recursive: true });
-      await rename(tmpPath, blobAbs);
-      renamed = true;
-
       const [row] = await tx`
         UPDATE versions
         SET status = ${finalStatus},
@@ -313,6 +309,11 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
       `;
       return row;
     });
+
+    await mkdir(path.dirname(blobAbs), { recursive: true });
+    await rename(tmpPath, blobAbs);
+    renamed = true;
+    return row;
   } catch (error) {
     if (renamed) {
       rmSync(blobAbs, { force: true });

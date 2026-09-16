@@ -14,7 +14,7 @@ export function makeUsersRouter({ sql, config, termsGate }) {
 
   router.get('/', async (req, res) => {
     const limit = parseLimit(config, req.query.limit);
-    const cursor = decodeCursor(req.query.cursor, ['i']);
+    const cursor = decodeCursor(req.query.cursor, { i: 'int' });
 
     const rows = await sql`
       SELECT * FROM users
@@ -41,7 +41,13 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     res.json(userToObject(user));
   });
 
-  router.patch('/:namespace', requireSession, termsGate, async (req, res) => {
+  function skipTermsForPasswordOnly(req, res, next) {
+    const { displayName, password, role } = req.body ?? {};
+    if (password !== undefined && displayName === undefined && role === undefined) return next();
+    return termsGate(req, res, next);
+  }
+
+  router.patch('/:namespace', requireSession, skipTermsForPasswordOnly, async (req, res) => {
     const target = await loadUserOr404(sql, req.params.namespace);
     if (req.auth.user.namespace !== target.namespace && req.auth.user.role !== 'admin') {
       throw forbidden('Only an admin can update another account.');
@@ -96,7 +102,7 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     res.json(userToObject(updated));
   });
 
-  router.delete('/:namespace', requireSession, termsGate, async (req, res) => {
+  router.delete('/:namespace', requireSession, async (req, res) => {
     const target = await loadUserOr404(sql, req.params.namespace);
     if (req.auth.user.namespace !== target.namespace && req.auth.user.role !== 'admin') {
       throw forbidden('Only an admin can delete another account.');

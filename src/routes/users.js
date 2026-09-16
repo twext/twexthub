@@ -12,6 +12,14 @@ import { requireObjectBody } from './shared.js';
 export function makeUsersRouter({ sql, config, termsGate }) {
   const router = Router();
 
+  function serializePublicUser(row, req) {
+    const isOwner = req.auth?.user.namespace === row.namespace;
+    const isAdmin = req.auth?.user.role === 'admin';
+    if (isOwner || isAdmin) return userToObject(row);
+    const { role, termsAcceptedVersion, ...rest } = userToObject(row);
+    return rest;
+  }
+
   router.get('/', async (req, res) => {
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor, { i: 'int' });
@@ -29,7 +37,7 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     const nextCursor = hasMore && last ? encodeCursor({ i: Number(last.id) }) : null;
 
     res.json({
-      data: page.map(userToObject),
+      data: page.map((user) => serializePublicUser(user, req)),
       pagination: { nextCursor, hasMore },
     });
   });
@@ -38,7 +46,7 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     if (!isValidNamespace(req.params.namespace)) throw notFound();
     const [user] = await sql`SELECT * FROM users WHERE namespace = ${req.params.namespace}`;
     if (!user) throw notFound();
-    res.json(userToObject(user));
+    res.json(serializePublicUser(user, req));
   });
 
   function skipTermsForPasswordOnly(req, res, next) {

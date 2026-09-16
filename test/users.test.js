@@ -21,7 +21,13 @@ test('users list is public and includes created users', async () => {
   assert.ok(namespaces.includes(first.user.namespace));
   assert.ok(namespaces.includes(second.user.namespace));
   const firstUser = list.body.data.find((u) => u.namespace === first.user.namespace);
-  assert.equal(firstUser.role, 'admin');
+  assert.equal('role' in firstUser, false);
+  assert.equal('termsAcceptedVersion' in firstUser, false);
+  assert.equal(typeof firstUser.hasPublished, 'boolean');
+
+  const mine = await request(app).get('/v0/users').set(bearer(first.token)).expect(200);
+  const me = mine.body.data.find((u) => u.namespace === first.user.namespace);
+  assert.equal(me.role, 'admin');
 });
 
 test('user lookup by namespace returns profile', async () => {

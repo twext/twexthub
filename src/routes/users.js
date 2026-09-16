@@ -1,7 +1,7 @@
 import { mkdir, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { Router } from 'express';
-import { hashPassword } from '../password.js';
+import { hashPassword, verifyPassword } from '../password.js';
 import { requireSession } from '../auth.js';
 import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
 import { fieldErrors, forbidden, notFound } from '../errors.js';
@@ -86,6 +86,19 @@ export function makeUsersRouter({ sql, config, termsGate }) {
       columns.push('role');
     }
     if (password !== undefined) {
+      if (req.auth.user.role !== 'admin') {
+        const currentPassword = req.body.currentPassword;
+        if (typeof currentPassword !== 'string' || currentPassword.length === 0) {
+          throw fieldErrors([
+            {
+              field: 'currentPassword',
+              message: 'Current password is required when changing your password.',
+            },
+          ]);
+        }
+        const valid = await verifyPassword(currentPassword, target.password_hash);
+        if (!valid) throw forbidden('Current password is incorrect.');
+      }
       patch.password_hash = await hashPassword(password, config.auth.scrypt);
       columns.push('password_hash');
     }

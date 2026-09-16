@@ -54,7 +54,7 @@ test('changing password revokes existing sessions and tokens', async () => {
   await request(app)
     .patch(`/v0/users/${ns}`)
     .set(bearer(token))
-    .send({ password: 'newpassword9' })
+    .send({ password: 'newpassword9', currentPassword: 'password123' })
     .expect(200);
 
   await request(app).get('/v0/auth/me').set(bearer(token)).expect(401);
@@ -80,7 +80,7 @@ test('password rotation bypasses terms re-acceptance', async () => {
   const r = await request(app)
     .patch(`/v0/users/${user.namespace}`)
     .set(bearer(token))
-    .send({ password: 'newpassword9' });
+    .send({ password: 'newpassword9', currentPassword: 'password123' });
   assert.equal(r.status, 200);
 
   const login = await request(app)

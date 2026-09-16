@@ -3,7 +3,7 @@ import { loadConfig } from './config.js';
 import { createDb } from './db.js';
 import { makeAuthenticate, makeRequireTerms } from './auth.js';
 import { makeRateLimiter } from './rate-limit.js';
-import { notFound, errorHandler } from './errors.js';
+import { HttpError, notFound, errorHandler } from './errors.js';
 import { normalizeApiRoot } from './util.js';
 import { makeAuthRouter } from './routes/auth.js';
 import { makeSessionsRouter } from './routes/sessions.js';
@@ -20,6 +20,13 @@ export function createApp(opts = {}) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', opts.trustProxy ?? config.trustProxy ?? false);
+
+  if (config.requireHttps) {
+    app.use((req, res, next) => {
+      if (req.secure) return next();
+      return next(new HttpError(403, { title: 'Forbidden', detail: 'HTTPS is required.' }));
+    });
+  }
 
   const jsonBody = express.json({ limit: '100kb' });
   app.use((req, res, next) => {

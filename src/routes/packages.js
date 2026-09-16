@@ -281,7 +281,7 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
   try {
     await writeFile(tmpPath, code);
 
-    const row = await sql.begin(async (tx) => {
+    const staged = await sql.begin(async (tx) => {
       // Serialize per namespace/extension so concurrent publishes cannot both
       // validate against the same ceiling snapshot.
       await tx`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
@@ -318,24 +318,32 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
         )
         RETURNING *
       `;
+      return staged;
+    });
 
-      const [row] = await tx`
+    // The staging row commits before the blob is placed: uniqueness checks in
+    // the transaction reject duplicate/lower-version publishes, so only the
+    // committed version may write blobAbs. A crash before blob placement
+    // leaves a staging row that reconcileOnBoot promotes once its blob exists
+    // or removes when the blob is missing; promoting before the rename would
+    // let a rolled-back request leave its bytes at a concurrently committed
+    // version's blob path.
+    await mkdir(path.dirname(blobAbs), { recursive: true });
+    await rename(tmpPath, blobAbs);
+
+    const [row] = await sql.begin(async (tx) => {
+      const promoted = await tx`
         UPDATE versions
         SET status = ${finalStatus},
             published_at = ${finalStatus === 'published' ? new Date() : null}
         WHERE id = ${staged.id}
         RETURNING *
       `;
-      return row;
+      return promoted[0];
     });
-
-    // The row commits before the blob is placed: uniqueness checks in the
-    // transaction reject duplicate/lower-version publishes, so only the
-    // committed version may write blobAbs. Renaming inside the transaction
-    // would let a rolled-back request leave its bytes at a concurrently
-    // committed version's blob path.
-    await mkdir(path.dirname(blobAbs), { recursive: true });
-    await rename(tmpPath, blobAbs);
+    if (!row) {
+      throw new HttpError(409, { detail: 'Version row disappeared before promotion.' });
+    }
     return row;
   } catch (error) {
     rmSync(tmpPath, { force: true });

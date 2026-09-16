@@ -39,14 +39,17 @@ export function createApp(opts = {}) {
   const termsGate = makeRequireTerms(sql);
   const shared = { sql, config, rateLimiter, termsGate };
 
-  const root = `/${normalizeApiRoot(config.apiRoot)}`;
-  app.use(`${root}/auth`, makeAuthRouter(shared));
-  app.use(`${root}/sessions`, makeSessionsRouter(shared));
-  app.use(`${root}/tokens`, makeTokensRouter(shared));
-  app.use(`${root}/users`, makeUsersRouter(shared));
-  app.use(root, makePackagesRouter(shared));
-  app.use(root, makeDiscoveryRouter(shared));
-  app.use(root, makeAdminRouter(shared));
+  const apiRoot = normalizeApiRoot(config.apiRoot);
+  const root = apiRoot ? `/${apiRoot}` : '';
+  const mount = (suffix) => `${root}${suffix}`;
+
+  app.use(mount('/auth'), makeAuthRouter(shared));
+  app.use(mount('/sessions'), makeSessionsRouter(shared));
+  app.use(mount('/tokens'), makeTokensRouter(shared));
+  app.use(mount('/users'), makeUsersRouter(shared));
+  app.use(root || '/', makePackagesRouter(shared));
+  app.use(root || '/', makeDiscoveryRouter(shared));
+  app.use(root || '/', makeAdminRouter(shared));
 
   app.use((req, res, next) => next(notFound()));
   app.use(errorHandler);

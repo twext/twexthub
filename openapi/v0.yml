@@ -872,7 +872,7 @@ components:
         namespace: { $ref: '#/components/schemas/Namespace' }
         id: { $ref: '#/components/schemas/ExtensionId' }
         version: { type: string }
-        status: { type: string, enum: [pending, published, rejected, yanked] }
+        status: { type: string, enum: [staging, pending, published, rejected, yanked] }
         name: { type: string }
         license: { type: string }
         description: { type: string }

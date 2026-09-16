@@ -10,6 +10,8 @@ export function makeAuthRouter({ sql, config, rateLimiter }) {
   const router = Router();
   const scrypt = config.auth.scrypt;
   const sessionTtlMs = config.auth.sessionTtlDays * 86_400_000;
+  const dummyHash =
+    '16384:8:1:00000000000000000000000000000000:34ac9176638ffce57768f57b4d94bf8aab834b07863b6337993f11a030f05079eb948fa11485c928330f7c3dd1e4952d599ffe4ba5df7968637a51bca2571b0a';
 
   async function createSession(tx, userId) {
     const token = newToken();
@@ -91,7 +93,8 @@ export function makeAuthRouter({ sql, config, rateLimiter }) {
     ]);
 
     const [user] = await sql`SELECT * FROM users WHERE namespace = ${namespace}`;
-    if (!user || !(await verifyPassword(password, user.password_hash))) {
+    const ok = await verifyPassword(password, user ? user.password_hash : dummyHash);
+    if (!user || !ok) {
       await Promise.all(recordFailures.map((record) => record()));
       throw unauthorized('Invalid namespace or password.');
     }

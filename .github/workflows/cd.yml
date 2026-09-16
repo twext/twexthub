@@ -57,6 +57,8 @@ jobs:
         id: meta
         with:
           images: ghcr.io/twext/twexthub
+          flavor: |
+            latest=false
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}

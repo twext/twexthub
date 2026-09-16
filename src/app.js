@@ -23,7 +23,7 @@ export function createApp(opts = {}) {
 
   const jsonBody = express.json({ limit: '100kb' });
   app.use((req, res, next) => {
-    const isPublish = req.method === 'POST' && /\/@[^/?]+\/[^/?]+\/versions$/.test(req.path);
+    const isPublish = req.method === 'POST' && /\/@[^/?]+\/[^/?]+\/versions\/?$/.test(req.path);
     return isPublish ? next() : jsonBody(req, res, next);
   });
   app.use(makeAuthenticate(sql));

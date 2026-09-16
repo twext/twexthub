@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { requireAdmin, requireAuth } from '../auth.js';
-import { decodeCursor, encodeCursor, parseLimit, requireCursorKeys } from '../pagination.js';
+import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
 import { HttpError } from '../errors.js';
 import { foldText } from '../util.js';
 import { product } from '../product.js';
@@ -25,7 +25,6 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
 
   function recentCursorCondition(cursor) {
     if (!cursor) return sql``;
-    requireCursorKeys(cursor, ['p', 'ns', 'id']);
     return sql`
       AND (published_at < ${cursor.p}::timestamptz
         OR (published_at = ${cursor.p}::timestamptz AND namespace > ${cursor.ns})
@@ -63,7 +62,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
 
   router.get('/extensions', async (req, res) => {
     const limit = parseLimit(config, req.query.limit);
-    const cursor = decodeCursor(req.query.cursor);
+    const cursor = decodeCursor(req.query.cursor, ['p', 'ns', 'id']);
     res.json(await listLatestVersions({ limit, cursor }));
   });
 
@@ -71,7 +70,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     const query = typeof req.query.query === 'string' ? req.query.query.trim() : null;
     const folded = query && query.length > 0 ? foldText(query) : null;
     const limit = parseLimit(config, req.query.limit);
-    const cursor = decodeCursor(req.query.cursor);
+    const cursor = decodeCursor(req.query.cursor, ['p', 'ns', 'id']);
     const searchFilter = folded
       ? sql`AND search_text LIKE ${'%' + escapeLike(folded) + '%'}`
       : sql``;
@@ -124,8 +123,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
       });
     }
     const limit = parseLimit(config, req.query.limit);
-    const cursor = decodeCursor(req.query.cursor);
-    if (cursor) requireCursorKeys(cursor, ['c', 'i']);
+    const cursor = decodeCursor(req.query.cursor, ['c', 'i']);
 
     const rows = await sql`
       SELECT * FROM versions

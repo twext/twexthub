@@ -72,7 +72,9 @@ function coerceEnvValue(raw, current, envName) {
   }
   if (typeof current === 'number') {
     const n = Number(raw);
-    if (!Number.isFinite(n)) throw new Error(`${envName} must be a number (got "${raw}")`);
+    if (!Number.isInteger(n) || n <= 0) {
+      throw new Error(`${envName} must be a positive integer (got "${raw}")`);
+    }
     return n;
   }
   return raw;

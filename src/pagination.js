@@ -14,7 +14,7 @@ export function encodeCursor(payload) {
   return Buffer.from(JSON.stringify(payload)).toString('base64url');
 }
 
-export function decodeCursor(raw) {
+export function decodeCursor(raw, requiredKeys = []) {
   if (raw === undefined || raw === null) return null;
   if (typeof raw !== 'string' || raw.length === 0) {
     throw new HttpError(400, { title: 'Bad Request', detail: 'Invalid cursor.' });
@@ -28,15 +28,12 @@ export function decodeCursor(raw) {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new HttpError(400, { title: 'Bad Request', detail: 'Invalid cursor.' });
   }
-  return parsed;
-}
-
-export function requireCursorKeys(cursor, keys) {
-  for (const key of keys) {
-    if (cursor[key] === undefined || cursor[key] === null || cursor[key] === '') {
+  for (const key of requiredKeys) {
+    if (parsed[key] === undefined || parsed[key] === null || parsed[key] === '') {
       throw new HttpError(400, { title: 'Bad Request', detail: 'Invalid cursor.' });
     }
   }
+  return parsed;
 }
 
 export function cursorResponse(page, hasMore, keysFromLast) {

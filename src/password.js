@@ -10,16 +10,24 @@ export async function hashPassword(password, { N, r, p }) {
 }
 
 export async function verifyPassword(password, stored) {
+  if (typeof stored !== 'string') return false;
   const parts = stored.split(':');
   if (parts.length !== 5) return false;
   const [N, r, p, saltHex, keyHex] = parts;
+  if (!/^(?:[0-9a-f]{2})+$/i.test(saltHex) || !/^(?:[0-9a-f]{2})+$/i.test(keyHex)) {
+    return false;
+  }
+  const Nn = Number(N);
+  const rn = Number(r);
+  const pn = Number(p);
+  if (![Nn, rn, pn].every(Number.isInteger) || Nn <= 0 || rn <= 0 || pn <= 0) return false;
   const salt = Buffer.from(saltHex, 'hex');
   const expected = Buffer.from(keyHex, 'hex');
   const derived = await scrypt(password, salt, expected.length, {
-    N: Number(N),
-    r: Number(r),
-    p: Number(p),
-    maxmem: 256 * Number(N) * Number(r),
+    N: Nn,
+    r: rn,
+    p: pn,
+    maxmem: 256 * Nn * rn,
   });
   return derived.length === expected.length && timingSafeEqual(derived, expected);
 }

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { hashToken, newToken, requireSession } from '../auth.js';
-import { decodeCursor, encodeCursor, parseLimit, requireCursorKeys } from '../pagination.js';
+import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
 import { fieldErrors, forbidden, notFound } from '../errors.js';
 import { automationTokenToObject } from '../serialize.js';
 import { requireObjectBody, resolveTargetUser } from './shared.js';
@@ -28,8 +28,7 @@ export function makeTokensRouter({ sql, config }) {
   router.get('/', requireSession, async (req, res) => {
     const user = await resolveTargetUser(sql, req);
     const limit = parseLimit(config, req.query.limit);
-    const cursor = decodeCursor(req.query.cursor);
-    if (cursor) requireCursorKeys(cursor, ['i']);
+    const cursor = decodeCursor(req.query.cursor, ['i']);
 
     const rows = await sql`
       SELECT * FROM automation_tokens

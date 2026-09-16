@@ -95,6 +95,7 @@ export async function reconcileOnBoot(sql, config) {
   }
 
   const quarantineDir = path.join(dataDir, 'quarantine');
+  mkdirSync(quarantineDir, { recursive: true });
   for (const entry of readdirSync(quarantineDir, { withFileTypes: true })) {
     const entryPath = path.join(quarantineDir, entry.name);
     try {

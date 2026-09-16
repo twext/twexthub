@@ -121,7 +121,7 @@ export function makeTokensRouter({ sql, config }) {
       columns.push('name');
     }
     if (scopes !== undefined) {
-      patch.scopes = validateScopes(scopes);
+      patch.scopes = sql.json(validateScopes(scopes));
       columns.push('scopes');
     }
 

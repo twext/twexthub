@@ -244,6 +244,9 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     const lockKey = `${namespace}/${id}`;
     const rows = await sql.begin(async (tx) => {
       await tx`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+      if (req.auth.user.namespace !== namespace && req.auth.user.role !== 'admin') {
+        throw forbidden('You can only delete your own extensions.');
+      }
       const rows = await tx`
         SELECT blob_path, status FROM versions
         WHERE namespace = ${namespace} AND extension_id = ${id}
@@ -251,9 +254,6 @@ export function makePackagesRouter({ sql, config, termsGate }) {
       if (rows.length === 0) throw notFound();
       if (rows.some((row) => row.status === 'staging')) {
         throw conflict('A publish is in progress for this extension.');
-      }
-      if (req.auth.user.namespace !== namespace && req.auth.user.role !== 'admin') {
-        throw forbidden('You can only delete your own extensions.');
       }
       await tx`DELETE FROM versions WHERE namespace = ${namespace} AND extension_id = ${id}`;
       return rows;

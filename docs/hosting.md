@@ -12,6 +12,7 @@ TwextHub is a registry for Twext-compiled extensions. Publishers submit compiled
 - [Run with Docker](#run-with-docker)
 - [Configuration](#configuration)
 - [Behind a reverse proxy](#behind-a-reverse-proxy)
+- [Blobs must live on persistent storage](#blobs-must-live-on-persistent-storage)
 - [Upgrades](#upgrades)
 - [Backups](#backups)
 - [Boot-time cleanup](#boot-time-cleanup)
@@ -100,6 +101,15 @@ Point the proxy at the server's port. Two things need attention when one is in f
 - If the proxy terminates TLS, `TWEXTHUB_TRUST_PROXY` is also what lets `TWEXTHUB_REQUIRE_HTTPS` tell real clients from plain HTTP.
 
 Publish requests can carry up to 25 MB of JSON. nginx's default `client_max_body_size` is 1 MB, so raise it for the instance; otherwise large publishes die at the proxy.
+
+## Blobs must live on persistent storage
+
+Published blobs are written to the local disk under `dataDir`, not to the database. The `versions` table records that a version exists; the blob is a file on whatever machine handled the publish. This shapes every deployment on a container platform:
+
+- **Replacing the container loses blobs.** If the instance's storage is ephemeral — an ECS/Fargate task without a mounted volume, a Coolify service rebuilt fresh — every deploy deletes the blobs while the database keeps the `versions` rows. Extensions stay listed but their download endpoints 404. Mount a persistent volume at `/app/data` (the image declares it as a volume) so redeploys reuse it.
+- **Scaling to more than one instance requires shared blob storage.** Two instances behind a load balancer that share Postgres but have separate disks will 404 on downloads half the time: a blob written by instance A only exists there. Publishing is safe across instances (the per-extension locks live in Postgres), but the blob directory must be shared — an EFS mount on Fargate, a shared block volume, or a single instance.
+
+Point `TWEXTHUB_DATA_DIR` (or `dataDir`) at the persistent mount and keep it in sync with database backups.
 
 ## Upgrades
 

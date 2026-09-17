@@ -124,7 +124,9 @@ export function makeRequireTerms(sql) {
       cachedAt = now;
     }
     const accepted = req.auth.user.terms_accepted_version;
-    if (cachedVersion === null || !accepted || accepted < cachedVersion) {
+    // No published terms means nothing to accept yet; the first document can
+    // only be created from this un-gated state.
+    if (cachedVersion !== null && (!accepted || accepted < cachedVersion)) {
       throw forbidden('The current Terms of Service have not been accepted yet.');
     }
     next();

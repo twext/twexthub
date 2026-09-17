@@ -118,7 +118,7 @@ export function makeRequireTerms(sql) {
   async function requireTerms(req, res, next) {
     requireAuth(req, res, () => {});
     const now = Date.now();
-    if (cachedVersion === undefined || now - cachedAt > 60_000) {
+    if (cachedVersion === undefined || cachedVersion === null || now - cachedAt > 60_000) {
       const [terms] = await sql`SELECT version FROM legal_documents WHERE kind = 'terms'`;
       cachedVersion = terms ? terms.version : null;
       cachedAt = now;

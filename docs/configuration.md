@@ -86,7 +86,7 @@ Boolean environment variables must be exactly `true` or `false`; numeric ones mu
 
 ## Data directory layout
 
-```
+```text
 data/
 ├── blobs/
 │   └── <namespace>/

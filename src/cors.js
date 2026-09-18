@@ -7,11 +7,11 @@ export function makeCors({ allowedOrigins = '*' } = {}) {
   const origins = allowAny ? null : new Set(allowedOrigins);
 
   return function cors(req, res, next) {
+    if (!allowAny) res.setHeader('Vary', 'Origin');
     const origin = req.headers.origin;
     if (!origin || (!allowAny && !origins.has(origin))) return next();
 
     res.setHeader('Access-Control-Allow-Origin', allowAny ? '*' : origin);
-    if (!allowAny) res.setHeader('Vary', 'Origin');
 
     if (req.method === 'OPTIONS' && req.headers['access-control-request-method']) {
       res.setHeader('Access-Control-Allow-Methods', ALLOW_METHODS);

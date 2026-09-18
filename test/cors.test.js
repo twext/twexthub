@@ -56,13 +56,21 @@ test('an allowed origin is echoed back with Vary: Origin', async () => {
   assert.equal(res.headers.vary, 'Origin');
 });
 
-test('a disallowed origin gets no CORS headers', async () => {
+test('a disallowed origin gets no CORS headers but still Vary: Origin', async () => {
   const res = await request(allowlistApp(['https://a.example']))
     .get('/ping')
     .set('Origin', 'https://evil.example');
   assert.equal(res.status, 200);
   assert.equal(res.headers['access-control-allow-origin'], undefined);
   assert.equal(res.headers['access-control-allow-methods'], undefined);
+  assert.equal(res.headers.vary, 'Origin');
+});
+
+test('an originless request in allowlist mode still gets Vary: Origin', async () => {
+  const res = await request(allowlistApp(['https://a.example'])).get('/ping');
+  assert.equal(res.status, 200);
+  assert.equal(res.headers['access-control-allow-origin'], undefined);
+  assert.equal(res.headers.vary, 'Origin');
 });
 
 function tempConfig(content) {

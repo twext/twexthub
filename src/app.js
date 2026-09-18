@@ -3,6 +3,7 @@ import { loadConfig } from './config.js';
 import { createDb } from './db.js';
 import { makeAuthenticate, makeRequireTerms } from './auth.js';
 import { makeRateLimiter } from './rate-limit.js';
+import { makeCors } from './cors.js';
 import { HttpError, notFound, errorHandler } from './errors.js';
 import { normalizeApiRoot } from './util.js';
 import { makeAuthRouter } from './routes/auth.js';
@@ -27,6 +28,8 @@ export function createApp(opts = {}) {
       return next(new HttpError(403, { title: 'Forbidden', detail: 'HTTPS is required.' }));
     });
   }
+
+  app.use(makeCors(config.cors));
 
   const jsonBody = express.json({ limit: '100kb' });
   app.use((req, res, next) => {

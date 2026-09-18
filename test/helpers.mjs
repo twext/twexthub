@@ -34,6 +34,7 @@ export function makeConfig(overrides = {}) {
       signupWindowMinutes: 15,
     },
     pagination: { defaultLimit: 20, maxLimit: 50 },
+    cors: { allowedOrigins: '*' },
     ...overrides,
   };
 }

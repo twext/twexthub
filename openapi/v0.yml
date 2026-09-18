@@ -673,8 +673,15 @@ paths:
       summary: Download the compiled extension
       operationId: downloadVersion
       tags: [Open]
-      security: []
-      description: Serves the raw compiled JS, including yanked versions, so existing consumers keep working. 404 only if unpublished/missing.
+      security:
+        - {}
+        - BearerAuth: []
+      description: >
+        Serves the raw compiled JS, including yanked versions, so existing
+        consumers keep working. Authentication is optional: published and
+        yanked versions are public, while a session-authenticated admin may
+        send a bearer token to also fetch a `pending` version's source for
+        review before approving. 404 for any other status or a missing blob.
       responses:
         '200':
           description: Compiled extension

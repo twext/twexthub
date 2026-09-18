@@ -674,7 +674,11 @@ paths:
       operationId: downloadVersion
       tags: [Open]
       security: []
-      description: Serves the raw compiled JS, including yanked versions, so existing consumers keep working. 404 only if unpublished/missing.
+      description: >
+        Serves the raw compiled JS, including yanked versions, so existing
+        consumers keep working. A session-authenticated admin may also fetch a
+        `pending` version's source to review it before approving. 404 for any
+        other status or a missing blob.
       responses:
         '200':
           description: Compiled extension

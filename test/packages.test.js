@@ -189,3 +189,54 @@ test('download serves approved code with javascript content type', async () => {
   assert.match(dl.headers['content-type'], /javascript/);
   assert.match(dl.text, /DOWNLOAD_SPECIAL/);
 });
+
+test('admin can download a pending version source for review', async () => {
+  const { adminToken, ownerToken, ownerNs } = await makeAdminAndOwner();
+  const code = 'console.log("PENDING_REVIEW_CODE");';
+  await publish(app, ownerNs, ownerToken, {
+    manifest: manifest({ version: '1.0.0' }),
+    code,
+  }).expect(201);
+
+  const dl = await request(app)
+    .get(`/v0/@${ownerNs}/hello/versions/1.0.0/download`)
+    .set(bearer(adminToken));
+  assert.equal(dl.status, 200);
+  assert.match(dl.headers['content-type'], /javascript/);
+  assert.match(dl.text, /PENDING_REVIEW_CODE/);
+});
+
+test('pending version source is hidden from non-admins', async () => {
+  const { ownerToken, ownerNs } = await makeAdminAndOwner();
+  await publish(app, ownerNs, ownerToken, {
+    manifest: manifest({ version: '1.0.0' }),
+    code: 'console.log("SECRET_PENDING_CODE");',
+  }).expect(201);
+
+  const anonymous = await request(app).get(`/v0/@${ownerNs}/hello/versions/1.0.0/download`);
+  assert.equal(anonymous.status, 404);
+
+  const owner = await request(app)
+    .get(`/v0/@${ownerNs}/hello/versions/1.0.0/download`)
+    .set(bearer(ownerToken));
+  assert.equal(owner.status, 404);
+});
+
+test('automation tokens cannot read pending version source', async () => {
+  const { adminToken, ownerToken, ownerNs } = await makeAdminAndOwner();
+  await publish(app, ownerNs, ownerToken, {
+    manifest: manifest({ version: '1.0.0' }),
+    code: 'console.log("REVIEW_ONLY");',
+  }).expect(201);
+
+  const created = await request(app)
+    .post('/v0/tokens')
+    .set(bearer(adminToken))
+    .send({ name: 'ci', scopes: ['publish'] })
+    .expect(201);
+
+  const dl = await request(app)
+    .get(`/v0/@${ownerNs}/hello/versions/1.0.0/download`)
+    .set(bearer(created.body.token));
+  assert.equal(dl.status, 404);
+});

@@ -214,7 +214,9 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     const row = await resolveVersion(req.params);
-    if (row.status !== 'published' && row.status !== 'yanked') throw notFound();
+    const isPublished = row.status === 'published' || row.status === 'yanked';
+    const isAdmin = req.auth?.user.role === 'admin' && req.auth.tokenType === 'session';
+    if (!isPublished && !(row.status === 'pending' && isAdmin)) throw notFound();
     const abs = path.join(config.dataDir, row.blob_path);
     if (!existsSync(abs)) throw notFound('Compiled output is missing.');
     res.type('application/javascript');

@@ -31,6 +31,9 @@ export const DEFAULTS = {
     defaultLimit: 20,
     maxLimit: 50,
   },
+  cors: {
+    allowedOrigins: '*',
+  },
 };
 
 function mergeDeep(base, override) {
@@ -62,6 +65,7 @@ const ENV_OVERRIDES = [
   ['rateLimits.signupWindowMinutes', 'TWEXTHUB_SIGNUP_WINDOW_MINUTES'],
   ['pagination.defaultLimit', 'TWEXTHUB_PAGINATION_DEFAULT_LIMIT'],
   ['pagination.maxLimit', 'TWEXTHUB_PAGINATION_MAX_LIMIT'],
+  ['cors.allowedOrigins', 'TWEXTHUB_CORS_ALLOWED_ORIGINS'],
 ];
 
 function coerceEnvValue(raw, current, envName) {
@@ -87,6 +91,14 @@ function coerceTrustProxy(raw) {
   return raw;
 }
 
+function coerceAllowedOrigins(raw) {
+  if (raw === '*') return '*';
+  return raw
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
 function applyEnvOverrides(config) {
   for (const [key, envName] of ENV_OVERRIDES) {
     const raw = process.env[envName];
@@ -96,6 +108,10 @@ function applyEnvOverrides(config) {
     const last = parts[parts.length - 1];
     if (key === 'trustProxy') {
       target[last] = coerceTrustProxy(raw);
+      continue;
+    }
+    if (key === 'cors.allowedOrigins') {
+      target[last] = coerceAllowedOrigins(raw);
       continue;
     }
     target[last] = coerceEnvValue(raw, target[last], envName);

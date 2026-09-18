@@ -13,6 +13,7 @@ Every TwextHub instance is configured by defaults, a `config.yaml` file, and env
 - [Auth](#auth)
 - [Rate limits](#rate-limits)
 - [Pagination](#pagination)
+- [CORS](#cors)
 - [Behavior notes](#behavior-notes)
 - [Data directory layout](#data-directory-layout)
 - [Request size limits](#request-size-limits)
@@ -28,7 +29,7 @@ The only required value is `database.url`, either in the file or as `TWEXTHUB_DA
 
 `config.yaml` is overridable: `node src/server.js /path/to/config.yaml`, and `node src/migrate.js /path/to/config.yaml` or `node src/migrate.js --config file.yaml`.
 
-Boolean environment variables must be exactly `true` or `false`; numeric ones must be positive integers. Anything else fails startup with a message naming the offending variable.
+Boolean environment variables must be exactly `true` or `false`; numeric ones must be positive integers. Anything else fails startup with a message naming the offending variable. `TWEXTHUB_CORS_ALLOWED_ORIGINS` is the exception: it takes a comma-separated list of origins, or `*`.
 
 `dataDir` is resolved relative to the process working directory.
 
@@ -76,6 +77,16 @@ Boolean environment variables must be exactly `true` or `false`; numeric ones mu
 | ------------------------- | ------- | ----------------------------------- | -------------------------------------------- |
 | `pagination.defaultLimit` | `20`    | `TWEXTHUB_PAGINATION_DEFAULT_LIMIT` | Page size when none is given                 |
 | `pagination.maxLimit`     | `50`    | `TWEXTHUB_PAGINATION_MAX_LIMIT`     | Upper bound on `limit` for any list endpoint |
+
+## CORS
+
+| Key                   | Default | Environment                     | Purpose                                                          |
+| --------------------- | ------- | ------------------------------- | ---------------------------------------------------------------- |
+| `cors.allowedOrigins` | `*`     | `TWEXTHUB_CORS_ALLOWED_ORIGINS` | Origins allowed to read the API from a browser; `*` for any site |
+
+`*` lets any origin read the registry — the default, since consumers like the TurboWarp editor load extensions from their own domain. To restrict, set a list of origins, either in `config.yaml` as a YAML array or as the environment variable with origins separated by commas: `TWEXTHUB_CORS_ALLOWED_ORIGINS=https://editor.example,https://hub.example`. A browser request from an allowed origin gets that origin echoed back in `Access-Control-Allow-Origin`; from any other origin it gets no CORS headers at all.
+
+Requests without an `Origin` header (the `twext` CLI, curl) are never affected. Publishing and moderation use bearer tokens, so allowing an origin does not let it act as another user — CORS only governs what a browser page can read.
 
 ## Behavior notes
 

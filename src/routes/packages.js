@@ -16,6 +16,7 @@ import {
   normalizeSemver,
 } from '../util.js';
 import { extensionDetailFromRow, versionToObject } from '../serialize.js';
+import { notifyUser, reviewApprovedMessage, reviewRejectedMessage } from '../notify.js';
 import { requireObjectBody } from './shared.js';
 
 export function makePackagesRouter({ sql, config, termsGate }) {
@@ -175,6 +176,15 @@ export function makePackagesRouter({ sql, config, termsGate }) {
           WHERE id = ${row.id} AND status = 'pending'
           RETURNING *
         `;
+        if (rows[0]) {
+          await notifyUser(
+            tx,
+            row.owner_id,
+            'review.rejected',
+            reviewRejectedMessage(row.extension_id, row.version, reason),
+            { namespace: row.namespace, id: row.extension_id, version: row.version, reason },
+          );
+        }
         return rows[0];
       });
       if (!updated) {
@@ -189,7 +199,16 @@ export function makePackagesRouter({ sql, config, termsGate }) {
         WHERE id = ${row.id} AND status = 'pending'
         RETURNING *
       `;
-      if (rows[0]) await tx`UPDATE users SET has_published = true WHERE id = ${row.owner_id}`;
+      if (rows[0]) {
+        await tx`UPDATE users SET has_published = true WHERE id = ${row.owner_id}`;
+        await notifyUser(
+          tx,
+          row.owner_id,
+          'review.approved',
+          reviewApprovedMessage(row.namespace, row.extension_id, row.version),
+          { namespace: row.namespace, id: row.extension_id, version: row.version },
+        );
+      }
       return rows[0];
     });
     if (!updated) {

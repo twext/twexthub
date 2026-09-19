@@ -10,6 +10,7 @@ import { makeAuthRouter } from './routes/auth.js';
 import { makeSessionsRouter } from './routes/sessions.js';
 import { makeTokensRouter } from './routes/tokens.js';
 import { makeUsersRouter } from './routes/users.js';
+import { makeNotificationsRouter } from './routes/notifications.js';
 import { makePackagesRouter } from './routes/packages.js';
 import { makeDiscoveryRouter } from './routes/discovery.js';
 import { makeAdminRouter } from './routes/admin.js';
@@ -50,6 +51,7 @@ export function createApp(opts = {}) {
   app.use(mount('/sessions'), makeSessionsRouter(shared));
   app.use(mount('/tokens'), makeTokensRouter(shared));
   app.use(mount('/users'), makeUsersRouter(shared));
+  app.use(mount('/notifications'), makeNotificationsRouter(shared));
   app.use(root || '/', makePackagesRouter(shared));
   app.use(root || '/', makeDiscoveryRouter(shared));
   app.use(root || '/', makeAdminRouter(shared));

@@ -57,7 +57,7 @@ export async function boot(overrides = {}) {
 export async function resetDb() {
   const { sql } = await boot();
   await sql.unsafe(`
-    TRUNCATE TABLE automation_tokens, sessions, versions, rate_limit_entries, users, legal_documents
+    TRUNCATE TABLE automation_tokens, sessions, versions, rate_limit_entries, notifications, users, legal_documents
     RESTART IDENTITY CASCADE
   `);
   await sql`

@@ -22,6 +22,7 @@
 - Public, cursor-paginated discovery of published extensions (`/v0/extensions`, `/v0/search`).
 - Namespaced publishing with a per-owner moderation gate: a first publish is `pending` until an admin approves; later publishes go straight to `published`.
 - Sessions and scoped automation tokens (`publish`, `yank`).
+- Per-account notifications for review decisions, terms bumps, and admin broadcasts (`GET /v0/notifications`), with a `twext notifications` command in the CLI.
 - Compiled blobs live on disk, not in the database. Bearer tokens are stored only as SHA-256 hashes.
 
 ## Overview

@@ -31,6 +31,17 @@ export function automationTokenToObject(row) {
   };
 }
 
+export function notificationToObject(row) {
+  return {
+    id: String(row.id),
+    kind: row.kind,
+    message: row.message,
+    payload: row.payload,
+    read: row.read_at !== null,
+    createdAt: row.created_at.toISOString(),
+  };
+}
+
 export function legalDocumentToObject(row) {
   return {
     version: row.version,

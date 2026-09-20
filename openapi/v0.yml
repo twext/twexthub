@@ -363,6 +363,82 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  # ---------------------------------------------------------- Notifications
+  /notifications:
+    get:
+      summary: List the caller's notifications
+      operationId: listNotifications
+      tags: [Userspace]
+      description: >
+        Newest first. Includes `unreadCount` for the whole mailbox (not just
+        this page) so a client can show an unread badge from a single call.
+        Sessions and automation tokens both work.
+      parameters:
+        - name: unread
+          in: query
+          schema: { type: string, enum: ['true'] }
+          description: Only return unread notifications. Any other value is rejected.
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Paginated notifications
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, unreadCount, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Notification' }
+                  unreadCount:
+                    { type: integer, description: Unread notifications across the whole mailbox. }
+                  pagination: { $ref: '#/components/schemas/CursorPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /notifications/read:
+    post:
+      summary: Mark notifications as read
+      operationId: markNotificationsRead
+      tags: [Userspace]
+      description: >
+        Send either `ids` (up to 100) or `all: true` — never both. Ids that
+        were already read, or belong to another account, are ignored, so the
+        call is idempotent and `updated` counts only newly read rows.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              oneOf:
+                - type: object
+                  required: [ids]
+                  properties:
+                    ids:
+                      type: array
+                      items: { type: integer }
+                      minItems: 1
+                      maxItems: 100
+                - type: object
+                  required: [all]
+                  properties:
+                    all: { type: boolean, enum: [true] }
+      responses:
+        '200':
+          description: Number of notifications newly marked read
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [updated]
+                properties:
+                  updated: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
   # ---------------------------------------------------------- Discovery
   /extensions:
     get:
@@ -691,6 +767,43 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
 
   # --------------------------------------------------------------- Admin
+  /admin/notifications:
+    post:
+      summary: Broadcast a notification to every account
+      operationId: broadcastNotification
+      tags: [Adminspace]
+      description: >
+        Fan-out at insert time: every account (past and present at the moment
+        of the call) gets its own `broadcast` notification row. Use for
+        registry-wide notices like maintenance windows or policy changes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message:
+                  type: string
+                  minLength: 1
+                  maxLength: 280
+                  pattern: '\S'
+      responses:
+        '201':
+          description: Delivered
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [created]
+                properties:
+                  created:
+                    { type: integer, description: Number of accounts the message was written to. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
   /versions:
     get:
       summary: Cross-owner moderation queue
@@ -772,6 +885,34 @@ components:
       type: string
       enum: [publish, yank]
       description: Only meaningful for automation tokens — sessions implicitly satisfy every scope.
+
+    NotificationKind:
+      type: string
+      enum:
+        [review.approved, review.rejected, terms.bumped, tokens.revoked, role.changed, broadcast]
+      description: |
+        What produced the notification. Emit points: `review.*` on an admin's
+        approve/reject of a pending version, `terms.bumped` when a terms
+        update lands (only sent to accounts that had accepted a previous
+        version), `tokens.revoked` when an admin resets another account's
+        password, `role.changed` on a role change, `broadcast` from
+        instance-wide admin announcements.
+
+    Notification:
+      type: object
+      required: [id, kind, message, payload, read, createdAt]
+      properties:
+        id: { type: string, description: "The notification row's own id, not a hash of any token." }
+        kind: { $ref: '#/components/schemas/NotificationKind' }
+        message: { type: string, description: Pre-rendered, human-readable text. }
+        payload:
+          type: object
+          description: >-
+            Kind-specific structured data — e.g. `namespace`, `id`, `version`,
+            and `reason` for review decisions — so clients can match
+            notifications against a local project.
+        read: { type: boolean }
+        createdAt: { type: string, format: date-time }
 
     Session:
       type: object

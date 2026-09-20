@@ -7,6 +7,7 @@ import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
 import { fieldErrors, forbidden, notFound } from '../errors.js';
 import { isValidNamespace } from '../util.js';
 import { userToObject } from '../serialize.js';
+import { notifyUser, roleChangedMessage, tokensRevokedMessage } from '../notify.js';
 import { requireObjectBody } from './shared.js';
 
 export function makeUsersRouter({ sql, config, termsGate }) {
@@ -116,6 +117,18 @@ export function makeUsersRouter({ sql, config, termsGate }) {
       if (password !== undefined) {
         await tx`DELETE FROM sessions WHERE user_id = ${target.id}`;
         await tx`DELETE FROM automation_tokens WHERE user_id = ${target.id}`;
+        if (Number(req.auth.user.id) !== Number(target.id)) {
+          await notifyUser(
+            tx,
+            target.id,
+            'tokens.revoked',
+            tokensRevokedMessage(req.auth.user.namespace),
+            { actor: req.auth.user.namespace },
+          );
+        }
+      }
+      if (role !== undefined) {
+        await notifyUser(tx, target.id, 'role.changed', roleChangedMessage(role), { role });
       }
       return tx`SELECT * FROM users WHERE id = ${target.id}`;
     });

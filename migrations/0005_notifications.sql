@@ -19,7 +19,7 @@ CREATE FUNCTION prune_notifications() RETURNS trigger AS $$
   BEGIN
     -- Serialize per user so concurrent inserts cannot race the retention
     -- delete. Xact-scoped, so it releases on commit or rollback.
-    PERFORM pg_advisory_xact_lock(32003, NEW.user_id::int);
+    PERFORM pg_advisory_xact_lock(NEW.user_id);
     DELETE FROM notifications
     WHERE user_id = NEW.user_id AND id <= (
       SELECT id FROM notifications

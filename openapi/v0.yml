@@ -376,7 +376,7 @@ paths:
       parameters:
         - name: unread
           in: query
-          schema: { type: string, enum: [true] }
+          schema: { type: string, enum: ['true'] }
           description: Only return unread notifications. Any other value is rejected.
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Limit'
@@ -788,6 +788,7 @@ paths:
                   type: string
                   minLength: 1
                   maxLength: 280
+                  pattern: '\S'
       responses:
         '201':
           description: Delivered

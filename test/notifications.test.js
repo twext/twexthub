@@ -358,12 +358,14 @@ test('publishes that skip review do not notify', async () => {
   const owner = await signupAndAccept(app, uniqNs());
   await sql`UPDATE users SET has_published = true WHERE namespace = ${owner.user.namespace}`;
 
-  await publishPending(app, {
+  const published = await publishPending(app, {
     token: owner.token,
     namespace: owner.user.namespace,
     id: 'myext',
     version: '1.0.0',
   });
+  assert.equal(published.status, 201, `publish failed: ${JSON.stringify(published.body)}`);
+  assert.equal(published.body.status, 'published');
 
   const body = await notificationsFor(owner.token);
   assert.equal(body.data.length, 0);
@@ -484,7 +486,9 @@ test('only an admin can broadcast, and it reaches every account', async () => {
     .set(bearer(admin.token))
     .send({ message: 'Scheduled maintenance tonight at 02:00 UTC.' })
     .expect(201);
-  assert.ok(asAdmin.body.created >= 3);
+  // resetDb truncates users with RESTART IDENTITY, so exactly these three
+  // accounts exist; an extra row here means the fan-out double-inserted.
+  assert.equal(asAdmin.body.created, 3);
 
   for (const account of [a, b, admin]) {
     const body = await notificationsFor(account.token);

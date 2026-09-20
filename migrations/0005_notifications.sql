@@ -17,6 +17,9 @@ CREATE INDEX notifications_unread_idx ON notifications(user_id) WHERE read_at IS
 -- Keep the newest 200 rows per user; older ones are deleted on insert.
 CREATE FUNCTION prune_notifications() RETURNS trigger AS $$
   BEGIN
+    -- Serialize per user so concurrent inserts cannot race the retention
+    -- delete. Xact-scoped, so it releases on commit or rollback.
+    PERFORM pg_advisory_xact_lock(32003, NEW.user_id::int);
     DELETE FROM notifications
     WHERE user_id = NEW.user_id AND id <= (
       SELECT id FROM notifications

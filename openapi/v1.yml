@@ -1,7 +1,7 @@
 openapi: '3.1.0'
 info:
   title: TwextHub API
-  version: '0.1.0'
+  version: '1.0.0'
   license:
     name: Apache-2.0
     identifier: Apache-2.0
@@ -9,11 +9,11 @@ info:
     TwextHub is a lightweight registry for publishing and discovering
     Twext-compiled TurboWarp extensions ("Twexts"). Packages are namespaced
     to their publishing account (`@namespace/id`) and versioned with SemVer.
-    Because the Twext compiler does not embed manifest metadata into its
-    compiled output (unlike the old Warp/Fluorite `Warp.meta` convention),
-    every publish call must submit its manifest fields explicitly as JSON
-    alongside the compiled code — TwextHub never parses the JS blob to
-    recover metadata.
+    Publishing uploads the project's `twext.yml` manifest and source files;
+    the hub compiles them server-side with a pinned `@twext/twext` compiler
+    in a sandboxed worker (unlike the old Warp/Fluorite `Warp.meta`
+    convention, the CLI never uploads pre-built metadata blobs — TwextHub
+    derives everything from the sources it builds).
 
     Every authenticated (`Userspace`/`Adminspace`) endpoint requires the
     caller to have accepted the current Terms of Service; a caller who
@@ -31,7 +31,7 @@ info:
     tokens, act on `/admin/*` endpoints, or change account settings —
     an automation token calling any of those gets a `403`.
 servers:
-  - url: https://{host}/v0
+  - url: https://{host}/v1
     variables:
       host:
         default: hub.twext.dev
@@ -290,7 +290,13 @@ paths:
       summary: List accounts
       operationId: listUsers
       tags: [Open]
-      security: []
+      security:
+        - {}
+        - BearerAuth: []
+      description: >
+        Private profiles are omitted for anonymous callers; signed-in
+        callers additionally see their own private profile; admins see
+        every profile.
       parameters:
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Limit'
@@ -316,7 +322,13 @@ paths:
       summary: Get an account
       operationId: getUser
       tags: [Open]
-      security: []
+      security:
+        - {}
+        - BearerAuth: []
+      description: >
+        404 for private profiles unless the caller is the owner or an
+        admin. Non-owner, non-admin callers never see `role`,
+        `termsAcceptedVersion`, or `isPrivate`.
       responses:
         '200':
           description: Account found
@@ -330,7 +342,8 @@ paths:
       tags: [Userspace]
       description: >
         Self or admin. Only an admin may set `role`. Changing `password`
-        revokes all of that account's existing tokens.
+        revokes all of that account's existing tokens. `private` toggles
+        profile privacy (see `User.isPrivate`).
       requestBody:
         required: true
         content:
@@ -342,6 +355,7 @@ paths:
                 displayName: { type: string, maxLength: 80 }
                 password: { type: string, minLength: 8, writeOnly: true }
                 role: { $ref: '#/components/schemas/Role' }
+                private: { type: boolean }
       responses:
         '200':
           description: Updated
@@ -445,8 +459,14 @@ paths:
       summary: List published extensions
       operationId: listExtensions
       tags: [Open]
-      security: []
-      description: Latest published version per `(namespace, id)`, newest first.
+      security:
+        - {}
+        - BearerAuth: []
+      description: >
+        Latest published version per `(namespace, id)`, newest first.
+        Only `public` versions from non-private profiles are listed;
+        a signed-in caller additionally sees their own `unlisted` and
+        `private` extensions; admins see everything.
       parameters:
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Limit'
@@ -470,8 +490,13 @@ paths:
       summary: Search published extensions
       operationId: searchExtensions
       tags: [Open]
-      security: []
-      description: Matches id, name, namespace, and description. Omit `query` for a recency-ordered fallback.
+      security:
+        - {}
+        - BearerAuth: []
+      description: >
+        Matches id, name, namespace, and description. Omit `query` for a
+        recency-ordered fallback. Subject to the same visibility rules as
+        `GET /extensions`.
       parameters:
         - name: query
           in: query
@@ -584,7 +609,13 @@ paths:
       summary: Registry-wide counters
       operationId: getStats
       tags: [Open]
-      security: []
+      security:
+        - {}
+        - BearerAuth: []
+      description: >
+        `published` and `authors` count only what the caller can see (the
+        same visibility rules as `GET /extensions`); `pending` is
+        admin-facing and only meaningful for admins.
       responses:
         '200':
           description: Counters
@@ -615,8 +646,14 @@ paths:
       summary: Get extension info
       operationId: getExtension
       tags: [Open]
-      security: []
-      description: Latest metadata plus every published version (SemVer descending). 404 if nothing is published yet.
+      security:
+        - {}
+        - BearerAuth: []
+      description: >
+        Latest metadata plus every published version (SemVer descending).
+        404 if nothing is published yet. A bearer token lets the owner (or
+        an admin) also see their own `unlisted`/`private` versions; private
+        versions are hidden from everyone else.
       responses:
         '200':
           description: Extension found
@@ -624,6 +661,35 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ExtensionDetail' }
         '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      summary: Change an extension's visibility
+      operationId: updateExtensionVisibility
+      tags: [Userspace]
+      description: >
+        Owner or admin. Applies to every published version of the extension
+        at once: `public` (listed and searchable by anyone), `unlisted`
+        (direct links and downloads work, but excluded from listings and
+        search), or `private` (only the owner and admins can see or
+        download it).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [visibility]
+              properties:
+                visibility: { type: string, enum: [public, unlisted, private] }
+      responses:
+        '200':
+          description: Updated — the latest published version
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VersionInfo' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
     delete:
       summary: Delete an extension and all of its versions
       operationId: deleteExtension
@@ -644,6 +710,13 @@ paths:
       operationId: publishVersion
       tags: [Userspace]
       description: >
+        TwextHub compiles the project server-side: the request carries the
+        `twext.yml` manifest and the project's source files, and the hub
+        validates and builds them in a sandboxed worker using a pinned
+        `@twext/twext` compiler (the bundled dependency, or the version set
+        via `twext.version` in config). The compiled blob never comes from
+        the client.
+
         `namespace` in the path must match the authenticated caller (admins
         may publish on behalf of any namespace). A caller's first-ever
         publish is held as `pending`; once an admin approves it, all of
@@ -653,18 +726,37 @@ paths:
         SemVer strictly greater than the current highest published version
         for this package (yanked versions still count toward that check).
         Requires the `publish` scope (sessions satisfy this implicitly).
+        Rate limited per account (429 when exceeded).
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [manifest, code]
+              required: [manifest, sources]
               properties:
-                manifest: { $ref: '#/components/schemas/Manifest' }
-                code:
+                manifest:
                   type: string
-                  description: The compiled Twext output (a single IIFE JavaScript file), as text.
+                  description: >
+                    The project's `twext.yml`, verbatim, as YAML text. The
+                    hub parses it both for registry metadata and to compile
+                    the project.
+                sources:
+                  type: object
+                  description: >
+                    Map of project-relative file paths to UTF-8 file
+                    contents. Must include the manifest's `entryPoint` and
+                    every file it (transitively) needs. Reserved keys
+                    (`twext.yml`, `package.json`, `node_modules`) and paths
+                    escaping the project directory are rejected. Text files
+                    only; binaries are not supported.
+                  additionalProperties: { type: string }
+                twext:
+                  type: string
+                  description: >
+                    The `twext` CLI version that produced the upload (e.g.
+                    `"1.0.0"`), recorded for provenance.
+                visibility: { type: string, enum: [public, unlisted, private], default: public }
       responses:
         '201':
           description: Version created (status reflects moderation state)
@@ -678,7 +770,17 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
         '409': { $ref: '#/components/responses/Conflict' }
-        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '422':
+          description: Semantically invalid input (bad manifest, non-SemVer version, id mismatch, invalid source paths)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '502':
+          description: The build sandbox failed to produce output (hub-side compile infrastructure error)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
 
   /@{namespace}/{id}/versions/{version}:
     parameters:
@@ -689,11 +791,15 @@ paths:
       summary: Get version metadata
       operationId: getVersion
       tags: [Open]
-      security: []
+      security:
+        - {}
+        - BearerAuth: []
       description: >
         `version` may be a literal SemVer string or the literal `latest`
         (highest published SemVer, not most-recently-published). Non-owners
-        never see `pending`, `rejected`, or `staging` versions.
+        never see `pending`, `rejected`, or `staging` versions, nor
+        `private` ones. The owner or an admin additionally receives
+        `manifestSource` and `sources` for review.
       responses:
         '200':
           description: Version found
@@ -874,9 +980,8 @@ components:
         Matches TurboWarp's own documented rule for extension `id`s: only
         `a-z` and `0-9`, no spaces or special characters. The 64-char cap
         is TwextHub's own storage/URL-length limit, not a TurboWarp
-        requirement. twext.yml's `extension.id` field has no pattern
-        constraint today; the `twext` CLI's own validation should be
-        tightened to match this rather than the other way around.
+        requirement. The `twext` CLI enforces the same pattern on
+        `twext.yml`'s `extension.id`, so both sides agree.
     Role:
       type: string
       enum: [admin, normal]
@@ -955,12 +1060,20 @@ components:
 
     User:
       type: object
-      required: [namespace, displayName, role, hasPublished, createdAt, termsAcceptedVersion]
+      required:
+        [namespace, displayName, role, hasPublished, isPrivate, createdAt, termsAcceptedVersion]
       properties:
         namespace: { $ref: '#/components/schemas/Namespace' }
         displayName: { type: string }
         role: { $ref: '#/components/schemas/Role' }
         hasPublished: { type: boolean }
+        isPrivate:
+          type: boolean
+          description: >
+            A private profile is hidden from `GET /users`, `GET
+            /users/{namespace}` (404 for everyone but the owner and admins),
+            and its extensions are excluded from public listings alongside
+            their own visibility.
         createdAt: { type: string, format: date-time, readOnly: true }
         termsAcceptedVersion:
           type: ['integer', 'null']
@@ -974,10 +1087,22 @@ components:
         body: { type: string, description: Markdown source. }
         updatedAt: { type: string, format: date-time }
 
+    Visibility:
+      type: string
+      enum: [public, unlisted, private]
+      description: >
+        `public` listings are visible to everyone; `unlisted` versions work
+        via direct link/download but never appear in listings or search;
+        `private` versions are visible only to the owner and admins.
+
     Manifest:
       type: object
       required: [id, name, version, license, description]
-      description: Mirrors the fields in twext.yml that TwextHub needs to store; not the whole manifest.
+      description: >
+        Mirrors the fields in twext.yml that TwextHub needs to store; not
+        the whole manifest. On publish the manifest travels as YAML *text*
+        (see `publishVersion`); this object describes the registry's
+        flattened view of it after parsing.
       properties:
         id: { $ref: '#/components/schemas/ExtensionId' }
         name: { type: string }
@@ -988,16 +1113,23 @@ components:
         color1: { type: string, pattern: '^#[0-9a-fA-F]{6}$' }
         color2: { type: string, pattern: '^#[0-9a-fA-F]{6}$' }
         color3: { type: string, pattern: '^#[0-9a-fA-F]{6}$' }
+        readme:
+          type: string
+          description: >
+            Project-relative path to the README among the uploaded sources.
+            When omitted the hub picks a root-level `README*` file if one
+            exists.
 
     ExtensionSummary:
       type: object
-      required: [namespace, id, name, version, description, publishedAt]
+      required: [namespace, id, name, version, description, visibility, publishedAt]
       properties:
         namespace: { $ref: '#/components/schemas/Namespace' }
         id: { $ref: '#/components/schemas/ExtensionId' }
         name: { type: string }
         version: { type: string }
         description: { type: string }
+        visibility: { $ref: '#/components/schemas/Visibility' }
         publishedAt: { type: string, format: date-time }
 
     ExtensionDetail:
@@ -1011,25 +1143,48 @@ components:
             color1: { type: string }
             color2: { type: string }
             color3: { type: string }
+            readme:
+              type: ['string', 'null']
+              description: >
+                README markdown for the latest published version, extracted
+                at publish time from the uploaded sources, or `null` when
+                the project has none.
             versions:
               type: array
               items: { $ref: '#/components/schemas/VersionInfo' }
 
     VersionInfo:
       type: object
-      required: [namespace, id, version, status, createdAt]
+      required: [namespace, id, version, status, visibility, createdAt]
       properties:
         namespace: { $ref: '#/components/schemas/Namespace' }
         id: { $ref: '#/components/schemas/ExtensionId' }
         version: { type: string }
         status: { type: string, enum: [staging, pending, published, rejected, yanked] }
+        visibility: { $ref: '#/components/schemas/Visibility' }
         name: { type: string }
         license: { type: string }
         description: { type: string }
         author: { type: ['string', 'null'] }
+        twextVersion:
+          type: string
+          description: >
+            The `twext` CLI version reported by the publisher, when
+            supplied.
         createdAt: { type: string, format: date-time }
         publishedAt:
           { type: string, format: date-time, description: Absent while pending or rejected. }
+        manifestSource:
+          type: string
+          description: >
+            The uploaded `twext.yml` text. Returned only to the owner or an
+            admin (and always on the moderation queue).
+        sources:
+          type: object
+          description: >
+            The uploaded project files (path → contents). Returned only to
+            the owner or an admin (and always on the moderation queue).
+          additionalProperties: { type: string }
         dist:
           type: object
           description: Absent while pending or rejected.
@@ -1043,6 +1198,9 @@ components:
           required: [ownerNamespace]
           properties:
             ownerNamespace: { $ref: '#/components/schemas/Namespace' }
+          description: >
+            The moderation queue always includes `manifestSource` and
+            `sources` so an admin can review the actual project text.
 
     Stats:
       type: object
@@ -1111,10 +1269,14 @@ components:
       description: Resource already exists
       content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
     UnprocessableEntity:
-      description: Semantically invalid input (e.g. non-SemVer version, id mismatch)
+      description: >
+        Semantically invalid input (e.g. non-SemVer version, id mismatch,
+        malformed manifest YAML, invalid source paths)
       content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
     TooManyRequests:
-      description: Rate limit exceeded
+      description: >
+        Rate limit exceeded (login, signup, or publish — each has its own
+        bucket and window)
       headers:
         Retry-After: { schema: { type: integer } }
       content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }

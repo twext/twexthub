@@ -1,6 +1,6 @@
 # Hosting TwextHub
 
-TwextHub is a registry for Twext-compiled extensions. Publishers submit compiled extensions through the `twext` CLI; the registry stores them, applies a per-owner moderation gate, and serves downloads to TurboWarp. This guide is for people running an instance. Publisher-facing behavior is documented by the [twext](https://github.com/twext/twext) project.
+TwextHub is a registry for Twext-compiled extensions. Publishers submit their project sources through the `twext` CLI; the registry compiles them server-side, applies a per-owner moderation gate, and serves downloads to TurboWarp. This guide is for people running an instance. Publisher-facing behavior is documented by the [twext](https://github.com/twext/twext) project.
 
 ## Table of Contents
 
@@ -91,7 +91,7 @@ The [configuration reference](configuration.md) lists every key and environment 
 - `TWEXTHUB_PUBLIC_BASE_URL` — the public URL of the instance. Used to build the download links the registry returns.
 - `TWEXTHUB_TRUST_PROXY` — set when the instance runs behind a reverse proxy (next section).
 - `TWEXTHUB_REQUIRE_HTTPS` — reject plain-HTTP requests with 403.
-- `TWEXTHUB_API_ROOT` — the URL prefix all routes are served under. Default `/v0`.
+- `TWEXTHUB_API_ROOT` — the URL prefix all routes are served under. Default `/v1`.
 
 ## Behind a reverse proxy
 
@@ -100,7 +100,7 @@ Point the proxy at the server's port. Two things need attention when one is in f
 - Set `TWEXTHUB_TRUST_PROXY` to the appropriate [Express trust proxy](https://expressjs.com/en/guide/behind-proxies.html) value (`1` for a single proxy hop, `true` to trust all). Without it the server sees the proxy's address instead of the client's. The per-IP signup limit (5 per 15 minutes by default) then adds up signups from every visitor into one bucket and starts returning 429 for everyone.
 - If the proxy terminates TLS, `TWEXTHUB_TRUST_PROXY` is also what lets `TWEXTHUB_REQUIRE_HTTPS` tell real clients from plain HTTP.
 
-Publish requests can carry up to 25 MB of JSON. nginx's default `client_max_body_size` is 1 MB, so raise it for the instance; otherwise large publishes die at the proxy.
+Publish requests can carry up to 25 MB of JSON (the project sources plus manifest). nginx's default `client_max_body_size` is 1 MB, so raise it for the instance; otherwise large publishes die at the proxy. Publishing is additionally rate limited per account (20 per 15 minutes by default), which also throttles the build sandbox.
 
 ## Blobs must live on persistent storage
 
@@ -111,6 +111,8 @@ Published blobs are written to the local disk under `dataDir`, not to the databa
 
 Point `TWEXTHUB_DATA_DIR` (or `dataDir`) at the persistent mount and keep it in sync with database backups.
 
+The image bundles the `@twext/twext` compiler it compiles publishes with. If you pin a different `twext.version` (`TWEXTHUB_TWEXT_VERSION`), the server installs it from npm on first use, so the container needs outbound npm access then; the install lands in `data/twext-versions/` and is reused thereafter.
+
 ## Upgrades
 
 Releases are tagged with semver, and `latest` tracks `main`. To upgrade, pull the new image or deploy the new tree and restart — new migrations apply automatically on boot. A database backup before the restart is cheap insurance if a migration goes wrong mid-run.
@@ -120,7 +122,7 @@ Releases are tagged with semver, and `latest` tracks `main`. To upgrade, pull th
 Two things hold state: the Postgres database and the data directory.
 
 - Database: a standard `pg_dump`, restored onto a fresh database with `psql`.
-- Data directory: the compiled extension blobs. Blobs are written once at publish time and cannot be regenerated, so losing the data directory while keeping the database leaves published versions listed but their download endpoints 404ing. Back up `blobs/` (or the whole `dataDir`) together with the database.
+- Data directory: the compiled extension blobs. Blobs are written once at publish time and cannot be regenerated (the registry stores the uploaded sources too, so a blob could in principle be recompiled, but that requires re-running the compiler and is not something the server does). Losing the data directory while keeping the database leaves published versions listed but their download endpoints 404ing. Back up `blobs/` (or the whole `dataDir`) together with the database.
 
 `tmp/` and `quarantine/` inside the data directory are scratch space; only `blobs/` matters for restores.
 
@@ -129,7 +131,7 @@ Two things hold state: the Postgres database and the data directory.
 On every start the server reconciles leftover state:
 
 - Staging versions older than an hour are promoted to `pending` or `published` when their blob exists, and removed when it does not. That is crash recovery for publishes interrupted mid-write.
-- Temp uploads and quarantined account data older than an hour are swept.
+- Temp uploads, build sandboxes, and quarantined account data older than an hour are swept.
 - Expired sessions and stale rate-limit rows are deleted.
 
 A hard kill mid-publish therefore leaves the registry consistent after the next boot.

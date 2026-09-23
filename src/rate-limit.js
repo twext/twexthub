@@ -50,7 +50,36 @@ export function makeRateLimiter(sql, config) {
     if (count > max) throw tooManyRequests(secondsUntilReset(windowMinutes));
   }
 
-  const maxWindow = Math.max(limits.loginWindowMinutes, limits.signupWindowMinutes);
+  // Middleware factory: bucketFor(req) names the bucket (e.g. per account).
+  // Recorded before the handler runs because publishes compile on the server.
+  function publish(bucketFor) {
+    const max = limits.publishesPerWindow ?? 100;
+    const windowMinutes = limits.publishWindowMinutes ?? 15;
+    return async (req, res, next) => {
+      try {
+        const bucket = bucketFor?.(req) ?? 'publish';
+        const windowStart = windowStartFor(new Date(), windowMinutes);
+        const [existing] = await sql`
+          SELECT count FROM rate_limit_entries
+          WHERE bucket = ${bucket} AND window_start = ${windowStart}
+        `;
+        if (existing && Number(existing.count) >= max) {
+          return next(tooManyRequests(secondsUntilReset(windowMinutes)));
+        }
+        const count = await record(bucket, windowMinutes);
+        if (count > max) return next(tooManyRequests(secondsUntilReset(windowMinutes)));
+        return next();
+      } catch (error) {
+        return next(error);
+      }
+    };
+  }
+
+  const maxWindow = Math.max(
+    limits.loginWindowMinutes,
+    limits.signupWindowMinutes,
+    limits.publishWindowMinutes ?? 15,
+  );
   const cleanupInterval = setInterval(async () => {
     try {
       const cutoff = new Date(Date.now() - maxWindow * 60_000);
@@ -64,6 +93,7 @@ export function makeRateLimiter(sql, config) {
   return {
     loginCheck,
     signupCheck,
+    publish,
     stop() {
       clearInterval(cleanupInterval);
     },

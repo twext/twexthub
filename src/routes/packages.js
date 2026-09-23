@@ -4,6 +4,7 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import express, { Router } from 'express';
 import semver from 'semver';
+import YAML from 'yaml';
 import { requireAuth, requireScope } from '../auth.js';
 import { conflict, forbidden, HttpError, fieldErrors, notFound } from '../errors.js';
 import {
@@ -17,13 +18,20 @@ import {
 } from '../util.js';
 import { extensionDetailFromRow, versionToObject } from '../serialize.js';
 import { notifyUser, reviewApprovedMessage, reviewRejectedMessage } from '../notify.js';
+import { compileProject, resolveSourcePath } from '../compiler.js';
 import { requireObjectBody } from './shared.js';
 
-export function makePackagesRouter({ sql, config, termsGate }) {
+const VISIBILITIES = new Set(['public', 'unlisted', 'private']);
+const README_FALLBACKS = ['readme.md', 'readme.markdown', 'readme.mkd', 'readme.txt', 'readme'];
+
+export function makePackagesRouter({ sql, config, rateLimiter, termsGate }) {
   const router = Router();
 
   const yankChain = [requireAuth, termsGate, requireScope('yank')];
   const ownerChain = [requireAuth, termsGate];
+  const publishRateLimit =
+    rateLimiter?.publish?.((req) => (req.auth?.user ? `publish:${req.auth.user.id}` : 'publish')) ??
+    ((_req, _res, next) => next());
 
   async function loadVersion(namespace, id, version) {
     const [row] = await sql`
@@ -53,77 +61,27 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     return row;
   }
 
+  function canReadVersion(row, req) {
+    const isOwner = req.auth?.user.namespace === row.namespace;
+    const isAdmin = req.auth?.user.role === 'admin';
+    if (isOwner || isAdmin) return true;
+    if (row.status !== 'published' && row.status !== 'yanked') return false;
+    return row.visibility !== 'private';
+  }
+
   router.post(
     '/@:namespace/:id/versions',
     requireAuth,
     express.json({ limit: '25mb' }),
     termsGate,
     requireScope('publish'),
+    publishRateLimit,
     async (req, res) => {
       const { namespace, id } = req.params;
       requireObjectBody(req);
       if (!isValidExtensionId(id)) {
         throw fieldErrors([{ field: 'id', message: 'Invalid extension id.' }]);
       }
-
-      const { manifest, code } = req.body;
-      const errors = [];
-      if (!isPlainObject(manifest)) {
-        errors.push({ field: 'manifest', message: 'Manifest is required.' });
-      } else {
-        if (!isValidExtensionId(manifest.id)) {
-          errors.push({
-            field: 'manifest.id',
-            message: 'Must match a-z and 0-9, up to 64 characters.',
-          });
-        }
-        if (manifest.id !== id) {
-          errors.push({
-            field: 'manifest.id',
-            message: `Must equal the id in the path ("${id}").`,
-          });
-        }
-        if (!normalizeSemver(manifest.version)) {
-          errors.push({ field: 'manifest.version', message: 'Must be a valid SemVer string.' });
-        }
-        if (typeof manifest.license !== 'string' || manifest.license.length === 0) {
-          errors.push({
-            field: 'manifest.license',
-            message: 'License (SPDX identifier) is required.',
-          });
-        }
-        if (typeof manifest.description !== 'string') {
-          errors.push({ field: 'manifest.description', message: 'Description is required.' });
-        }
-        if (
-          manifest.name !== undefined &&
-          (typeof manifest.name !== 'string' || manifest.name.length === 0)
-        ) {
-          errors.push({
-            field: 'manifest.name',
-            message: 'Must be a non-empty string when provided.',
-          });
-        }
-        if (manifest.author !== undefined && typeof manifest.author !== 'string') {
-          errors.push({ field: 'manifest.author', message: 'Must be a string when provided.' });
-        }
-        for (const color of ['color1', 'color2', 'color3']) {
-          if (
-            manifest[color] !== undefined &&
-            (typeof manifest[color] !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(manifest[color]))
-          ) {
-            errors.push({
-              field: `manifest.${color}`,
-              message: `Must be "#RRGGBB" when provided.`,
-            });
-          }
-        }
-      }
-      if (typeof code !== 'string' || code.length === 0) {
-        errors.push({ field: 'code', message: 'The compiled Twext output is required.' });
-      }
-      if (errors.length > 0) throw fieldErrors(errors);
-
       if (!isValidNamespace(namespace)) throw notFound();
       const [owner] = await sql`SELECT * FROM users WHERE namespace = ${namespace}`;
       if (!owner) throw notFound('No such publishing account.');
@@ -131,18 +89,55 @@ export function makePackagesRouter({ sql, config, termsGate }) {
         throw forbidden('You can only publish to your own namespace.');
       }
 
-      const row = await publishVersion(sql, config, owner, { id, manifest, code });
-      res.status(201).json(versionToObject(row, config));
+      const { manifest, sources, twext, visibility } = req.body;
+      const m = parseManifestField(manifest, id);
+      const sourcesObj = validateSources(sources);
+
+      if (
+        visibility !== undefined &&
+        (typeof visibility !== 'string' || !VISIBILITIES.has(visibility))
+      ) {
+        throw fieldErrors([
+          { field: 'visibility', message: 'Must be "public", "unlisted", or "private".' },
+        ]);
+      }
+      if (twext !== undefined && typeof twext !== 'string') {
+        throw fieldErrors([{ field: 'twext', message: 'Must be a string when provided.' }]);
+      }
+
+      let compiled;
+      try {
+        compiled = await compileProject(config, {
+          manifestSource: req.body.manifest,
+          sources: sourcesObj,
+        });
+      } catch (error) {
+        if (error instanceof HttpError) throw error;
+        throw new HttpError(502, { detail: `Build failed: ${error.message}` });
+      }
+
+      const readme = extractReadme(m.readme, sourcesObj);
+
+      const row = await publishVersion(sql, config, owner, {
+        id,
+        manifest: m,
+        manifestSource: req.body.manifest,
+        sources: sourcesObj,
+        twextVersion: twext ?? null,
+        visibility: visibility ?? 'public',
+        readme,
+        output: compiled.output,
+      });
+      res.status(201).json(versionToObject(row, config, { includeSources: true }));
     },
   );
 
   router.get('/@:namespace/:id/versions/:version', async (req, res) => {
     const row = await resolveVersion(req.params);
-    const isVisible = row.status === 'published' || row.status === 'yanked';
-    const isOwner = req.auth?.user.namespace === req.params.namespace;
+    if (!canReadVersion(row, req)) throw notFound();
+    const isOwner = req.auth?.user.namespace === row.namespace;
     const isAdmin = req.auth?.user.role === 'admin';
-    if (!isVisible && !isOwner && !isAdmin) throw notFound();
-    res.json(versionToObject(row, config));
+    res.json(versionToObject(row, config, { includeSources: isOwner || isAdmin }));
   });
 
   router.patch('/@:namespace/:id/versions/:version', requireAuth, termsGate, async (req, res) => {
@@ -233,9 +228,11 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     const row = await resolveVersion(req.params);
+    const isOwner = req.auth?.user.namespace === row.namespace;
+    const isAdmin = req.auth?.user.role === 'admin';
     const isPublished = row.status === 'published' || row.status === 'yanked';
-    const isAdmin = req.auth?.user.role === 'admin' && req.auth.tokenType === 'session';
-    if (!isPublished && !(row.status === 'pending' && isAdmin)) throw notFound();
+    const canReviewBlob = row.status === 'pending' && isAdmin && req.auth.tokenType === 'session';
+    if (!canDownload(row, { isPublished, isOwner, isAdmin, canReviewBlob })) throw notFound();
     const abs = path.join(config.dataDir, row.blob_path);
     if (!existsSync(abs)) throw notFound('Compiled output is missing.');
     res.type('application/javascript');
@@ -251,12 +248,44 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     `;
     if (rows.length === 0) throw notFound();
     rows.sort((a, b) => compareSemver(b.version, a.version));
+    const latest = rows[0];
+    const isOwner = req.auth?.user.namespace === namespace;
+    const isAdmin = req.auth?.user.role === 'admin';
+    if (latest.visibility === 'private' && !isOwner && !isAdmin) throw notFound();
     res.json(
       extensionDetailFromRow(
         rows[0],
-        rows.map((row) => versionToObject(row, config)),
+        rows.filter((row) => canReadVersion(row, req)).map((row) => versionToObject(row, config)),
       ),
     );
+  });
+
+  router.patch('/@:namespace/:id', ownerChain, async (req, res) => {
+    const { namespace, id } = req.params;
+    if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    requireObjectBody(req);
+    const { visibility } = req.body;
+    if (typeof visibility !== 'string' || !VISIBILITIES.has(visibility)) {
+      throw fieldErrors([
+        { field: 'visibility', message: 'Must be "public", "unlisted", or "private".' },
+      ]);
+    }
+    const rows = await sql`
+      SELECT * FROM versions
+      WHERE namespace = ${namespace} AND extension_id = ${id} AND status = 'published'
+    `;
+    if (rows.length === 0) throw notFound();
+    if (req.auth.user.namespace !== namespace && req.auth.user.role !== 'admin') {
+      throw forbidden('You can only change your own extensions.');
+    }
+    const updated = await sql`
+      UPDATE versions SET visibility = ${visibility}
+      WHERE namespace = ${namespace} AND extension_id = ${id} AND status = 'published'
+      RETURNING *
+    `;
+    const ceiling = maxVersionBySemver(updated.map((row) => row.version));
+    const latest = updated.find((row) => row.version === ceiling);
+    res.json(versionToObject(latest, config));
   });
 
   router.delete('/@:namespace/:id', ownerChain, async (req, res) => {
@@ -277,7 +306,7 @@ export function makePackagesRouter({ sql, config, termsGate }) {
           throw forbidden('You can only delete your own extensions.');
         }
         rows = await reserved`
-          SELECT blob_path, status FROM versions
+          SELECT blob_path, status, visibility FROM versions
           WHERE namespace = ${namespace} AND extension_id = ${id}
         `;
         if (rows.length === 0) throw notFound();
@@ -310,15 +339,159 @@ export function makePackagesRouter({ sql, config, termsGate }) {
   return router;
 }
 
-async function publishVersion(sql, config, owner, { id, manifest, code }) {
+function canDownload(row, { isPublished, isOwner, isAdmin, canReviewBlob }) {
+  if (isOwner || isAdmin) return isPublished || canReviewBlob;
+  if (!isPublished) return false;
+  return row.visibility !== 'private';
+}
+
+function parseManifestField(manifestField, pathId) {
+  if (typeof manifestField !== 'string' || manifestField.trim().length === 0) {
+    throw fieldErrors([{ field: 'manifest', message: 'Manifest (twext.yml) is required.' }]);
+  }
+  let manifest;
+  try {
+    manifest = YAML.parse(manifestField);
+  } catch (error) {
+    throw fieldErrors([{ field: 'manifest', message: `Not valid YAML: ${error.message}` }]);
+  }
+  if (!isPlainObject(manifest)) {
+    throw fieldErrors([{ field: 'manifest', message: 'Must be a YAML mapping.' }]);
+  }
+
+  const errors = [];
+  const ext = manifest.extension;
+  if (!isPlainObject(ext)) {
+    errors.push({ field: 'manifest.extension', message: 'An "extension" section is required.' });
+  } else {
+    if (!isValidExtensionId(ext.id)) {
+      errors.push({
+        field: 'manifest.extension.id',
+        message: 'Must match a-z and 0-9, up to 64 characters.',
+      });
+    }
+    if (ext.id !== pathId) {
+      errors.push({
+        field: 'manifest.extension.id',
+        message: `Must equal the id in the path ("${pathId}").`,
+      });
+    }
+  }
+  if (!normalizeSemver(manifest.version)) {
+    errors.push({ field: 'manifest.version', message: 'Must be a valid SemVer string.' });
+  }
+  if (typeof manifest.license !== 'string' || manifest.license.length === 0) {
+    errors.push({
+      field: 'manifest.license',
+      message: 'License (SPDX identifier) is required.',
+    });
+  }
+  if (typeof manifest.description !== 'string') {
+    errors.push({ field: 'manifest.description', message: 'Description is required.' });
+  }
+  if (
+    manifest.name !== undefined &&
+    (typeof manifest.name !== 'string' || manifest.name.length === 0)
+  ) {
+    errors.push({
+      field: 'manifest.name',
+      message: 'Must be a non-empty string when provided.',
+    });
+  }
+  if (manifest.author !== undefined && typeof manifest.author !== 'string') {
+    errors.push({ field: 'manifest.author', message: 'Must be a string when provided.' });
+  }
+  if (
+    manifest.readme !== undefined &&
+    (typeof manifest.readme !== 'string' || manifest.readme.length === 0)
+  ) {
+    errors.push({
+      field: 'manifest.readme',
+      message: 'Must be a source path when provided.',
+    });
+  }
+  for (const color of ['color1', 'color2', 'color3']) {
+    if (
+      manifest[color] !== undefined &&
+      (typeof manifest[color] !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(manifest[color]))
+    ) {
+      errors.push({
+        field: `manifest.${color}`,
+        message: `Must be "#RRGGBB" when provided.`,
+      });
+    }
+  }
+  if (errors.length > 0) throw fieldErrors(errors);
+  return manifest;
+}
+
+function validateSources(sources) {
+  if (!isPlainObject(sources)) {
+    throw fieldErrors([
+      { field: 'sources', message: 'A sources map of paths to file contents is required.' },
+    ]);
+  }
+  const entries = Object.entries(sources);
+  if (entries.length === 0) {
+    throw fieldErrors([{ field: 'sources', message: 'At least one source file is required.' }]);
+  }
+  const normalized = {};
+  for (const [rel, content] of entries) {
+    const safe = resolveSourcePath(rel);
+    if (typeof content !== 'string') {
+      throw fieldErrors([
+        { field: 'sources', message: `Source ${JSON.stringify(rel)} must be a string.` },
+      ]);
+    }
+    if (Object.hasOwn(normalized, safe)) {
+      throw fieldErrors([
+        { field: 'sources', message: `Duplicate source path ${JSON.stringify(rel)}.` },
+      ]);
+    }
+    normalized[safe] = content;
+  }
+  return normalized;
+}
+
+function extractReadme(configuredPath, sources) {
+  if (configuredPath !== undefined) {
+    const key = resolveSourcePath(configuredPath);
+    if (!Object.hasOwn(sources, key)) {
+      throw fieldErrors([
+        {
+          field: 'manifest.readme',
+          message: `Source path ${JSON.stringify(configuredPath)} not found among uploaded sources.`,
+        },
+      ]);
+    }
+    return sources[key];
+  }
+  const target = Object.keys(sources).find(
+    (key) => key.split('/').length === 1 && README_FALLBACKS.includes(key.toLowerCase()),
+  );
+  return target ? sources[target] : null;
+}
+
+async function publishVersion(
+  sql,
+  config,
+  owner,
+  { id, manifest, manifestSource, sources, twextVersion, visibility, readme, output },
+) {
   const version = normalizeSemver(manifest.version);
-  const name = typeof manifest.name === 'string' && manifest.name.length > 0 ? manifest.name : id;
+  const name =
+    typeof manifest.name === 'string' && manifest.name.length > 0
+      ? manifest.name
+      : (manifest.extension?.name ?? id);
   const blobRelative = path.join('blobs', owner.namespace, id, `${version}.js`);
   const blobAbs = path.join(config.dataDir, blobRelative);
   const tmpDir = path.join(config.dataDir, 'tmp');
   await mkdir(tmpDir, { recursive: true });
   const tmpPath = path.join(tmpDir, `upload-${randomBytes(8).toString('hex')}.tmp`);
   const lockKey = `${owner.namespace}/${id}`;
+  const color1 = manifest.color1 ?? manifest.extension?.color1 ?? null;
+  const color2 = manifest.color2 ?? manifest.extension?.color2 ?? null;
+  const color3 = manifest.color3 ?? manifest.extension?.color3 ?? null;
 
   const searchText = buildSearchText({
     name,
@@ -330,7 +503,7 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
   const finalStatus = owner.has_published ? 'published' : 'pending';
 
   try {
-    await writeFile(tmpPath, code);
+    await writeFile(tmpPath, output);
 
     const staged = await sql.begin(async (tx) => {
       // Serialize per namespace/extension so concurrent publishes cannot both
@@ -358,14 +531,14 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
 
       const [staged] = await tx`
         INSERT INTO versions (
-          owner_id, namespace, extension_id, version, status,
+          owner_id, namespace, extension_id, version, status, visibility,
           name, license, description, author, color1, color2, color3,
-          blob_path, search_text
+          blob_path, search_text, manifest_source, sources, twext_version, readme
         ) VALUES (
-          ${owner.id}, ${owner.namespace}, ${id}, ${version}, 'staging',
+          ${owner.id}, ${owner.namespace}, ${id}, ${version}, 'staging', ${visibility},
           ${name}, ${manifest.license}, ${manifest.description}, ${manifest.author ?? null},
-          ${manifest.color1 ?? null}, ${manifest.color2 ?? null}, ${manifest.color3 ?? null},
-          ${blobRelative}, ${searchText}
+          ${color1}, ${color2}, ${color3},
+          ${blobRelative}, ${searchText}, ${manifestSource}, ${JSON.stringify(sources)}, ${twextVersion}, ${readme}
         )
         RETURNING *
       `;

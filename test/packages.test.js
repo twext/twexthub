@@ -1,7 +1,7 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept } from './helpers.mjs';
+import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishPayload } from './helpers.mjs';
 
 let app;
 before(async () => {
@@ -12,12 +12,8 @@ after(async () => {
   await (await boot()).sql.end();
 });
 
-function manifest(obj = {}) {
-  return { id: 'hello', version: '1.0.0', license: 'MIT', name: 'hello', description: 'd', ...obj };
-}
-
 function publish(app, ns, token, body) {
-  return request(app).post(`/v0/@${ns}/hello/versions`).set(bearer(token)).send(body);
+  return request(app).post(`/v1/@${ns}/hello/versions`).set(bearer(token)).send(body);
 }
 
 async function makeAdminAndOwner() {
@@ -33,28 +29,23 @@ async function makeAdminAndOwner() {
 test('first publish -> pending; list empty until approved', async () => {
   const ns = uniqNs();
   const { token } = await signupAndAccept(app, ns);
-  const r = await publish(app, ns, token, { manifest: manifest(), code: 'console.log(1);' }).expect(
-    201,
-  );
+  const r = await publish(app, ns, token, publishPayload()).expect(201);
   assert.equal(r.body.status, 'pending');
 
-  const list = await request(app).get('/v0/extensions');
+  const list = await request(app).get('/v1/extensions');
   assert.equal(list.status, 200);
   assert.equal(list.body.data.length, 0);
 });
 
 test('unauthenticated publish is 401', async () => {
   const ns = uniqNs();
-  await request(app)
-    .post(`/v0/@${ns}/hello/versions`)
-    .send({ manifest: manifest(), code: 'x' })
-    .expect(401);
+  await request(app).post(`/v1/@${ns}/hello/versions`).send(publishPayload()).expect(401);
 });
 
 test('one pending per owner: second publish conflicts', async () => {
   const ns = uniqNs();
   const { token } = await signupAndAccept(app, ns);
-  const body = { manifest: manifest(), code: 'x' };
+  const body = publishPayload();
   await publish(app, ns, token, body).expect(201);
   const again = await publish(app, ns, token, body).expect(403);
   assert.match(again.body.detail, /awaiting review/i);
@@ -62,13 +53,12 @@ test('one pending per owner: second publish conflicts', async () => {
 
 test('version must be strictly greater semver than published', async () => {
   const { adminToken, ownerToken, ownerNs } = await makeAdminAndOwner();
-  const post = (v) =>
-    publish(app, ownerNs, ownerToken, { manifest: manifest({ version: v }), code: 'x' });
+  const post = (v) => publish(app, ownerNs, ownerToken, publishPayload({ version: v }));
   const approve = async () => {
-    const queue = await request(app).get('/v0/versions?status=pending').set(bearer(adminToken));
+    const queue = await request(app).get('/v1/versions?status=pending').set(bearer(adminToken));
     const version = queue.body.data[0].version;
     await request(app)
-      .patch(`/v0/@${ownerNs}/hello/versions/${version}`)
+      .patch(`/v1/@${ownerNs}/hello/versions/${version}`)
       .set(bearer(adminToken))
       .send({ status: 'approved' })
       .expect(200);
@@ -84,30 +74,30 @@ test('version must be strictly greater semver than published', async () => {
 
 test('admin approves pending; subsequent publishes auto-published', async () => {
   const { adminToken, ownerToken, ownerNs } = await makeAdminAndOwner();
-  const first = await publish(app, ownerNs, ownerToken, { manifest: manifest(), code: 'x' }).expect(
-    201,
-  );
+  const first = await publish(app, ownerNs, ownerToken, publishPayload()).expect(201);
   assert.equal(first.body.status, 'pending');
 
-  const queue = await request(app).get('/v0/versions?status=pending').set(bearer(adminToken));
+  const queue = await request(app).get('/v1/versions?status=pending').set(bearer(adminToken));
   assert.equal(queue.body.data.length, 1);
   const version = queue.body.data[0].version;
 
   const approve = await request(app)
-    .patch(`/v0/@${ownerNs}/hello/versions/${version}`)
+    .patch(`/v1/@${ownerNs}/hello/versions/${version}`)
     .set(bearer(adminToken))
     .send({ status: 'approved' })
     .expect(200);
   assert.equal(approve.body.status, 'published');
 
-  const list = await request(app).get('/v0/extensions');
+  const list = await request(app).get('/v1/extensions');
   assert.equal(list.body.data.length, 1);
   assert.equal(list.body.data[0].version, '1.0.0');
 
-  const second = await publish(app, ownerNs, ownerToken, {
-    manifest: manifest({ version: '2.0.0' }),
-    code: 'y',
-  }).expect(201);
+  const second = await publish(
+    app,
+    ownerNs,
+    ownerToken,
+    publishPayload({ version: '2.0.0' }),
+  ).expect(201);
   assert.equal(second.body.status, 'published');
   assert.equal(second.body.version, '2.0.0');
 });
@@ -115,47 +105,47 @@ test('admin approves pending; subsequent publishes auto-published', async () => 
 test('latest resolves by SemVer across a yank/re-publish sequence', async () => {
   const { adminToken, ownerToken, ownerNs } = await makeAdminAndOwner();
 
-  const post = (v, code) =>
-    publish(app, ownerNs, ownerToken, { manifest: manifest({ version: v }), code });
-  const latest = () => request(app).get(`/v0/@${ownerNs}/hello/versions/latest`).expect(200);
+  const post = (v, marker) =>
+    publish(app, ownerNs, ownerToken, publishPayload({ version: v, marker }));
+  const latest = () => request(app).get(`/v1/@${ownerNs}/hello/versions/latest`).expect(200);
   const approveFirst = async () => {
-    const queue = await request(app).get('/v0/versions?status=pending').set(bearer(adminToken));
+    const queue = await request(app).get('/v1/versions?status=pending').set(bearer(adminToken));
     await request(app)
-      .patch(`/v0/@${ownerNs}/hello/versions/${queue.body.data[0].version}`)
+      .patch(`/v1/@${ownerNs}/hello/versions/${queue.body.data[0].version}`)
       .set(bearer(adminToken))
       .send({ status: 'approved' })
       .expect(200);
   };
 
-  await post('1.0.0', 'console.log(1)').expect(201);
+  await post('1.0.0', 'one-marker').expect(201);
   await approveFirst();
-  await post('2.0.0', 'console.log(2)').expect(201);
+  await post('2.0.0', 'TWO_MARKER').expect(201);
 
   assert.equal((await latest()).body.version, '2.0.0');
 
   // yank the newest version; latest must fall back to the next-highest published
   await request(app)
-    .delete(`/v0/@${ownerNs}/hello/versions/2.0.0`)
+    .delete(`/v1/@${ownerNs}/hello/versions/2.0.0`)
     .set(bearer(ownerToken))
     .expect(204);
   assert.equal((await latest()).body.version, '1.0.0');
 
   // the yanked blob stays downloadable
   const yankedDownload = await request(app)
-    .get(`/v0/@${ownerNs}/hello/versions/2.0.0/download`)
+    .get(`/v1/@${ownerNs}/hello/versions/2.0.0/download`)
     .expect(200);
-  assert.equal(yankedDownload.text, 'console.log(2)');
+  assert.match(yankedDownload.text, /TWO_MARKER/);
 
   // yanked versions still count toward the version ceiling
-  const rePublishYanked = await post('2.0.0', 'console.log(2again)');
+  const rePublishYanked = await post('2.0.0', 'TWO_AGAIN');
   assert.equal(rePublishYanked.status, 422);
 
   // a strictly greater version publishes past the yanked one
-  await post('2.0.1', 'console.log(2.1)').expect(201);
+  await post('2.0.1', 'TWO_ONE').expect(201);
   assert.equal((await latest()).body.version, '2.0.1');
 
   // extensions listing must not surface yanked versions
-  const listing = await request(app).get('/v0/extensions').expect(200);
+  const listing = await request(app).get('/v1/extensions').expect(200);
   assert.equal(listing.body.data.length, 1);
   assert.equal(listing.body.data[0].version, '2.0.1');
 });
@@ -163,28 +153,26 @@ test('latest resolves by SemVer across a yank/re-publish sequence', async () => 
 test('non-admin cannot review', async () => {
   const ns = uniqNs();
   const { token } = await signupAndAccept(app, ns);
-  await publish(app, ns, token, { manifest: manifest(), code: 'x' }).expect(201);
+  await publish(app, ns, token, publishPayload()).expect(201);
   const normNs = uniqNs();
   const nb = await signupAndAccept(app, normNs);
-  const queue = await request(app).get('/v0/versions?status=pending').set(bearer(nb.token));
+  const queue = await request(app).get('/v1/versions?status=pending').set(bearer(nb.token));
   assert.equal(queue.status, 403);
 });
 
 test('download serves approved code with javascript content type', async () => {
   const { adminToken, ownerToken, ownerNs } = await makeAdminAndOwner();
-  const code = 'console.log("DOWNLOAD_SPECIAL");';
-  await publish(app, ownerNs, ownerToken, {
-    manifest: manifest({ version: '1.0.0' }),
-    code,
-  }).expect(201);
-  const queue = await request(app).get('/v0/versions?status=pending').set(bearer(adminToken));
+  await publish(app, ownerNs, ownerToken, publishPayload({ marker: 'DOWNLOAD_SPECIAL' })).expect(
+    201,
+  );
+  const queue = await request(app).get('/v1/versions?status=pending').set(bearer(adminToken));
   await request(app)
-    .patch(`/v0/@${ownerNs}/hello/versions/${queue.body.data[0].version}`)
+    .patch(`/v1/@${ownerNs}/hello/versions/${queue.body.data[0].version}`)
     .set(bearer(adminToken))
     .send({ status: 'approved' })
     .expect(200);
 
-  const dl = await request(app).get(`/v0/@${ownerNs}/hello/versions/1.0.0/download`);
+  const dl = await request(app).get(`/v1/@${ownerNs}/hello/versions/1.0.0/download`);
   assert.equal(dl.status, 200);
   assert.match(dl.headers['content-type'], /javascript/);
   assert.match(dl.text, /DOWNLOAD_SPECIAL/);
@@ -192,14 +180,12 @@ test('download serves approved code with javascript content type', async () => {
 
 test('admin can download a pending version source for review', async () => {
   const { adminToken, ownerToken, ownerNs } = await makeAdminAndOwner();
-  const code = 'console.log("PENDING_REVIEW_CODE");';
-  await publish(app, ownerNs, ownerToken, {
-    manifest: manifest({ version: '1.0.0' }),
-    code,
-  }).expect(201);
+  await publish(app, ownerNs, ownerToken, publishPayload({ marker: 'PENDING_REVIEW_CODE' })).expect(
+    201,
+  );
 
   const dl = await request(app)
-    .get(`/v0/@${ownerNs}/hello/versions/1.0.0/download`)
+    .get(`/v1/@${ownerNs}/hello/versions/1.0.0/download`)
     .set(bearer(adminToken));
   assert.equal(dl.status, 200);
   assert.match(dl.headers['content-type'], /javascript/);
@@ -208,35 +194,31 @@ test('admin can download a pending version source for review', async () => {
 
 test('pending version source is hidden from non-admins', async () => {
   const { ownerToken, ownerNs } = await makeAdminAndOwner();
-  await publish(app, ownerNs, ownerToken, {
-    manifest: manifest({ version: '1.0.0' }),
-    code: 'console.log("SECRET_PENDING_CODE");',
-  }).expect(201);
+  await publish(app, ownerNs, ownerToken, publishPayload({ marker: 'SECRET_PENDING_CODE' })).expect(
+    201,
+  );
 
-  const anonymous = await request(app).get(`/v0/@${ownerNs}/hello/versions/1.0.0/download`);
+  const anonymous = await request(app).get(`/v1/@${ownerNs}/hello/versions/1.0.0/download`);
   assert.equal(anonymous.status, 404);
 
   const owner = await request(app)
-    .get(`/v0/@${ownerNs}/hello/versions/1.0.0/download`)
+    .get(`/v1/@${ownerNs}/hello/versions/1.0.0/download`)
     .set(bearer(ownerToken));
   assert.equal(owner.status, 404);
 });
 
 test('automation tokens cannot read pending version source', async () => {
   const { adminToken, ownerToken, ownerNs } = await makeAdminAndOwner();
-  await publish(app, ownerNs, ownerToken, {
-    manifest: manifest({ version: '1.0.0' }),
-    code: 'console.log("REVIEW_ONLY");',
-  }).expect(201);
+  await publish(app, ownerNs, ownerToken, publishPayload({ marker: 'REVIEW_ONLY' })).expect(201);
 
   const created = await request(app)
-    .post('/v0/tokens')
+    .post('/v1/tokens')
     .set(bearer(adminToken))
     .send({ name: 'ci', scopes: ['publish'] })
     .expect(201);
 
   const dl = await request(app)
-    .get(`/v0/@${ownerNs}/hello/versions/1.0.0/download`)
+    .get(`/v1/@${ownerNs}/hello/versions/1.0.0/download`)
     .set(bearer(created.body.token));
   assert.equal(dl.status, 404);
 });

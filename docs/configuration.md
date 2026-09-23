@@ -12,6 +12,7 @@ Every TwextHub instance is configured by defaults, a `config.yaml` file, and env
 - [Database](#database)
 - [Auth](#auth)
 - [Rate limits](#rate-limits)
+- [Compiler (`twext`)](#compiler-twext)
 - [Pagination](#pagination)
 - [CORS](#cors)
 - [Behavior notes](#behavior-notes)
@@ -39,7 +40,7 @@ Boolean environment variables must be exactly `true` or `false`; numeric ones mu
 | --------------- | ----------------------- | -------------------------- | ------------------------------------------------------------------------ |
 | `port`          | `3000`                  | `TWEXTHUB_PORT`            | TCP port to listen on                                                    |
 | `dataDir`       | `./data`                | `TWEXTHUB_DATA_DIR`        | Directory holding published blobs and scratch space                      |
-| `apiRoot`       | `/v0`                   | `TWEXTHUB_API_ROOT`        | Prefix for all routes; `/v0`, `v0`, and `/v0/` are the same              |
+| `apiRoot`       | `/v1`                   | `TWEXTHUB_API_ROOT`        | Prefix for all routes; `/v1`, `v1`, and `/v1/` are the same              |
 | `publicBaseUrl` | `http://localhost:3000` | `TWEXTHUB_PUBLIC_BASE_URL` | Client-facing base URL; used to build download links                     |
 | `requireHttps`  | `false`                 | `TWEXTHUB_REQUIRE_HTTPS`   | Reject non-`https` requests with 403                                     |
 | `trustProxy`    | `false`                 | `TWEXTHUB_TRUST_PROXY`     | Express trust proxy: `true`, `false`, a hop count, or an address pattern |
@@ -70,6 +71,21 @@ Boolean environment variables must be exactly `true` or `false`; numeric ones mu
 | `rateLimits.loginWindowMinutes`     | `15`    | `TWEXTHUB_LOGIN_WINDOW_MINUTES`      | Window length for login attempts |
 | `rateLimits.signupsPerIpPerWindow`  | `5`     | `TWEXTHUB_SIGNUPS_PER_IP_PER_WINDOW` | Accounts per IP per window       |
 | `rateLimits.signupWindowMinutes`    | `15`    | `TWEXTHUB_SIGNUP_WINDOW_MINUTES`     | Window length for signups        |
+| `rateLimits.publishesPerWindow`     | `20`    | `TWEXTHUB_PUBLISHES_PER_WINDOW`      | Publishes per account per window |
+| `rateLimits.publishWindowMinutes`   | `15`    | `TWEXTHUB_PUBLISH_WINDOW_MINUTES`    | Window length for publishes      |
+
+Publishes are rate limited per account because the server compiles each upload — the limit protects the build sandbox as much as the database.
+
+## Compiler (`twext`)
+
+Publishing uploads sources; TwextHub compiles them server-side in a sandboxed worker process.
+
+| Key                           | Default | Environment                              | Purpose                                                                                                                                  |
+| ----------------------------- | ------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `twext.version`               | `null`  | `TWEXTHUB_TWEXT_VERSION`                 | Pin the `@twext/twext` compiler version; installed on demand into `dataDir/twext-versions/`. When empty, the bundled dependency is used. |
+| `twext.compileTimeoutSeconds` | `20`    | `TWEXTHUB_TWEXT_COMPILE_TIMEOUT_SECONDS` | Kill a build sandbox that runs longer than this                                                                                          |
+
+The bundled compiler is the `@twext/twext` dependency in `package.json`. Pinning a different version downloads it from npm on first use (npm must be on `PATH`), then reuses the cached install.
 
 ## Pagination
 
@@ -90,7 +106,7 @@ Requests without an `Origin` header (the `twext` CLI, curl) are never affected. 
 
 ## Behavior notes
 
-- Login is limited per namespace-and-IP and per IP, both at once. Signups are limited per IP. Exceeding a limit returns 429 with a `Retry-After` header. Rate-limit rows are pruned by a background job and again on boot.
+- Login is limited per namespace-and-IP and per IP, both at once. Signups are limited per IP. Publishes are limited per account. Exceeding a limit returns 429 with a `Retry-After` header. Rate-limit rows are pruned by a background job and again on boot.
 - `requireHttps` only distinguishes real clients behind a TLS-terminating proxy when `trustProxy` is set.
 - `publicBaseUrl` appears in API responses as the start of download URLs. Keep it the client-facing address, not an internal one.
 - `apiRoot` moves every route at once, including the moderation queue and download links. Decide on it before going public; changing it later moves the registry's URLs.
@@ -103,11 +119,13 @@ data/
 │   └── <namespace>/
 │       └── <extension-id>/
 │           └── <version>.js     # published blobs (durable)
-├── tmp/                         # in-flight publish uploads
+├── twext-versions/              # pinned @twext/twext compiler installs
+│   └── <version>/
+├── tmp/                         # in-flight publish uploads and build sandboxes
 └── quarantine/                  # deleted accounts awaiting final purge
 ```
 
-`blobs/` holds durable content. `tmp/` and `quarantine/` are swept of anything older than an hour on boot.
+`blobs/` holds durable content. `tmp/` and `quarantine/` are swept of anything older than an hour on boot. `twext-versions/` is a cache — safe to delete when nothing pins that version.
 
 ## Request size limits
 

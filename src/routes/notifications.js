@@ -7,9 +7,9 @@ import { requireObjectBody } from './shared.js';
 
 const MAX_MARK_READ = 100;
 
-export function makeNotificationsRouter({ sql, config }) {
+export function makeNotificationsRouter({ sql, config, termsGate }) {
   const router = Router();
-  const guard = [requireAuth];
+  const guard = [requireAuth, termsGate];
 
   router.get('/', guard, async (req, res) => {
     const limit = parseLimit(config, req.query.limit);

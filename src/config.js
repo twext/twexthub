@@ -7,7 +7,7 @@ import { normalizeApiRoot } from './util.js';
 export const DEFAULTS = {
   port: 3000,
   dataDir: './data',
-  apiRoot: product.defaults?.apiRoot ?? '/v0',
+  apiRoot: product.defaults?.apiRoot ?? '/v1',
   publicBaseUrl: 'http://localhost:3000',
   requireHttps: false,
   trustProxy: false,
@@ -26,6 +26,8 @@ export const DEFAULTS = {
     loginWindowMinutes: 15,
     signupsPerIpPerWindow: 5,
     signupWindowMinutes: 15,
+    publishesPerWindow: 20,
+    publishWindowMinutes: 15,
   },
   pagination: {
     defaultLimit: 20,
@@ -33,6 +35,13 @@ export const DEFAULTS = {
   },
   cors: {
     allowedOrigins: '*',
+  },
+  twext: {
+    // Exact Twext version to compile publishes with. When empty, the bundled
+    // @twext/twext dependency is used; otherwise the version is installed on
+    // demand into dataDir/twext-versions/<version> and used for every publish.
+    version: null,
+    compileTimeoutSeconds: 20,
   },
 };
 
@@ -63,9 +72,13 @@ const ENV_OVERRIDES = [
   ['rateLimits.loginWindowMinutes', 'TWEXTHUB_LOGIN_WINDOW_MINUTES'],
   ['rateLimits.signupsPerIpPerWindow', 'TWEXTHUB_SIGNUPS_PER_IP_PER_WINDOW'],
   ['rateLimits.signupWindowMinutes', 'TWEXTHUB_SIGNUP_WINDOW_MINUTES'],
+  ['rateLimits.publishesPerWindow', 'TWEXTHUB_PUBLISHES_PER_WINDOW'],
+  ['rateLimits.publishWindowMinutes', 'TWEXTHUB_PUBLISH_WINDOW_MINUTES'],
   ['pagination.defaultLimit', 'TWEXTHUB_PAGINATION_DEFAULT_LIMIT'],
   ['pagination.maxLimit', 'TWEXTHUB_PAGINATION_MAX_LIMIT'],
   ['cors.allowedOrigins', 'TWEXTHUB_CORS_ALLOWED_ORIGINS'],
+  ['twext.version', 'TWEXTHUB_TWEXT_VERSION'],
+  ['twext.compileTimeoutSeconds', 'TWEXTHUB_TWEXT_COMPILE_TIMEOUT_SECONDS'],
 ];
 
 function coerceEnvValue(raw, current, envName) {

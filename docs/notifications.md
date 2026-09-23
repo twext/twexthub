@@ -1,6 +1,6 @@
 # Notifications
 
-TwextHub keeps a per-account notification mailbox. Review decisions, terms updates, admin password resets, role changes, and instance-wide broadcasts all land there. Clients read the mailbox over the API; the `twext` CLI ships a `notifications` command on top of it (requires Twext CLI v0.3.0 or above).
+TwextHub keeps a per-account notification mailbox. Review decisions, terms updates, admin password resets, role changes, and instance-wide broadcasts all land there. Clients read the mailbox over the API; the `twext` CLI ships a `notifications` command on top of it (requires Twext CLI v1.0.0 or above).
 
 ## Table of Contents
 
@@ -36,7 +36,7 @@ Each notification carries a pre-rendered `message` plus a structured `payload` (
 
 ```sh
 curl -H 'Authorization: Bearer <token>' \
-  'https://hub.example.com/v0/notifications?limit=20'
+  'https://hub.example.com/v1/notifications?limit=20'
 ```
 
 Returns notifications newest first, with `unreadCount` for the whole mailbox (not just the page) so a client can render an unread badge from this single call. The list is cursor-paginated with `?limit` and `?cursor`; pass `?unread=true` to see only unread rows.
@@ -49,7 +49,7 @@ Both sessions and automation tokens can read the mailbox. There is no admin over
 curl -X POST -H 'Authorization: Bearer <token>' \
   -H 'Content-Type: application/json' \
   -d '{"ids":["12","13"]}' \
-  https://hub.example.com/v0/notifications/read
+  https://hub.example.com/v1/notifications/read
 ```
 
 Send either `ids` (up to 100) or `all: true`, never both. The call is idempotent: ids that were already read or belong to another account are ignored, and the response reports only newly read rows as `updated`.
@@ -58,13 +58,13 @@ Reading is not automatic — the CLI marks rows read only when you pass `--read`
 
 ## Broadcasts
 
-Admins post a registry-wide message with `POST /v0/admin/notifications`:
+Admins post a registry-wide message with `POST /v1/admin/notifications`:
 
 ```sh
 curl -X POST -H 'Authorization: Bearer <session-token>' \
   -H 'Content-Type: application/json' \
   -d '{"message":"Scheduled maintenance tonight at 02:00 UTC."}' \
-  https://hub.example.com/v0/admin/notifications
+  https://hub.example.com/v1/admin/notifications
 ```
 
 The message is capped at 280 characters. Fan-out happens at insert time — every account gets its own row, and accounts created later do not see old broadcasts. The response reports how many mailboxes the message reached. Automation tokens are rejected, like on every admin endpoint.

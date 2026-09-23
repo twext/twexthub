@@ -19,10 +19,10 @@
 
 ## Highlights
 
-- Public, cursor-paginated discovery of published extensions (`/v0/extensions`, `/v0/search`).
+- Public, cursor-paginated discovery of published extensions (`/v1/extensions`, `/v1/search`).
 - Namespaced publishing with a per-owner moderation gate: a first publish is `pending` until an admin approves; later publishes go straight to `published`.
 - Sessions and scoped automation tokens (`publish`, `yank`).
-- Per-account notifications for review decisions, terms bumps, and admin broadcasts (`GET /v0/notifications`), with a `twext notifications` command in the CLI.
+- Per-account notifications for review decisions, terms bumps, and admin broadcasts (`GET /v1/notifications`), with a `twext notifications` command in the CLI.
 - Compiled blobs live on disk, not in the database. Bearer tokens are stored only as SHA-256 hashes.
 
 ## Overview
@@ -37,11 +37,11 @@ Twext is maintained by the [Twext Team](https://github.com/twext).
 
 Three kinds of callers use the API:
 
-- **The registry** — `GET /v0/extensions`, `/v0/search`, `GET /v0/@:namespace/:id` — is public and read-only. Blobs download via `GET /v0/@:namespace/:id/versions/:version/download`, which keeps serving yanked versions so existing consumers keep working.
-- **A publisher** uses the `twext` command-line interface to create an account/sign in, and publish extension versions. _This requires at least Twext v0.2.0._
-- **An admin** reviews that queue with `GET /v0/versions?status=pending` and approves or rejects each entry via `PATCH /v0/@:namespace/:id/versions/:version`. Admins also publish the terms/privacy text (`PATCH /v0/admin/terms`, `PATCH /v0/admin/privacy`) — a terms bump forces everyone to re-accept before publishing again.
+- **The registry** — `GET /v1/extensions`, `/v1/search`, `GET /v1/@:namespace/:id` — is public and read-only. Blobs download via `GET /v1/@:namespace/:id/versions/:version/download`, which keeps serving yanked versions so existing consumers keep working.
+- **A publisher** uses the `twext` command-line interface to create an account/sign in, and publish extension versions. _This requires at least Twext v1.0.0._
+- **An admin** reviews that queue with `GET /v1/versions?status=pending` and approves or rejects each entry via `PATCH /v1/@:namespace/:id/versions/:version`. Admins also publish the terms/privacy text (`PATCH /v1/admin/terms`, `PATCH /v1/admin/privacy`) — a terms bump forces everyone to re-accept before publishing again.
 
-CI can publish with automation tokens created at `POST /v0/tokens`; the `publish` scope covers publishing, `yank` covers `DELETE /v0/@:namespace/:id/versions/:version`.
+CI can publish with automation tokens created at `POST /v1/tokens`; the `publish` scope covers publishing, `yank` covers `DELETE /v1/@:namespace/:id/versions/:version`.
 
 ## Installation
 
@@ -60,7 +60,7 @@ Migrations in `migrations/*.sql` run in order on boot, or ahead of time with `np
 
 For production, set `publicBaseUrl` to the public URL of the instance (it's used to build download links) and run behind a TLS-terminating proxy.
 
-All API paths are served under `apiRoot` in `config.yaml` (default `/v0`), so `/v0/extensions`, `/v1/extensions`, or `/ts/extensions` are all the same endpoint on a server with the matching `apiRoot`. Download links in API responses use the same prefix. The same value can be set with `TWEXTHUB_API_ROOT`.
+All API paths are served under `apiRoot` in `config.yaml` (default `/v1`), so `/v1/extensions`, `/v0/extensions`, or `/ts/extensions` are all the same endpoint on a server with the matching `apiRoot`. Download links in API responses use the same prefix. The same value can be set with `TWEXTHUB_API_ROOT`.
 
 ### Running with Docker
 

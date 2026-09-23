@@ -2,6 +2,7 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig } from './config.js';
 import { product } from './product.js';
 import { createApp } from './app.js';
+import { ensureTwextVersion } from './compiler.js';
 import { createDb, ensureDataDirs, reconcileOnBoot, runMigrations } from './db.js';
 
 export async function bootstrap(config = loadConfig()) {
@@ -10,8 +11,9 @@ export async function bootstrap(config = loadConfig()) {
   try {
     await runMigrations(sql);
     await reconcileOnBoot(sql, config);
-    const { app, rateLimiter } = createApp({ config, sql });
-    return { app, sql, config, rateLimiter };
+    await ensureTwextVersion(config);
+    const { app, rateLimiter, termsGate } = createApp({ config, sql });
+    return { app, sql, config, rateLimiter, termsGate };
   } catch (error) {
     await sql.end();
     throw error;

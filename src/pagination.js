@@ -9,9 +9,12 @@ const CURSOR_KEY_TYPES = {
     return Number.isSafeInteger(n) && n > 0 ? n : null;
   },
   timestamp: (value) => {
-    if (typeof value !== 'string') return null;
+    // Preserve the full string (including microseconds) so pagination keys on
+    // the same precision Postgres stores; comparing `::timestamptz` needs the
+    // original value, and round-tripping through a JS Date would truncate it.
+    if (typeof value !== 'string' || value.length === 0) return null;
     const ms = Date.parse(value);
-    return Number.isNaN(ms) ? null : new Date(ms).toISOString();
+    return Number.isNaN(ms) ? null : value;
   },
   string: (value) => (typeof value === 'string' && value.length > 0 ? value : null),
 };

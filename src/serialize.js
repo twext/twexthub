@@ -6,6 +6,7 @@ export function userToObject(row) {
     displayName: row.display_name,
     role: row.role,
     hasPublished: row.has_published,
+    isPrivate: row.is_private,
     createdAt: row.created_at.toISOString(),
     termsAcceptedVersion: row.terms_accepted_version ?? null,
   };
@@ -50,7 +51,7 @@ export function legalDocumentToObject(row) {
   };
 }
 
-export function versionToObject(row, config) {
+export function versionToObject(row, config, { includeSources = false } = {}) {
   const out = {
     namespace: row.namespace,
     id: row.extension_id,
@@ -59,8 +60,10 @@ export function versionToObject(row, config) {
     name: row.name,
     license: row.license,
     description: row.description,
+    visibility: row.visibility,
     createdAt: row.created_at.toISOString(),
   };
+  if (row.twext_version) out.twextVersion = row.twext_version;
   if (row.author) out.author = row.author;
   if (row.published_at) out.publishedAt = row.published_at.toISOString();
   if (row.status === 'published' || row.status === 'yanked') {
@@ -68,7 +71,16 @@ export function versionToObject(row, config) {
       downloadUrl: downloadUrl(config, row.namespace, row.extension_id, row.version),
     };
   }
+  if (includeSources) {
+    out.manifestSource = row.manifest_source;
+    out.sources = parseSources(row.sources);
+  }
   return out;
+}
+
+function parseSources(value) {
+  if (value !== null && typeof value === 'object' && !Array.isArray(value)) return value;
+  return {};
 }
 
 export function downloadUrl(config, namespace, id, version) {
@@ -84,6 +96,7 @@ export function extensionSummaryFromRow(row) {
     name: row.name,
     version: row.version,
     description: row.description,
+    visibility: row.visibility,
     publishedAt: row.published_at.toISOString(),
   };
 }
@@ -96,13 +109,14 @@ export function extensionDetailFromRow(row, versions) {
     color1: row.color1 ?? null,
     color2: row.color2 ?? null,
     color3: row.color3 ?? null,
+    readme: row.readme ?? null,
     versions,
   };
 }
 
 export function pendingVersionToObject(row, config) {
   return {
-    ...versionToObject(row, config),
+    ...versionToObject(row, config, { includeSources: true }),
     ownerNamespace: row.namespace,
   };
 }

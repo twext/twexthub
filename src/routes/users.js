@@ -16,8 +16,14 @@ export function makeUsersRouter({ sql, config, termsGate }) {
   function serializePublicUser(row, req) {
     const isOwner = req.auth?.user.namespace === row.namespace;
     const isAdmin = req.auth?.user.role === 'admin';
+    if (row.is_private && !isOwner && !isAdmin) throw notFound();
     if (isOwner || isAdmin) return userToObject(row);
-    const { role: _role, termsAcceptedVersion: _terms, ...rest } = userToObject(row);
+    const {
+      role: _role,
+      termsAcceptedVersion: _terms,
+      isPrivate: _isPrivate,
+      ...rest
+    } = userToObject(row);
     return rest;
   }
 
@@ -25,9 +31,15 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor, { i: 'int' });
 
+    let ownFilter;
+    if (!req.auth?.user) ownFilter = sql`AND NOT is_private`;
+    else if (req.auth.user.role === 'admin') ownFilter = sql`AND TRUE`;
+    else ownFilter = sql`AND (NOT is_private OR id = ${req.auth.user.id})`;
+
     const rows = await sql`
       SELECT * FROM users
-      ${cursor ? sql`WHERE id < ${cursor.i}` : sql``}
+      ${cursor ? sql`WHERE id < ${cursor.i}` : sql`WHERE TRUE`}
+      ${ownFilter}
       ORDER BY id DESC
       LIMIT ${limit + 1}
     `;
@@ -51,8 +63,14 @@ export function makeUsersRouter({ sql, config, termsGate }) {
   });
 
   function skipTermsForPasswordOnly(req, res, next) {
-    const { displayName, password, role } = req.body ?? {};
-    if (password !== undefined && displayName === undefined && role === undefined) return next();
+    const { displayName, password, role, private: isPrivate } = req.body ?? {};
+    if (
+      password !== undefined &&
+      displayName === undefined &&
+      role === undefined &&
+      isPrivate === undefined
+    )
+      return next();
     return termsGate(req, res, next);
   }
 
@@ -63,8 +81,13 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     }
     requireObjectBody(req);
 
-    const { displayName, password, role } = req.body;
-    if (displayName === undefined && password === undefined && role === undefined) {
+    const { displayName, password, role, private: isPrivate } = req.body;
+    if (
+      displayName === undefined &&
+      password === undefined &&
+      role === undefined &&
+      isPrivate === undefined
+    ) {
       throw fieldErrors([{ field: 'body', message: 'Provide at least one field to update.' }]);
     }
 
@@ -77,6 +100,9 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     }
     if (role !== undefined && role !== 'admin' && role !== 'normal') {
       errors.push({ field: 'role', message: 'Role must be "admin" or "normal".' });
+    }
+    if (isPrivate !== undefined && typeof isPrivate !== 'boolean') {
+      errors.push({ field: 'private', message: 'Must be a boolean.' });
     }
     if (errors.length > 0) throw fieldErrors(errors);
 
@@ -110,6 +136,10 @@ export function makeUsersRouter({ sql, config, termsGate }) {
       }
       patch.password_hash = await hashPassword(password, config.auth.scrypt);
       columns.push('password_hash');
+    }
+    if (isPrivate !== undefined) {
+      patch.is_private = isPrivate;
+      columns.push('is_private');
     }
 
     const [updated] = await sql.begin(async (tx) => {

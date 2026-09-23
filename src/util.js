@@ -37,7 +37,7 @@ export function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-// "v0", "/v0", "/v0/" all mean the same thing; "''" or "/" means "no prefix".
+// "v1", "/v1", "/v1/" all mean the same thing; "''" or "/" means "no prefix".
 export function normalizeApiRoot(value) {
   if (value === undefined || value === null) return 'v0';
   return String(value).replace(/^\/+|\/+$/g, '');

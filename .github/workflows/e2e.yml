@@ -1,0 +1,169 @@
+# End-to-end test: boots a real TwextHub server against PostgreSQL, then drives
+# the real Twext CLI (checked out from github.com/twext/twext) through the full
+# lifecycle — signup, accept terms, publish → pending, admin approve, download.
+# The downloaded compiled output is byte-compared against a local `twext build`
+# so a drift between the hub's bundled compiler and the CLI catches CI.
+#
+# Note: the hub compiles publishes with its bundled @twext/twext dependency (or
+# TWEXTHUB_TWEXT_VERSION when pinned). That package must be published to npm
+# (and the hub's package-lock.json resolved against it) before this job can pass.
+name: E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: Hub + real CLI
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: twexthub_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TWEXTHUB_DATABASE_URL: postgres://postgres:postgres@localhost:5432/twexthub_e2e
+      TWEXTHUB_PORT: 8290
+      TWEXTHUB_DATA_DIR: /home/runner/work/twexthub/twexthub/e2e-data
+      HUB_URL: http://localhost:8290/v1
+    steps:
+      - name: Checkout TwextHub
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Checkout Twext CLI
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: twext/twext
+          path: _twext
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            _twext/package-lock.json
+
+      - name: Install TwextHub dependencies
+        run: npm ci
+
+      - name: Install Twext CLI dependencies
+        working-directory: _twext
+        run: npm ci
+
+      - name: Run migrations
+        run: npm run migrate
+
+      - name: Boot TwextHub server
+        run: |
+          node src/server.js > e2e-server.log 2>&1 &
+          echo $! > e2e-server.pid
+          for i in $(seq 1 60); do
+            if curl -fsS "$HUB_URL/stats" >/dev/null 2>&1; then
+              echo "TwextHub is ready on $HUB_URL"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "TwextHub failed to start"
+          tail -100 e2e-server.log
+          exit 1
+
+      - name: Bootstrap admin account
+        # The first signup on a fresh registry becomes the admin (see
+        # src/routes/auth.js 'signup-bootstrap'). It then writes the first
+        # terms document and accepts it, so later accounts are gated properly.
+        run: |
+          ADMIN_JSON=$(curl -fsS -X POST "$HUB_URL/auth/signup" \
+            -H 'Content-Type: application/json' \
+            -d '{"namespace":"admin","password":"adminpass123","displayName":"E2E Admin"}')
+          ADMIN_TOKEN=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).token)" "$ADMIN_JSON")
+          echo "::add-mask::$ADMIN_TOKEN"
+          echo "$ADMIN_TOKEN" > .e2e-admin-token
+          ADMIN_ROLE=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).user.role)" "$ADMIN_JSON")
+          if [ "$ADMIN_ROLE" != "admin" ]; then
+            echo "Expected first signup to be admin, got role '$ADMIN_ROLE'"
+            cat e2e-server.log
+            exit 1
+          fi
+          curl -fsS -X PATCH "$HUB_URL/admin/terms" \
+            -H "Authorization: Bearer $ADMIN_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d '{"body":"E2E placeholder terms."}' >/dev/null
+          curl -fsS -X POST "$HUB_URL/terms/accept" \
+            -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null
+
+      - name: Sign up publisher and publish via the real CLI
+        working-directory: _twext/test-fixtures/basic
+        run: |
+          node ../src/cli.js signup \
+            --url "$HUB_URL" \
+            --namespace publisher \
+            --password "publisherpass123" \
+            --display-name "E2E Publisher"
+          node ../src/cli.js login \
+            --url "$HUB_URL" \
+            --namespace publisher \
+            --password "publisherpass123"
+          node ../src/cli.js publish --url "$HUB_URL"
+
+      - name: Approve the pending version as admin
+        run: |
+          ADMIN_TOKEN=$(cat .e2e-admin-token)
+          curl -fsS -X PATCH "$HUB_URL/@publisher/superutilities/versions/1.0.0" \
+            -H "Authorization: Bearer $ADMIN_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d '{"status":"approved"}'
+
+      - name: Byte-compare hub output against a local build
+        working-directory: _twext/test-fixtures/basic
+        run: |
+          node ../src/cli.js build
+          curl -fsS "$HUB_URL/@publisher/superutilities/versions/1.0.0/download" \
+            -o /tmp/hub-extension.js
+          cmp dist/extension.js /tmp/hub-extension.js \
+            && echo "Byte-identical: hub compiled output matches local twext build"
+
+      - name: Verify visibility is public and listing is visible
+        run: |
+          EXT_JSON=$(curl -fsS "$HUB_URL/extensions" \
+            -H 'Accept: application/json')
+          node -e "
+            const body = JSON.parse(process.argv[1]);
+            const hit = (body.data || []).find(
+              (e) => e.namespace === 'publisher' && e.id === 'superutilities',
+            );
+            if (!hit) throw new Error('Published extension not listed');
+            if (hit.visibility !== 'public') throw new Error('Expected public visibility');
+          " "$EXT_JSON"
+
+      - name: Show hub logs on failure
+        if: failure()
+        run: |
+          echo "=== TwextHub server log ==="
+          if [ -f e2e-server.log ]; then cat e2e-server.log; fi
+          echo "=== CLI artifact check ==="
+          ls -la _twext/test-fixtures/basic/dist 2>/dev/null || true
+          echo "=== Hub process ==="
+          if [ -f e2e-server.pid ]; then
+            ps -p "$(cat e2e-server.pid)" -o pid,cmd || echo "hub process exited"
+          fi

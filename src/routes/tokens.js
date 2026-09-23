@@ -7,8 +7,9 @@ import { requireObjectBody, resolveTargetUser } from './shared.js';
 
 const SCOPES = ['publish', 'yank'];
 
-export function makeTokensRouter({ sql, config }) {
+export function makeTokensRouter({ sql, config, termsGate }) {
   const router = Router();
+  const writeChain = [requireSession, termsGate];
 
   function validateScopes(scopes) {
     const errors = [];
@@ -49,7 +50,7 @@ export function makeTokensRouter({ sql, config }) {
     });
   });
 
-  router.post('/', requireSession, async (req, res) => {
+  router.post('/', writeChain, async (req, res) => {
     requireObjectBody(req);
     const { name, scopes, expiresInDays } = req.body;
 
@@ -89,7 +90,7 @@ export function makeTokensRouter({ sql, config }) {
     res.status(201).json({ ...automationTokenToObject(row), token });
   });
 
-  router.patch('/:id', requireSession, async (req, res) => {
+  router.patch('/:id', writeChain, async (req, res) => {
     requireObjectBody(req);
     const { name, scopes } = req.body;
     if (name === undefined && scopes === undefined) {
@@ -136,7 +137,7 @@ export function makeTokensRouter({ sql, config }) {
     res.json(automationTokenToObject(updated));
   });
 
-  router.delete('/:id', requireSession, async (req, res) => {
+  router.delete('/:id', writeChain, async (req, res) => {
     const targetId = Number(req.params.id);
     const [row] =
       Number.isSafeInteger(targetId) && targetId > 0

@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import request from 'supertest';
 import assert from 'node:assert/strict';
+import YAML from 'yaml';
 import { bootstrap } from '../src/server.js';
 
 export const TEST_DATABASE_URL =
@@ -22,7 +23,7 @@ export function makeConfig(overrides = {}) {
   return {
     port: 0,
     dataDir,
-    apiRoot: '/v0',
+    apiRoot: '/v1',
     publicBaseUrl: 'http://hub.test:8080',
     requireHttps: false,
     database: { url: TEST_DATABASE_URL, maxConnections: 6 },
@@ -32,6 +33,8 @@ export function makeConfig(overrides = {}) {
       loginWindowMinutes: 15,
       signupsPerIpPerWindow: 5,
       signupWindowMinutes: 15,
+      publishesPerWindow: 100,
+      publishWindowMinutes: 15,
     },
     pagination: { defaultLimit: 20, maxLimit: 50 },
     cors: { allowedOrigins: '*' },
@@ -49,13 +52,17 @@ export async function boot(overrides = {}) {
     return cached;
   }
   const config = makeConfig(overrides);
-  const { app, sql } = await bootstrap(config);
-  cached = { app, sql, config };
+  const { app, sql, termsGate } = await bootstrap(config);
+  cached = { app, sql, config, termsGate };
   return cached;
 }
 
 export async function resetDb() {
-  const { sql } = await boot();
+  const { sql, termsGate } = await boot();
+  // The terms gate caches the current version for a minute; resetDb re-seeds
+  // and mutates legal documents, so drop the cache or later tests hit stale
+  // versions.
+  termsGate.invalidate();
   await sql.unsafe(`
     TRUNCATE TABLE automation_tokens, sessions, versions, rate_limit_entries, notifications, users, legal_documents
     RESTART IDENTITY CASCADE
@@ -70,14 +77,74 @@ export function bearer(token) {
   return { Authorization: 'Bearer ' + token };
 }
 
+export const DEFAULT_BLOCKS = [
+  {
+    opcode: 'ping',
+    blockType: 'reporter',
+    text: 'ping',
+    returnType: 'string',
+  },
+];
+
+// Builds a valid twext.yml as text. `extra` merges into the document root
+// (used by tests that override description/name/etc.).
+export function manifestSource({
+  id = 'hello',
+  version = '1.0.0',
+  name = id,
+  description = 'A test extension.',
+  license = 'MIT',
+  author,
+  readme,
+  colors = {},
+  ext = {},
+  blocks = DEFAULT_BLOCKS,
+  ...extra
+} = {}) {
+  const doc = { name, description, license, version, entryPoint: 'src/index.js' };
+  if (author) doc.author = author;
+  if (readme) doc.readme = readme;
+  doc.extension = { id, name, ...colors, ...ext };
+  doc.blocks = blocks;
+  Object.assign(doc, extra);
+  return YAML.stringify(doc);
+}
+
+// A source map whose handler embeds `marker` verbatim so tests can assert the
+// compiled download contains it.
+export function makeSources({ marker = 'pong' } = {}) {
+  return {
+    'src/index.js': `export const blocks = {\n  ping: () => ${JSON.stringify(marker)},\n};\n`,
+  };
+}
+
+// Assembles a publish request body for the current API contract.
+export function publishPayload({
+  id = 'hello',
+  version = '1.0.0',
+  visibility,
+  twext = '1.0.0',
+  marker,
+  manifest = {},
+  sources = {},
+} = {}) {
+  const body = {
+    manifest: manifestSource({ id, version, ...manifest }),
+    sources: { ...makeSources({ marker }), ...sources },
+    twext,
+  };
+  if (visibility) body.visibility = visibility;
+  return body;
+}
+
 export async function signup(app, namespace, password = 'password123', displayName = namespace) {
-  return request(app).post('/v0/auth/signup').send({ namespace, password, displayName });
+  return request(app).post('/v1/auth/signup').send({ namespace, password, displayName });
 }
 
 export async function signupAndAccept(app, namespace, password = 'password123') {
   const r = await signup(app, namespace, password);
   assert.equal(r.status, 201, `signup failed: ${JSON.stringify(r.body)}`);
-  const accepted = await request(app).post('/v0/terms/accept').set(bearer(r.body.token));
+  const accepted = await request(app).post('/v1/terms/accept').set(bearer(r.body.token));
   assert.equal(accepted.status, 204, `terms accept failed: ${JSON.stringify(accepted.body)}`);
   return r.body;
 }

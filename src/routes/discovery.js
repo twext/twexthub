@@ -17,8 +17,19 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     return value.replace(/[\\%_]/g, (ch) => '\\' + ch);
   }
 
+  // Rows visible in public listings: anything public from non-private profiles,
+  // plus the caller's own namespace (so owners can see their unlisted and
+  // private extensions). Admins see everything.
+  function visibilityFilter(req) {
+    if (req.auth?.user?.role === 'admin') return sql`AND TRUE`;
+    if (req.auth?.user) {
+      return sql`AND ((v.visibility = 'public' AND NOT u.is_private) OR v.namespace = ${req.auth.user.namespace})`;
+    }
+    return sql`AND v.visibility = 'public' AND NOT u.is_private`;
+  }
+
   const latestCursor = (row) => ({
-    p: row.published_at.toISOString(),
+    p: row.published_at_cursor,
     ns: row.namespace,
     id: row.extension_id,
   });
@@ -32,16 +43,19 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     `;
   }
 
-  async function listLatestVersions({ limit, cursor, searchFilter = sql`` }) {
+  async function listLatestVersions({ limit, cursor, searchFilter = sql``, visible }) {
     const rows = await sql`
       SELECT * FROM (
-        SELECT v.*,
+        SELECT v.*, u.is_private,
+          to_char(v.published_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US') || 'Z' AS published_at_cursor,
           row_number() OVER (
-            PARTITION BY namespace, extension_id
-            ORDER BY published_at DESC, id DESC
+            PARTITION BY v.namespace, v.extension_id
+            ORDER BY v.published_at DESC, v.id DESC
           ) AS rn
         FROM versions v
-        WHERE status = 'published'
+        JOIN users u ON u.id = v.owner_id
+        WHERE v.status = 'published'
+          ${visible}
       ) s
       WHERE rn = 1
         ${searchFilter}
@@ -63,7 +77,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
   router.get('/extensions', async (req, res) => {
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor, { p: 'timestamp', ns: 'string', id: 'string' });
-    res.json(await listLatestVersions({ limit, cursor }));
+    res.json(await listLatestVersions({ limit, cursor, visible: visibilityFilter(req) }));
   });
 
   router.get('/search', async (req, res) => {
@@ -74,7 +88,9 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     const searchFilter = folded
       ? sql`AND search_text LIKE ${'%' + escapeLike(folded) + '%'}`
       : sql``;
-    res.json(await listLatestVersions({ limit, cursor, searchFilter }));
+    res.json(
+      await listLatestVersions({ limit, cursor, searchFilter, visible: visibilityFilter(req) }),
+    );
   });
 
   router.get('/meta', (req, res) => {
@@ -87,10 +103,19 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
   });
 
   router.get('/stats', async (req, res) => {
+    const visible = visibilityFilter(req);
     const [published, pending, authors] = await Promise.all([
-      sql`SELECT COUNT(DISTINCT (namespace, extension_id)) AS count FROM versions WHERE status = 'published'`,
+      sql`
+        SELECT COUNT(DISTINCT (v.namespace, v.extension_id)) AS count
+        FROM versions v JOIN users u ON u.id = v.owner_id
+        WHERE v.status = 'published' ${visible}
+      `,
       sql`SELECT COUNT(*) AS count FROM versions WHERE status = 'pending'`,
-      sql`SELECT COUNT(DISTINCT owner_id) AS count FROM versions WHERE status = 'published'`,
+      sql`
+        SELECT COUNT(DISTINCT v.owner_id) AS count
+        FROM versions v JOIN users u ON u.id = v.owner_id
+        WHERE v.status = 'published' ${visible}
+      `,
     ]);
     res.json({
       published: Number(published[0].count),
@@ -129,7 +154,8 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     const cursor = decodeCursor(req.query.cursor, { c: 'timestamp', i: 'int' });
 
     const rows = await sql`
-      SELECT * FROM versions
+      SELECT *, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US') || 'Z' AS created_at_cursor
+      FROM versions
       WHERE status = 'pending'
         ${
           cursor
@@ -145,9 +171,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     const page = hasMore ? rows.slice(0, limit) : rows;
     const last = page[page.length - 1];
     const nextCursor =
-      hasMore && last
-        ? encodeCursor({ c: last.created_at.toISOString(), i: Number(last.id) })
-        : null;
+      hasMore && last ? encodeCursor({ c: last.created_at_cursor, i: Number(last.id) }) : null;
 
     res.json({
       data: page.map((row) => pendingVersionToObject(row, config)),

@@ -25,6 +25,7 @@ export function makePackagesRouter({ sql, config, termsGate }) {
 
   const yankChain = [requireAuth, termsGate, requireScope('yank')];
   const ownerChain = [requireAuth, termsGate];
+  const publishChain = [requireAuth, termsGate, requireScope('publish')];
 
   async function loadVersion(namespace, id, version) {
     const [row] = await sql`
@@ -53,8 +54,14 @@ export function makePackagesRouter({ sql, config, termsGate }) {
       version === 'latest'
         ? await loadLatestPublished(namespace, id)
         : await loadVersion(namespace, id, version);
-    if (!row) throw notFound();
-    return row;
+    if (row) return row;
+    if (!/^[a-zA-Z0-9-]{1,30}$/.test(version)) throw notFound();
+    const [tagRow] = await sql`
+      SELECT version FROM dist_tags
+      WHERE namespace = ${namespace} AND extension_id = ${id} AND tag = ${version}
+    `;
+    if (!tagRow) throw notFound();
+    return await loadVersion(namespace, id, tagRow.version);
   }
 
   router.post(
@@ -139,6 +146,72 @@ export function makePackagesRouter({ sql, config, termsGate }) {
       res.status(201).json(versionToObject(row, config));
     },
   );
+
+  router.get('/@:namespace/:id/tags', async (req, res) => {
+    const { namespace, id } = req.params;
+    if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    const rows = await sql`
+      SELECT tag, version FROM dist_tags
+      WHERE namespace = ${namespace} AND extension_id = ${id}
+      ORDER BY tag
+    `;
+    const tags = Object.fromEntries(rows.map((row) => [row.tag, row.version]));
+    if (Object.keys(tags).length === 0) throw notFound();
+    res.json(tags);
+  });
+
+  router.put('/@:namespace/:id/tags/:tag', publishChain, async (req, res) => {
+    const { namespace, id, tag } = req.params;
+    if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    if (tag === 'latest' || !/^[a-zA-Z0-9-]{1,30}$/.test(tag)) {
+      throw fieldErrors([
+        {
+          field: 'tag',
+          message: 'Must be 1-30 letters, digits, or hyphens; "latest" is reserved.',
+        },
+      ]);
+    }
+    if (req.auth.user.namespace !== namespace && req.auth.user.role !== 'admin') {
+      throw forbidden('Only an owner or an admin can set tags.');
+    }
+    requireObjectBody(req);
+    const version = req.body.version;
+    const normalized = normalizeSemver(version);
+    if (!normalized) {
+      throw fieldErrors([{ field: 'version', message: 'Must be a valid SemVer string.' }]);
+    }
+    const [exists] = await sql`
+        SELECT 1 FROM versions
+        WHERE namespace = ${namespace} AND extension_id = ${id}
+          AND version = ${normalized} AND status = 'published'
+      `;
+    if (!exists) throw notFound('Tagged versions must be published.');
+    await sql`
+        INSERT INTO dist_tags (owner_id, namespace, extension_id, tag, version)
+        VALUES (${req.auth.user.id}, ${namespace}, ${id}, ${tag}, ${normalized})
+        ON CONFLICT (namespace, extension_id, tag)
+        DO UPDATE SET version = EXCLUDED.version, owner_id = EXCLUDED.owner_id
+      `;
+    res.status(204).end();
+  });
+
+  router.delete('/@:namespace/:id/tags/:tag', publishChain, async (req, res) => {
+    const { namespace, id, tag } = req.params;
+    if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    if (tag === 'latest') {
+      throw fieldErrors([{ field: 'tag', message: '"latest" is reserved.' }]);
+    }
+    if (req.auth.user.namespace !== namespace && req.auth.user.role !== 'admin') {
+      throw forbidden('Only an owner or an admin can remove tags.');
+    }
+    const [deleted] = await sql`
+      DELETE FROM dist_tags
+      WHERE namespace = ${namespace} AND extension_id = ${id} AND tag = ${tag}
+      RETURNING 1
+    `;
+    if (!deleted) throw notFound();
+    res.status(204).end();
+  });
 
   router.get('/@:namespace/:id/versions/:version', async (req, res) => {
     const row = await resolveVersion(req.params);

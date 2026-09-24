@@ -88,6 +88,27 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     return await loadVersion(namespace, id, tagRow.version);
   }
 
+  router.get('/@:namespace/:id/versions/resolve', async (req, res) => {
+    const { namespace, id } = req.params;
+    if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    const range = typeof req.query.range === 'string' ? req.query.range.trim() : '';
+    if (!range || !semver.validRange(range)) {
+      throw fieldErrors([{ field: 'range', message: 'Must be a valid SemVer range.' }]);
+    }
+    const rows = await sql`
+      SELECT * FROM versions
+      WHERE namespace = ${namespace} AND extension_id = ${id}
+        AND status IN ('published', 'deprecated')
+    `;
+    const candidates = rows
+      .map((row) => ({ row, coerced: semver.valid(row.version) }))
+      .filter((entry) => entry.coerced && semver.satisfies(entry.coerced, range, { includePrerelease: true }));
+    const best = maxVersionBySemver(candidates.map((entry) => entry.coerced));
+    const match = candidates.find((entry) => entry.coerced === best);
+    if (!match) throw notFound('No published version satisfies that range.');
+    res.json(versionToObject(match.row, config));
+  });
+
   router.post(
     '/@:namespace/:id/versions',
     requireAuth,

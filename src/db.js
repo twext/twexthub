@@ -124,7 +124,7 @@ export async function reconcileOnBoot(sql, config) {
   // the whole table can be served from /blobs/:digest and evicted by GC.
   const legacy = await sql`
     SELECT * FROM versions
-    WHERE blob_digest IS NULL AND status IN ('published', 'yanked')
+    WHERE blob_digest IS NULL AND status IN ('published', 'yanked', 'deprecated')
   `;
   for (const row of legacy) {
     const legacyPath = path.join(dataDir, row.blob_path);

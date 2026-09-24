@@ -37,11 +37,14 @@ export function makePackagesRouter({ sql, config, termsGate }) {
   async function loadLatestPublished(namespace, id) {
     const rows = await sql`
       SELECT * FROM versions
-      WHERE namespace = ${namespace} AND extension_id = ${id} AND status = 'published'
+      WHERE namespace = ${namespace} AND extension_id = ${id}
+        AND status IN ('published', 'deprecated')
     `;
     if (rows.length === 0) return null;
-    const ceiling = maxVersionBySemver(rows.map((row) => row.version));
-    return rows.find((row) => row.version === ceiling);
+    const published = rows.filter((row) => row.status === 'published');
+    const pool = published.length > 0 ? published : rows;
+    const ceiling = maxVersionBySemver(pool.map((row) => row.version));
+    return pool.find((row) => row.version === ceiling);
   }
 
   async function resolveVersion(params) {
@@ -139,12 +142,52 @@ export function makePackagesRouter({ sql, config, termsGate }) {
 
   router.get('/@:namespace/:id/versions/:version', async (req, res) => {
     const row = await resolveVersion(req.params);
-    const isVisible = row.status === 'published' || row.status === 'yanked';
+    const isVisible =
+      row.status === 'published' || row.status === 'yanked' || row.status === 'deprecated';
     const isOwner = req.auth?.user.namespace === req.params.namespace;
     const isAdmin = req.auth?.user.role === 'admin';
     if (!isVisible && !isOwner && !isAdmin) throw notFound();
     res.json(versionToObject(row, config));
   });
+
+  router.patch(
+    '/@:namespace/:id/versions/:version/deprecate',
+    requireAuth,
+    termsGate,
+    requireScope('publish'),
+    async (req, res) => {
+      const { namespace, id, version } = req.params;
+      if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+      requireObjectBody(req);
+      const message = req.body.message;
+      if (
+        message !== undefined &&
+        message !== null &&
+        (typeof message !== 'string' || message.trim().length === 0)
+      ) {
+        throw fieldErrors([
+          { field: 'message', message: 'Must be a non-empty string, or null to clear.' },
+        ]);
+      }
+      const [row] = await sql`
+        SELECT * FROM versions
+        WHERE namespace = ${namespace} AND extension_id = ${id} AND version = ${version}
+      `;
+      if (!row || (row.status !== 'published' && row.status !== 'deprecated')) throw notFound();
+      const canManage = req.auth.user.role === 'admin' || req.auth.user.namespace === namespace;
+      if (!canManage) {
+        throw forbidden('Only an owner or an admin can deprecate this version.');
+      }
+      const [updated] = await sql`
+        UPDATE versions
+        SET status = ${message === null ? 'published' : 'deprecated'},
+            deprecation_message = ${message ?? null}
+        WHERE id = ${row.id}
+        RETURNING *
+      `;
+      res.json(versionToObject(updated, config));
+    },
+  );
 
   router.patch('/@:namespace/:id/versions/:version', requireAuth, termsGate, async (req, res) => {
     if (req.auth.user.role !== 'admin') throw forbidden('Admin privileges are required.');
@@ -222,7 +265,7 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     const row = await resolveVersion(req.params);
-    if (row.status !== 'published') throw notFound();
+    if (row.status !== 'published' && row.status !== 'deprecated') throw notFound();
     if (req.auth.user.namespace !== namespace && req.auth.user.role !== 'admin') {
       throw forbidden('You can only yank your own extensions.');
     }
@@ -234,7 +277,8 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     const row = await resolveVersion(req.params);
-    const isPublished = row.status === 'published' || row.status === 'yanked';
+    const isPublished =
+      row.status === 'published' || row.status === 'yanked' || row.status === 'deprecated';
     const isAdmin = req.auth?.user.role === 'admin' && req.auth.tokenType === 'session';
     if (!isPublished && !(row.status === 'pending' && isAdmin)) throw notFound();
     const abs = row.blob_digest
@@ -250,14 +294,19 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     const rows = await sql`
       SELECT * FROM versions
-      WHERE namespace = ${namespace} AND extension_id = ${id} AND status = 'published'
+      WHERE namespace = ${namespace} AND extension_id = ${id}
+        AND status IN ('published', 'deprecated')
+      ORDER BY
+        CASE WHEN status = 'published' THEN 0 ELSE 1 END,
+        created_at DESC
     `;
     if (rows.length === 0) throw notFound();
-    rows.sort((a, b) => compareSemver(b.version, a.version));
+    const sorted = [...rows].sort((a, b) => compareSemver(b.version, a.version));
+    const top = sorted.find((row) => row.status === 'published') ?? sorted[0];
     res.json(
       extensionDetailFromRow(
-        rows[0],
-        rows.map((row) => versionToObject(row, config)),
+        top,
+        sorted.map((row) => versionToObject(row, config)),
       ),
     );
   });

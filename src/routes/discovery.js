@@ -38,10 +38,12 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
         SELECT v.*,
           row_number() OVER (
             PARTITION BY namespace, extension_id
-            ORDER BY published_at DESC, id DESC
+            ORDER BY
+              CASE WHEN v.status = 'published' THEN 0 ELSE 1 END,
+              v.published_at DESC, v.id DESC
           ) AS rn
         FROM versions v
-        WHERE status = 'published'
+        WHERE v.status IN ('published', 'deprecated')
       ) s
       WHERE rn = 1
         ${searchFilter}
@@ -88,9 +90,9 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
 
   router.get('/stats', async (req, res) => {
     const [published, pending, authors] = await Promise.all([
-      sql`SELECT COUNT(DISTINCT (namespace, extension_id)) AS count FROM versions WHERE status = 'published'`,
+      sql`SELECT COUNT(DISTINCT (namespace, extension_id)) AS count FROM versions WHERE status IN ('published', 'deprecated')`,
       sql`SELECT COUNT(*) AS count FROM versions WHERE status = 'pending'`,
-      sql`SELECT COUNT(DISTINCT owner_id) AS count FROM versions WHERE status = 'published'`,
+      sql`SELECT COUNT(DISTINCT owner_id) AS count FROM versions WHERE status IN ('published', 'deprecated')`,
     ]);
     res.json({
       published: Number(published[0].count),

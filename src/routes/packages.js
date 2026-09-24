@@ -19,6 +19,7 @@ import { extensionDetailFromRow, versionToObject } from '../serialize.js';
 import { notifyUser, reviewApprovedMessage, reviewRejectedMessage } from '../notify.js';
 import { requireObjectBody } from './shared.js';
 import { blobPathFor, removeBlobIfUnused, sha256Hex, sha512Base64, storeBlob } from '../blobs.js';
+import { totalDownloads } from '../metrics.js';
 
 export function makePackagesRouter({ sql, config, termsGate }) {
   const router = Router();
@@ -357,9 +358,18 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     const abs = row.blob_digest
       ? blobPathFor(config.dataDir, row.blob_digest)
       : path.join(config.dataDir, row.blob_path);
-    if (!existsSync(abs)) throw notFound('Compiled output is missing.');
-    res.type('application/javascript');
-    res.sendFile(abs);
+    if (existsSync(abs)) {
+      res.type('application/javascript');
+      res.sendFile(abs);
+      void sql`
+        INSERT INTO download_events (namespace, extension_id, version, user_agent, remote_addr)
+        VALUES (${row.namespace}, ${row.extension_id}, ${row.version},
+                ${String(req.headers['user-agent'] ?? '').slice(0, 250)},
+                ${req.ip})
+      `.catch(() => {});
+    } else {
+      throw notFound('Compiled output is missing.');
+    }
   });
 
   router.get('/@:namespace/:id', async (req, res) => {
@@ -376,12 +386,12 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     if (rows.length === 0) throw notFound();
     const sorted = [...rows].sort((a, b) => compareSemver(b.version, a.version));
     const top = sorted.find((row) => row.status === 'published') ?? sorted[0];
-    res.json(
-      extensionDetailFromRow(
-        top,
-        sorted.map((row) => versionToObject(row, config)),
-      ),
+    const summary = extensionDetailFromRow(
+      top,
+      sorted.map((row) => versionToObject(row, config)),
     );
+    summary.downloads = await totalDownloads(sql, namespace, id);
+    res.json(summary);
   });
 
   router.delete('/@:namespace/:id', ownerChain, async (req, res) => {

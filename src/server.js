@@ -3,6 +3,7 @@ import { loadConfig } from './config.js';
 import { product } from './product.js';
 import { createApp } from './app.js';
 import { createDb, ensureDataDirs, reconcileOnBoot, runMigrations } from './db.js';
+import { dailyAggregationJob } from './metrics.js';
 
 export async function bootstrap(config = loadConfig()) {
   ensureDataDirs(config.dataDir);
@@ -11,7 +12,8 @@ export async function bootstrap(config = loadConfig()) {
     await runMigrations(sql);
     await reconcileOnBoot(sql, config);
     const { app, rateLimiter } = createApp({ config, sql });
-    return { app, sql, config, rateLimiter };
+    const metricsJob = dailyAggregationJob(sql).start();
+    return { app, sql, config, rateLimiter, metricsJob };
   } catch (error) {
     await sql.end();
     throw error;
@@ -22,7 +24,7 @@ const isMain = process.argv[1] && process.argv[1] === fileURLToPath(import.meta.
 
 if (isMain) {
   const configPath = process.argv[2] ?? product.defaults?.configFilename ?? 'config.yaml';
-  const { app, sql, config, rateLimiter } = await bootstrap(loadConfig(configPath));
+  const { app, sql, config, rateLimiter, metricsJob } = await bootstrap(loadConfig(configPath));
   const server = app.listen(config.port, () => {
     console.log(`${product.name} v${product.version} listening on http://localhost:${config.port}`);
   });
@@ -31,6 +33,7 @@ if (isMain) {
     if (shuttingDown) return;
     shuttingDown = true;
     rateLimiter?.stop?.();
+    await metricsJob?.stop?.();
     const force = setTimeout(() => server.closeAllConnections(), 5000);
     await new Promise((resolve) => server.close(resolve));
     clearTimeout(force);

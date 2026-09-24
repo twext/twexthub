@@ -3,6 +3,7 @@ import { requireAdmin, requireSession } from '../auth.js';
 import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
 import { HttpError, notFound } from '../errors.js';
 import { foldText } from '../util.js';
+import { trendingExtensions } from '../metrics.js';
 import { product } from '../product.js';
 import {
   extensionSummaryFromRow,
@@ -68,6 +69,40 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     res.json(await listLatestVersions({ limit, cursor }));
   });
 
+  router.get('/extensions/trending', async (req, res) => {
+    const limit = Math.min(Number(req.query.limit ?? 10) || 10, 50);
+    const trending = await trendingExtensions(sql, { limit });
+    if (trending.length === 0) {
+      return res.json({ data: [], pagination: { nextCursor: null, hasMore: false } });
+    }
+    const t = trending;
+    const namespaces = t.map((e) => e.namespace);
+    const ids = t.map((e) => e.id);
+    const rows = await sql`
+      SELECT * FROM (
+        SELECT v.*,
+          row_number() OVER (
+            PARTITION BY namespace, extension_id
+            ORDER BY CASE WHEN status = 'published' THEN 0 ELSE 1 END,
+                     published_at DESC, id DESC
+          ) AS rn
+        FROM versions v
+        WHERE namespace = ANY (${namespaces})
+          AND extension_id = ANY (${ids})
+      ) s
+      WHERE rn = 1 AND status IN ('published', 'deprecated')
+    `;
+    const byKey = new Map(trending.map((e) => [`${e.namespace}/${e.id}`, e]));
+    const page = rows
+      .map((row) => {
+        const summary = extensionSummaryFromRow(row);
+        summary.downloads = byKey.get(`${row.namespace}/${row.extension_id}`)?.downloads ?? 0;
+        return summary;
+      })
+      .sort((a, b) => Number(b.downloads) - Number(a.downloads));
+    res.json({ data: page, pagination: { nextCursor: null, hasMore: false } });
+  });
+
   router.get('/search', async (req, res) => {
     const query = typeof req.query.query === 'string' ? req.query.query.trim() : null;
     const folded = query && query.length > 0 ? foldText(query) : null;
@@ -89,15 +124,17 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
   });
 
   router.get('/stats', async (req, res) => {
-    const [published, pending, authors] = await Promise.all([
+    const [published, pending, authors, downloads] = await Promise.all([
       sql`SELECT COUNT(DISTINCT (namespace, extension_id)) AS count FROM versions WHERE status IN ('published', 'deprecated')`,
       sql`SELECT COUNT(*) AS count FROM versions WHERE status = 'pending'`,
       sql`SELECT COUNT(DISTINCT owner_id) AS count FROM versions WHERE status IN ('published', 'deprecated')`,
+      sql`SELECT COALESCE(SUM(total_downloads), 0)::bigint AS count FROM extension_daily_downloads`,
     ]);
     res.json({
       published: Number(published[0].count),
       pending: Number(pending[0].count),
       authors: Number(authors[0].count),
+      downloads: Number(downloads[0].count),
     });
   });
 

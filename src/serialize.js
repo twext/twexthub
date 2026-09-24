@@ -64,9 +64,14 @@ export function versionToObject(row, config) {
   if (row.author) out.author = row.author;
   if (row.published_at) out.publishedAt = row.published_at.toISOString();
   if (row.status === 'published' || row.status === 'yanked') {
-    out.dist = {
+    const dist = {
       downloadUrl: downloadUrl(config, row.namespace, row.extension_id, row.version),
     };
+    if (row.blob_digest) {
+      dist.digest = `sha256:${row.blob_digest}`;
+      if (row.blob_sha512) dist.integrity = `sha512-${row.blob_sha512}`;
+    }
+    out.dist = dist;
   }
   return out;
 }

@@ -1,5 +1,5 @@
 import { existsSync, rmSync } from 'node:fs';
-import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import express, { Router } from 'express';
@@ -18,6 +18,7 @@ import {
 import { extensionDetailFromRow, versionToObject } from '../serialize.js';
 import { notifyUser, reviewApprovedMessage, reviewRejectedMessage } from '../notify.js';
 import { requireObjectBody } from './shared.js';
+import { blobPathFor, removeBlobIfUnused, sha256Hex, sha512Base64, storeBlob } from '../blobs.js';
 
 export function makePackagesRouter({ sql, config, termsGate }) {
   const router = Router();
@@ -236,7 +237,9 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     const isPublished = row.status === 'published' || row.status === 'yanked';
     const isAdmin = req.auth?.user.role === 'admin' && req.auth.tokenType === 'session';
     if (!isPublished && !(row.status === 'pending' && isAdmin)) throw notFound();
-    const abs = path.join(config.dataDir, row.blob_path);
+    const abs = row.blob_digest
+      ? blobPathFor(config.dataDir, row.blob_digest)
+      : path.join(config.dataDir, row.blob_path);
     if (!existsSync(abs)) throw notFound('Compiled output is missing.');
     res.type('application/javascript');
     res.sendFile(abs);
@@ -277,7 +280,7 @@ export function makePackagesRouter({ sql, config, termsGate }) {
           throw forbidden('You can only delete your own extensions.');
         }
         rows = await reserved`
-          SELECT blob_path, status FROM versions
+          SELECT blob_digest, blob_path, status FROM versions
           WHERE namespace = ${namespace} AND extension_id = ${id}
         `;
         if (rows.length === 0) throw notFound();
@@ -295,7 +298,13 @@ export function makePackagesRouter({ sql, config, termsGate }) {
         throw error;
       }
       await Promise.all(
-        rows.map((version) => rm(path.join(config.dataDir, version.blob_path), { force: true })),
+        rows.map(async (version) => {
+          if (version.blob_digest) {
+            await removeBlobIfUnused(sql, config, version.blob_digest, null);
+          } else if (version.blob_path) {
+            await rm(path.join(config.dataDir, version.blob_path), { force: true });
+          }
+        }),
       );
       res.status(204).end();
     } finally {
@@ -313,8 +322,10 @@ export function makePackagesRouter({ sql, config, termsGate }) {
 async function publishVersion(sql, config, owner, { id, manifest, code }) {
   const version = normalizeSemver(manifest.version);
   const name = typeof manifest.name === 'string' && manifest.name.length > 0 ? manifest.name : id;
-  const blobRelative = path.join('blobs', owner.namespace, id, `${version}.js`);
-  const blobAbs = path.join(config.dataDir, blobRelative);
+  const codeBuffer = Buffer.from(code, 'utf8');
+  const digest = sha256Hex(codeBuffer);
+  const sha512 = sha512Base64(codeBuffer);
+  const blobRelative = path.join('blobs', digest.slice(0, 2), digest.slice(2));
   const tmpDir = path.join(config.dataDir, 'tmp');
   await mkdir(tmpDir, { recursive: true });
   const tmpPath = path.join(tmpDir, `upload-${randomBytes(8).toString('hex')}.tmp`);
@@ -330,7 +341,7 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
   const finalStatus = owner.has_published ? 'published' : 'pending';
 
   try {
-    await writeFile(tmpPath, code);
+    await writeFile(tmpPath, codeBuffer);
 
     const staged = await sql.begin(async (tx) => {
       // Serialize per namespace/extension so concurrent publishes cannot both
@@ -360,12 +371,12 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
         INSERT INTO versions (
           owner_id, namespace, extension_id, version, status,
           name, license, description, author, color1, color2, color3,
-          blob_path, search_text
+          blob_path, blob_digest, blob_size, blob_sha512, search_text
         ) VALUES (
           ${owner.id}, ${owner.namespace}, ${id}, ${version}, 'staging',
           ${name}, ${manifest.license}, ${manifest.description}, ${manifest.author ?? null},
           ${manifest.color1 ?? null}, ${manifest.color2 ?? null}, ${manifest.color3 ?? null},
-          ${blobRelative}, ${searchText}
+          ${blobRelative}, ${digest}, ${codeBuffer.length}, ${sha512}, ${searchText}
         )
         RETURNING *
       `;
@@ -374,13 +385,11 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
 
     // The staging row commits before the blob is placed: uniqueness checks in
     // the transaction reject duplicate/lower-version publishes, so only the
-    // committed version may write blobAbs. A crash before blob placement
+    // committed version may write its blob. A crash before blob placement
     // leaves a staging row that reconcileOnBoot promotes once its blob exists
-    // or removes when the blob is missing; promoting before the rename would
-    // let a rolled-back request leave its bytes at a concurrently committed
-    // version's blob path.
-    await mkdir(path.dirname(blobAbs), { recursive: true });
-    await rename(tmpPath, blobAbs);
+    // or removes when the blob is missing; promoting before storing the blob
+    // would let a rolled-back request reach a later status.
+    await storeBlob(config.dataDir, tmpPath, codeBuffer);
 
     const row = await sql.begin(async (tx) => {
       const promoted = await tx`

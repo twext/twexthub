@@ -7,9 +7,11 @@ import {
   existsSync,
   rmSync,
 } from 'node:fs';
+import { copyFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
+import { blobPathFor, hashFile, sha512Base64 } from './blobs.js';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 export const MIGRATIONS_DIR = path.join(moduleDir, '..', 'migrations');
@@ -116,6 +118,39 @@ export async function reconcileOnBoot(sql, config) {
   await sql`DELETE FROM rate_limit_entries WHERE window_start < ${rateCutoff}`;
 
   await sql`DELETE FROM sessions WHERE expires_at < now()`;
+
+  // Pre-digest rows (published before the blob_digest migration) point at
+  // legacy namespace/blob paths. Re-key them to content-addressed digests so
+  // the whole table can be served from /blobs/:digest and evicted by GC.
+  const legacy = await sql`
+    SELECT * FROM versions
+    WHERE blob_digest IS NULL AND status IN ('published', 'yanked')
+  `;
+  for (const row of legacy) {
+    const legacyPath = path.join(dataDir, row.blob_path);
+    let digest;
+    try {
+      digest = await hashFile(legacyPath);
+    } catch {
+      console.warn(
+        `indexing skipped for ${row.namespace}/${row.extension_id}@${row.version}: missing blob`,
+      );
+      continue;
+    }
+    const codeBuffer = readFileSync(legacyPath);
+    await copyFile(legacyPath, blobPathFor(dataDir, digest));
+    await sql`
+      UPDATE versions
+      SET blob_digest = ${digest},
+          blob_size = ${codeBuffer.length},
+          blob_sha512 = ${sha512Base64(codeBuffer)},
+          blob_path = ${path.join('blobs', digest.slice(0, 2), digest.slice(2))}
+      WHERE id = ${row.id}
+    `;
+    if (legacyPath !== blobPathFor(dataDir, digest)) {
+      await rm(legacyPath, { force: true });
+    }
+  }
 }
 
 export function ensureDataDirs(dataDir) {

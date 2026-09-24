@@ -1,5 +1,7 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import request from 'supertest';
 import { boot, resetDb, bearer, uniqNs, signupAndAccept } from './helpers.mjs';
 
@@ -239,4 +241,47 @@ test('automation tokens cannot read pending version source', async () => {
     .get(`/v1/@${ownerNs}/hello/versions/1.0.0/download`)
     .set(bearer(created.body.token));
   assert.equal(dl.status, 404);
+});
+
+test('published versions expose digest and integrity, served from /blobs/:digest', async () => {
+  const { adminToken, ownerToken, ownerNs } = await makeAdminAndOwner();
+  const code = 'const DIGESTY = 42;';
+  const pub = await publish(app, ownerNs, ownerToken, {
+    manifest: manifest({ version: '1.0.0' }),
+    code,
+  }).expect(201);
+  assert.equal(pub.body.status, 'pending');
+  assert.equal(pub.body.dist, undefined);
+
+  const queue = await request(app).get('/v1/versions?status=pending').set(bearer(adminToken));
+  const approved = await request(app)
+    .patch(`/v1/@${ownerNs}/hello/versions/${queue.body.data[0].version}`)
+    .set(bearer(adminToken))
+    .send({ status: 'approved' })
+    .expect(200);
+  assert.match(approved.body.dist.digest, /^sha256:[0-9a-f]{64}$/);
+  assert.match(approved.body.dist.integrity, /^sha512-[A-Za-z0-9+/=]+$/);
+
+  const byDigest = await request(app)
+    .get(`/v1/blobs/${approved.body.dist.digest.slice(7)}`)
+    .expect(200);
+  assert.equal(byDigest.text, code);
+  assert.match(byDigest.headers['cache-control'], /immutable/);
+
+  // identical code under a new version shares one blob file on disk
+  const second = await publish(app, ownerNs, ownerToken, {
+    manifest: manifest({ version: '2.0.0' }),
+    code,
+  }).expect(201);
+  assert.equal(second.body.status, 'published');
+  assert.equal(second.body.dist.digest, approved.body.dist.digest);
+  assert.equal(second.body.dist.integrity, approved.body.dist.integrity);
+
+  const dir = (await boot()).config.dataDir;
+  const digest = approved.body.dist.digest.slice(7);
+  const blobFile = fs.readFileSync(
+    path.join(dir, 'blobs', digest.slice(0, 2), digest.slice(2)),
+    'utf8',
+  );
+  assert.equal(blobFile, code);
 });

@@ -16,7 +16,13 @@ import {
   normalizeSemver,
 } from '../util.js';
 import { extensionDetailFromRow, versionToObject } from '../serialize.js';
-import { notifyUser, reviewApprovedMessage, reviewRejectedMessage } from '../notify.js';
+import {
+  addedAsOwnerMessage,
+  notifyUser,
+  removedAsOwnerMessage,
+  reviewApprovedMessage,
+  reviewRejectedMessage,
+} from '../notify.js';
 import { requireObjectBody } from './shared.js';
 import { blobPathFor, removeBlobIfUnused, sha256Hex, sha512Base64, storeBlob } from '../blobs.js';
 import { totalDownloads } from '../metrics.js';
@@ -27,6 +33,21 @@ export function makePackagesRouter({ sql, config, termsGate }) {
   const yankChain = [requireAuth, termsGate, requireScope('yank')];
   const ownerChain = [requireAuth, termsGate];
   const publishChain = [requireAuth, termsGate, requireScope('publish')];
+
+  async function isExtensionOwner(user, namespace, id) {
+    if (user.role === 'admin') return true;
+    if (user.namespace === namespace) return true;
+    const [row] = await sql`
+      SELECT 1 FROM extension_owners
+      WHERE owner_id = ${user.id} AND namespace = ${namespace} AND extension_id = ${id}
+    `;
+    return Boolean(row);
+  }
+
+  async function loadNamespaceAccount(namespace) {
+    const [owner] = await sql`SELECT * FROM users WHERE namespace = ${namespace}`;
+    return owner;
+  }
 
   async function loadVersion(namespace, id, version) {
     const [row] = await sql`
@@ -137,13 +158,18 @@ export function makePackagesRouter({ sql, config, termsGate }) {
       if (errors.length > 0) throw fieldErrors(errors);
 
       if (!isValidNamespace(namespace)) throw notFound();
-      const [owner] = await sql`SELECT * FROM users WHERE namespace = ${namespace}`;
+      const owner = await loadNamespaceAccount(namespace);
       if (!owner) throw notFound('No such publishing account.');
-      if (req.auth.user.namespace !== namespace && req.auth.user.role !== 'admin') {
-        throw forbidden('You can only publish to your own namespace.');
+      if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
+        throw forbidden('You can only publish to an extension you own.');
       }
 
-      const row = await publishVersion(sql, config, owner, { id, manifest, code });
+      const row = await publishVersion(sql, config, owner, {
+        id,
+        manifest,
+        code,
+        stagedBy: req.auth.user,
+      });
       res.status(201).json(versionToObject(row, config));
     },
   );
@@ -172,7 +198,7 @@ export function makePackagesRouter({ sql, config, termsGate }) {
         },
       ]);
     }
-    if (req.auth.user.namespace !== namespace && req.auth.user.role !== 'admin') {
+    if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
       throw forbidden('Only an owner or an admin can set tags.');
     }
     requireObjectBody(req);
@@ -202,7 +228,7 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     if (tag === 'latest') {
       throw fieldErrors([{ field: 'tag', message: '"latest" is reserved.' }]);
     }
-    if (req.auth.user.namespace !== namespace && req.auth.user.role !== 'admin') {
+    if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
       throw forbidden('Only an owner or an admin can remove tags.');
     }
     const [deleted] = await sql`
@@ -248,7 +274,7 @@ export function makePackagesRouter({ sql, config, termsGate }) {
         WHERE namespace = ${namespace} AND extension_id = ${id} AND version = ${version}
       `;
       if (!row || (row.status !== 'published' && row.status !== 'deprecated')) throw notFound();
-      const canManage = req.auth.user.role === 'admin' || req.auth.user.namespace === namespace;
+      const canManage = await isExtensionOwner(req.auth.user, namespace, id);
       if (!canManage) {
         throw forbidden('Only an owner or an admin can deprecate this version.');
       }
@@ -340,7 +366,7 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     const row = await resolveVersion(req.params);
     if (row.status !== 'published' && row.status !== 'deprecated') throw notFound();
-    if (req.auth.user.namespace !== namespace && req.auth.user.role !== 'admin') {
+    if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
       throw forbidden('You can only yank your own extensions.');
     }
     await sql`UPDATE versions SET status = 'yanked' WHERE id = ${row.id}`;
@@ -370,6 +396,114 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     } else {
       throw notFound('Compiled output is missing.');
     }
+  });
+
+  router.get('/@:namespace/:id/owners', async (req, res) => {
+    const { namespace, id } = req.params;
+    if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    const [account] = await sql`
+      SELECT 1 FROM versions v
+      WHERE v.namespace = ${namespace} AND v.extension_id = ${id} AND v.status <> 'rejected'
+    `;
+    if (!account) throw notFound();
+    const rows = await sql`
+      SELECT u.namespace, u.display_name, u.role, u.created_at, o.added_at
+      FROM extension_owners o
+      JOIN users u ON u.id = o.owner_id
+      WHERE o.namespace = ${namespace} AND o.extension_id = ${id}
+      ORDER BY o.added_at
+    `;
+    res.json({ data: rows });
+  });
+
+  router.put('/@:namespace/:id/owners/:ownerNamespace', ownerChain, async (req, res) => {
+    const { namespace: targetNamespace, id, ownerNamespace: candidate } = req.params;
+    if (req.auth.user.namespace !== targetNamespace && req.auth.user.role !== 'admin') {
+      throw forbidden('Only an existing owner or an admin can add owners.');
+    }
+    if (
+      !isValidNamespace(targetNamespace) ||
+      !isValidNamespace(candidate) ||
+      !isValidExtensionId(id)
+    ) {
+      throw notFound();
+    }
+    const [existing] = await sql`
+        SELECT 1 FROM versions
+        WHERE namespace = ${targetNamespace} AND extension_id = ${id} AND status <> 'rejected'
+      `;
+    if (!existing) throw notFound();
+    const [candidateUser] = await sql`
+        SELECT * FROM users WHERE namespace = ${candidate}
+      `;
+    if (!candidateUser) throw notFound('No such account to add.');
+    await sql.begin(async (tx) => {
+      await tx`
+          INSERT INTO extension_owners (owner_id, namespace, extension_id, added_by)
+          VALUES (${candidateUser.id}, ${targetNamespace}, ${id}, ${req.auth.user.id})
+          ON CONFLICT (namespace, extension_id, owner_id) DO NOTHING
+        `;
+      if (candidateUser.id !== req.auth.user.id) {
+        await notifyUser(
+          tx,
+          candidateUser.id,
+          'extension.owner.added',
+          addedAsOwnerMessage(req.auth.user.namespace, targetNamespace, id),
+          { namespace: targetNamespace, id },
+        );
+      }
+    });
+    res.status(204).end();
+  });
+
+  router.delete('/@:namespace/:id/owners/:ownerNamespace', ownerChain, async (req, res) => {
+    const { namespace: targetNamespace, id, ownerNamespace: target } = req.params;
+    if (
+      !isValidNamespace(targetNamespace) ||
+      !isValidNamespace(target) ||
+      !isValidExtensionId(id)
+    ) {
+      throw notFound();
+    }
+    if (req.auth.user.namespace !== targetNamespace && req.auth.user.role !== 'admin') {
+      throw forbidden('Only an owner or an admin can remove owners.');
+    }
+    const [account] = await sql`
+        SELECT 1 FROM versions
+        WHERE namespace = ${targetNamespace} AND extension_id = ${id} AND status <> 'rejected'
+      `;
+    if (!account) throw notFound();
+    if (target === targetNamespace) {
+      throw fieldErrors([
+        {
+          field: 'namespace',
+          message: 'The namespace account owns the published address and cannot be removed.',
+        },
+      ]);
+    }
+    const [candidateUser] = await sql`
+        SELECT * FROM users WHERE namespace = ${target}
+      `;
+    if (!candidateUser) throw notFound('No such account.');
+    const [deleted] = await sql.begin(async (tx) => {
+      const [r] = await tx`
+          DELETE FROM extension_owners
+          WHERE owner_id = ${candidateUser.id} AND namespace = ${targetNamespace} AND extension_id = ${id}
+          RETURNING 1
+        `;
+      if (r) {
+        await notifyUser(
+          tx,
+          candidateUser.id,
+          'extension.owner.removed',
+          removedAsOwnerMessage(req.auth.user.namespace, targetNamespace, id),
+          { namespace: targetNamespace, id },
+        );
+      }
+      return [r].filter(Boolean);
+    });
+    if (!deleted) throw notFound('That account is not an owner.');
+    res.status(204).end();
   });
 
   router.get('/@:namespace/:id', async (req, res) => {
@@ -408,7 +542,7 @@ export function makePackagesRouter({ sql, config, termsGate }) {
       let rows;
       await reserved`BEGIN`;
       try {
-        if (req.auth.user.namespace !== namespace && req.auth.user.role !== 'admin') {
+        if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
           throw forbidden('You can only delete your own extensions.');
         }
         rows = await reserved`
@@ -451,7 +585,7 @@ export function makePackagesRouter({ sql, config, termsGate }) {
   return router;
 }
 
-async function publishVersion(sql, config, owner, { id, manifest, code }) {
+async function publishVersion(sql, config, owner, { id, manifest, code, stagedBy }) {
   const version = normalizeSemver(manifest.version);
   const name = typeof manifest.name === 'string' && manifest.name.length > 0 ? manifest.name : id;
   const codeBuffer = Buffer.from(code, 'utf8');
@@ -462,6 +596,7 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
   await mkdir(tmpDir, { recursive: true });
   const tmpPath = path.join(tmpDir, `upload-${randomBytes(8).toString('hex')}.tmp`);
   const lockKey = `${owner.namespace}/${id}`;
+  const credentialOwner = stagedBy ?? owner;
 
   const searchText = buildSearchText({
     name,
@@ -482,7 +617,7 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
 
       const [pending] = await tx`
         SELECT 1 FROM versions
-        WHERE owner_id = ${owner.id} AND status IN ('staging', 'pending')
+        WHERE owner_id = ${credentialOwner.id} AND status IN ('staging', 'pending')
       `;
       if (pending) {
         throw forbidden('The owner already has a version awaiting review.');
@@ -505,12 +640,17 @@ async function publishVersion(sql, config, owner, { id, manifest, code }) {
           name, license, description, author, color1, color2, color3,
           blob_path, blob_digest, blob_size, blob_sha512, search_text
         ) VALUES (
-          ${owner.id}, ${owner.namespace}, ${id}, ${version}, 'staging',
+          ${credentialOwner.id}, ${owner.namespace}, ${id}, ${version}, 'staging',
           ${name}, ${manifest.license}, ${manifest.description}, ${manifest.author ?? null},
           ${manifest.color1 ?? null}, ${manifest.color2 ?? null}, ${manifest.color3 ?? null},
           ${blobRelative}, ${digest}, ${codeBuffer.length}, ${sha512}, ${searchText}
         )
         RETURNING *
+      `;
+      await tx`
+        INSERT INTO extension_owners (owner_id, namespace, extension_id, added_by)
+        VALUES (${owner.id}, ${owner.namespace}, ${id}, ${owner.id})
+        ON CONFLICT (namespace, extension_id, owner_id) DO NOTHING
       `;
       return staged;
     });

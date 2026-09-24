@@ -14,7 +14,7 @@ services:
       retries: 10
 
   hub:
-    image: ghcr.io/twext/twexthub:latest
+    build: .
     ports:
       - '3000:3000'
     environment:

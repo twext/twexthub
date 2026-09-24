@@ -58,7 +58,8 @@ export async function resetDb() {
   const { sql } = await boot();
   await sql.unsafe(`
     TRUNCATE TABLE automation_tokens, sessions, versions, rate_limit_entries, notifications,
-    users, legal_documents, download_events, extension_daily_downloads, dist_tags
+    users, legal_documents, download_events, extension_daily_downloads, dist_tags,
+    webhook_deliveries, webhooks
     RESTART IDENTITY CASCADE
   `);
   await sql`

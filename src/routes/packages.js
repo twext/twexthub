@@ -26,9 +26,11 @@ import {
 import { requireObjectBody } from './shared.js';
 import { blobPathFor, removeBlobIfUnused, sha256Hex, sha512Base64, storeBlob } from '../blobs.js';
 import { totalDownloads } from '../metrics.js';
+import { makeWebhooks, WebhookInputError } from '../webhooks.js';
 
 export function makePackagesRouter({ sql, config, termsGate }) {
   const router = Router();
+  const webhooks = makeWebhooks({ sql });
 
   const yankChain = [requireAuth, termsGate, requireScope('yank')];
   const ownerChain = [requireAuth, termsGate];
@@ -170,9 +172,54 @@ export function makePackagesRouter({ sql, config, termsGate }) {
         code,
         stagedBy: req.auth.user,
       });
+      if (row.status === 'published') {
+        void webhooks.scheduleFor(namespace, id, 'version.published', {
+          version: row.version,
+          occurredAt: new Date().toISOString(),
+          actor: req.auth.user.namespace,
+        });
+      }
       res.status(201).json(versionToObject(row, config));
     },
   );
+
+  router.get('/@:namespace/:id/webhooks', publishChain, async (req, res) => {
+    const { namespace, id } = req.params;
+    if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
+      throw forbidden('Only an owner or an admin can list webhooks.');
+    }
+    res.json({ data: await webhooks.list(namespace, id) });
+  });
+
+  router.post('/@:namespace/:id/webhooks', publishChain, async (req, res) => {
+    const { namespace, id } = req.params;
+    if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
+      throw forbidden('Only an owner or an admin can create webhooks.');
+    }
+    requireObjectBody(req);
+    try {
+      const created = await webhooks.create(namespace, id, req.body);
+      res.status(201).json(created);
+    } catch (error) {
+      if (error instanceof WebhookInputError) {
+        throw fieldErrors(error.fields);
+      }
+      throw error;
+    }
+  });
+
+  router.delete('/@:namespace/:id/webhooks/:webhookId', publishChain, async (req, res) => {
+    const { namespace, id, webhookId } = req.params;
+    if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
+      throw forbidden('Only an owner or an admin can delete webhooks.');
+    }
+    const removed = await webhooks.remove(namespace, id, Number(webhookId));
+    if (!removed) throw notFound();
+    res.status(204).end();
+  });
 
   router.get('/@:namespace/:id/tags', async (req, res) => {
     const { namespace, id } = req.params;
@@ -285,6 +332,11 @@ export function makePackagesRouter({ sql, config, termsGate }) {
         WHERE id = ${row.id}
         RETURNING *
       `;
+      void webhooks.scheduleFor(namespace, id, 'version.deprecated', {
+        version: updated.version,
+        occurredAt: new Date().toISOString(),
+        actor: req.auth.user.namespace,
+      });
       res.json(versionToObject(updated, config));
     },
   );
@@ -334,6 +386,11 @@ export function makePackagesRouter({ sql, config, termsGate }) {
       if (!updated) {
         throw conflict('That version is no longer pending review.');
       }
+      void webhooks.scheduleFor(namespace, id, 'version.rejected', {
+        version: updated.version,
+        occurredAt: new Date().toISOString(),
+        actor: req.auth.user.namespace,
+      });
       return res.json(versionToObject(updated, config));
     }
 
@@ -358,6 +415,11 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     if (!updated) {
       throw conflict('That version is no longer pending review.');
     }
+    void webhooks.scheduleFor(namespace, id, 'version.published', {
+      version: updated.version,
+      occurredAt: new Date().toISOString(),
+      actor: req.auth.user.namespace,
+    });
     res.json(versionToObject(updated, config));
   });
 
@@ -370,6 +432,11 @@ export function makePackagesRouter({ sql, config, termsGate }) {
       throw forbidden('You can only yank your own extensions.');
     }
     await sql`UPDATE versions SET status = 'yanked' WHERE id = ${row.id}`;
+    void webhooks.scheduleFor(namespace, id, 'version.yanked', {
+      version: row.version,
+      occurredAt: new Date().toISOString(),
+      actor: req.auth.user.namespace,
+    });
     res.status(204).end();
   });
 
@@ -453,6 +520,11 @@ export function makePackagesRouter({ sql, config, termsGate }) {
         );
       }
     });
+    void webhooks.scheduleFor(targetNamespace, id, 'owners.changed', {
+      actor: req.auth.user.namespace,
+      added: candidateUser.namespace,
+      occurredAt: new Date().toISOString(),
+    });
     res.status(204).end();
   });
 
@@ -503,6 +575,11 @@ export function makePackagesRouter({ sql, config, termsGate }) {
       return [r].filter(Boolean);
     });
     if (!deleted) throw notFound('That account is not an owner.');
+    void webhooks.scheduleFor(targetNamespace, id, 'owners.changed', {
+      actor: req.auth.user.namespace,
+      removed: target,
+      occurredAt: new Date().toISOString(),
+    });
     res.status(204).end();
   });
 

@@ -6,6 +6,11 @@ export function userToObject(row) {
     displayName: row.display_name,
     role: row.role,
     hasPublished: row.has_published,
+    bio: row.bio ?? '',
+    website: row.website ?? null,
+    github: row.github ?? null,
+    avatarUrl: row.avatar_url ?? null,
+    bannerUrl: row.banner_url ?? null,
     createdAt: row.created_at.toISOString(),
     termsAcceptedVersion: row.terms_accepted_version ?? null,
   };

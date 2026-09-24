@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdir, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { Router } from 'express';
@@ -50,9 +51,27 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     res.json(serializePublicUser(user, req));
   });
 
+  // Serves the account's external avatar when set, otherwise a deterministic
+  // 8x8 identicon derived from the namespace. Referenced, not proxied, for
+  // external URLs per the profile design; this endpoint only redirects.
+  router.get('/:namespace/avatar', async (req, res) => {
+    if (!isValidNamespace(req.params.namespace)) throw notFound();
+    const [user] = await sql`SELECT * FROM users WHERE namespace = ${req.params.namespace}`;
+    if (!user) throw notFound();
+    if (user.avatar_url) {
+      res.redirect(user.avatar_url);
+      return;
+    }
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.type('image/svg+xml').send(identiconSvg(user.namespace));
+  });
+
   function skipTermsForPasswordOnly(req, res, next) {
-    const { displayName, password, role } = req.body ?? {};
-    if (password !== undefined && displayName === undefined && role === undefined) return next();
+    const { displayName, password, bio, website, github, avatarUrl, bannerUrl } = req.body ?? {};
+    const profileOnly =
+      password === undefined &&
+      [displayName, bio, website, github, avatarUrl, bannerUrl].some((v) => v !== undefined);
+    if (password !== undefined && !profileOnly) return next();
     return termsGate(req, res, next);
   }
 
@@ -63,8 +82,17 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     }
     requireObjectBody(req);
 
-    const { displayName, password, role } = req.body;
-    if (displayName === undefined && password === undefined && role === undefined) {
+    const { displayName, password, role, bio, website, github, avatarUrl, bannerUrl } = req.body;
+    if (
+      displayName === undefined &&
+      password === undefined &&
+      role === undefined &&
+      bio === undefined &&
+      website === undefined &&
+      github === undefined &&
+      avatarUrl === undefined &&
+      bannerUrl === undefined
+    ) {
       throw fieldErrors([{ field: 'body', message: 'Provide at least one field to update.' }]);
     }
 
@@ -77,6 +105,36 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     }
     if (role !== undefined && role !== 'admin' && role !== 'normal') {
       errors.push({ field: 'role', message: 'Role must be "admin" or "normal".' });
+    }
+    if (bio !== undefined && bio !== null && (typeof bio !== 'string' || bio.length > 280)) {
+      errors.push({
+        field: 'bio',
+        message: 'Must be a string of at most 280 characters, or null.',
+      });
+    }
+    for (const [field, value] of [
+      ['website', website],
+      ['avatarUrl', avatarUrl],
+      ['bannerUrl', bannerUrl],
+    ]) {
+      if (value === undefined || value === null) continue;
+      if (typeof value !== 'string' || value.length > 400 || !/^https?:\/\//.test(value)) {
+        errors.push({
+          field,
+          message: 'Must be an http(s) URL of at most 400 characters, or null to clear.',
+        });
+      }
+    }
+    if (github !== undefined && github !== null) {
+      if (
+        typeof github !== 'string' ||
+        !/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/.test(github)
+      ) {
+        errors.push({
+          field: 'github',
+          message: 'Must be a GitHub username, or null to clear.',
+        });
+      }
     }
     if (errors.length > 0) throw fieldErrors(errors);
 
@@ -93,6 +151,26 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     if (role !== undefined) {
       patch.role = role;
       columns.push('role');
+    }
+    if (bio !== undefined) {
+      patch.bio = bio ?? '';
+      columns.push('bio');
+    }
+    if (website !== undefined) {
+      patch.website = website;
+      columns.push('website');
+    }
+    if (github !== undefined) {
+      patch.github = github;
+      columns.push('github');
+    }
+    if (avatarUrl !== undefined) {
+      patch.avatar_url = avatarUrl;
+      columns.push('avatar_url');
+    }
+    if (bannerUrl !== undefined) {
+      patch.banner_url = bannerUrl;
+      columns.push('banner_url');
     }
     if (password !== undefined) {
       if (req.auth.user.role !== 'admin') {
@@ -188,4 +266,32 @@ async function loadUserOr404(sql, namespace) {
   const [user] = await sql`SELECT * FROM users WHERE namespace = ${namespace}`;
   if (!user) throw notFound();
   return user;
+}
+
+// 8x8 horizontally-mirrored identicon: the left 4 columns are decided by the
+// namespace's SHA-256, then mirrored. Two of the hash bytes pick one of six
+// hue-rotated foreground colors on a fixed light background.
+function identiconSvg(namespace) {
+  const hash = createHash('sha256').update(namespace).digest();
+  const cells = [];
+  for (let y = 0; y < 8; y += 1) {
+    const row = [];
+    for (let x = 0; x < 4; x += 1) {
+      const bit = hash[y * 4 + x] % 2 === 1;
+      row.push(bit, bit); // mirror to the right half
+    }
+    cells.push(row);
+  }
+  const hue = hash[31] % 360;
+  const rect = [];
+  for (let y = 0; y < 8; y += 1) {
+    for (let x = 0; x < 8; x += 1) {
+      if (cells[y][x]) rect.push(`<rect x="${x * 12}" y="${y * 12}" width="12" height="12"/>`);
+    }
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96">
+  <rect width="96" height="96" fill="hsl(${hue}, 18%, 92%)"/>
+  <g fill="hsl(${hue}, 55%, 45%)">${rect.join('')}</g>
+</svg>
+`;
 }

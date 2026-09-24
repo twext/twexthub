@@ -18,14 +18,14 @@ after(async () => {
 });
 
 test('cross-origin reads are allowed with the wildcard by default', async () => {
-  const res = await request(app).get('/v0/meta').set('Origin', 'https://example.com');
+  const res = await request(app).get('/v1/meta').set('Origin', 'https://example.com');
   assert.equal(res.status, 200);
   assert.equal(res.headers['access-control-allow-origin'], '*');
 });
 
 test('preflight requests get the allow headers', async () => {
   const res = await request(app)
-    .options('/v0/extensions')
+    .options('/v1/extensions')
     .set('Origin', 'https://example.com')
     .set('Access-Control-Request-Method', 'GET');
   assert.equal(res.status, 204);
@@ -36,7 +36,7 @@ test('preflight requests get the allow headers', async () => {
 });
 
 test('requests without an Origin get no CORS headers', async () => {
-  const res = await request(app).get('/v0/meta');
+  const res = await request(app).get('/v1/meta');
   assert.equal(res.status, 200);
   assert.equal(res.headers['access-control-allow-origin'], undefined);
 });

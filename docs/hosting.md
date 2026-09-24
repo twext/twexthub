@@ -91,7 +91,7 @@ The [configuration reference](configuration.md) lists every key and environment 
 - `TWEXTHUB_PUBLIC_BASE_URL` — the public URL of the instance. Used to build the download links the registry returns.
 - `TWEXTHUB_TRUST_PROXY` — set when the instance runs behind a reverse proxy (next section).
 - `TWEXTHUB_REQUIRE_HTTPS` — reject plain-HTTP requests with 403.
-- `TWEXTHUB_API_ROOT` — the URL prefix all routes are served under. Default `/v0`.
+- `TWEXTHUB_API_ROOT` — the URL prefix all routes are served under. Default `/v1`.
 
 ## Behind a reverse proxy
 

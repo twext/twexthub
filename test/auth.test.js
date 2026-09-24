@@ -15,17 +15,17 @@ after(async () => {
 test('login with correct password returns a session', async () => {
   const ns = uniqNs();
   const password = 'password123';
-  await request(app).post('/v0/auth/signup').send({ namespace: ns, password }).expect(201);
+  await request(app).post('/v1/auth/signup').send({ namespace: ns, password }).expect(201);
 
   const login = await request(app)
-    .post('/v0/auth/login')
+    .post('/v1/auth/login')
     .send({ namespace: ns, password })
     .expect(200);
   assert.equal(login.body.user.namespace, ns);
   assert.equal(typeof login.body.token, 'string');
 
   await request(app)
-    .post('/v0/auth/login')
+    .post('/v1/auth/login')
     .send({ namespace: ns, password: 'wrong-password' })
     .expect(401);
 });
@@ -33,18 +33,18 @@ test('login with correct password returns a session', async () => {
 test('login rate limit: failed attempts produce 429', async () => {
   const ns = uniqNs();
   await request(app)
-    .post('/v0/auth/signup')
+    .post('/v1/auth/signup')
     .send({ namespace: ns, password: 'password123' })
     .expect(201);
 
   for (let i = 0; i < 5; i += 1) {
     await request(app)
-      .post('/v0/auth/login')
+      .post('/v1/auth/login')
       .send({ namespace: ns, password: 'nope-nope-nope' })
       .expect(401);
   }
   const limited = await request(app)
-    .post('/v0/auth/login')
+    .post('/v1/auth/login')
     .send({ namespace: ns, password: 'wrong-password' })
     .expect(429);
   assert.ok(limited.headers['retry-after']);
@@ -52,11 +52,11 @@ test('login rate limit: failed attempts produce 429', async () => {
 
 test('logout revokes the current session', async () => {
   const { user, token } = await signupAccept(app, uniqNs());
-  await request(app).post('/v0/auth/logout').set(bearer(token)).expect(204);
+  await request(app).post('/v1/auth/logout').set(bearer(token)).expect(204);
 
-  await request(app).get('/v0/auth/me').set(bearer(token)).expect(401);
+  await request(app).get('/v1/auth/me').set(bearer(token)).expect(401);
   const login = await request(app)
-    .post('/v0/auth/login')
+    .post('/v1/auth/login')
     .send({ namespace: user.namespace, password: 'password123' })
     .expect(200);
   assert.ok(login.body.token);
@@ -64,20 +64,20 @@ test('logout revokes the current session', async () => {
 
 test('logout works without accepting terms', async () => {
   const r = await request(app)
-    .post('/v0/auth/signup')
+    .post('/v1/auth/signup')
     .send({ namespace: uniqNs(), password: 'password123' });
   assert.equal(r.status, 201);
-  await request(app).post('/v0/auth/logout').set(bearer(r.body.token)).expect(204);
+  await request(app).post('/v1/auth/logout').set(bearer(r.body.token)).expect(204);
 });
 
 test('first user is admin', async () => {
   const u = await request(app)
-    .post('/v0/auth/signup')
+    .post('/v1/auth/signup')
     .send({ namespace: uniqNs(), password: 'password123', displayName: 'First' })
     .expect(201);
   assert.equal(u.body.user.role, 'admin');
   const second = await request(app)
-    .post('/v0/auth/signup')
+    .post('/v1/auth/signup')
     .send({ namespace: uniqNs(), password: 'password123' })
     .expect(201);
   assert.equal(second.body.user.role, 'normal');
@@ -86,42 +86,42 @@ test('first user is admin', async () => {
 test('duplicate namespace -> 409', async () => {
   const who = uniqNs();
   await request(app)
-    .post('/v0/auth/signup')
+    .post('/v1/auth/signup')
     .send({ namespace: who, password: 'password123' })
     .expect(201);
   await request(app)
-    .post('/v0/auth/signup')
+    .post('/v1/auth/signup')
     .send({ namespace: who, password: 'password123' })
     .expect(409);
 });
 
 test('short password -> 422', async () => {
   await request(app)
-    .post('/v0/auth/signup')
+    .post('/v1/auth/signup')
     .send({ namespace: uniqNs(), password: 'short' })
     .expect(422);
 });
 
 test('me: valid token 200, garbage 401, none 401', async () => {
   const { token } = await signupAccept(app, uniqNs());
-  await request(app).get('/v0/auth/me').set(bearer(token)).expect(200);
-  await request(app).get('/v0/auth/me').set(bearer('garbage')).expect(401);
-  await request(app).get('/v0/auth/me').expect(401);
+  await request(app).get('/v1/auth/me').set(bearer(token)).expect(200);
+  await request(app).get('/v1/auth/me').set(bearer('garbage')).expect(401);
+  await request(app).get('/v1/auth/me').expect(401);
 });
 
 test('terms gate: 403 until accept', async () => {
   const res = await signup(app, uniqNs());
   const { token } = res.body;
   const ns = res.body.user.namespace;
-  await request(app).get('/v0/auth/me').set(bearer(token)).expect(200);
+  await request(app).get('/v1/auth/me').set(bearer(token)).expect(200);
   await request(app)
-    .patch(`/v0/users/${ns}`)
+    .patch(`/v1/users/${ns}`)
     .set(bearer(token))
     .send({ displayName: 'Updated' })
     .expect(403);
-  await request(app).post('/v0/terms/accept').set(bearer(token)).expect(204);
+  await request(app).post('/v1/terms/accept').set(bearer(token)).expect(204);
   await request(app)
-    .patch(`/v0/users/${ns}`)
+    .patch(`/v1/users/${ns}`)
     .set(bearer(token))
     .send({ displayName: 'Updated' })
     .expect(200);

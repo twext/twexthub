@@ -39,7 +39,7 @@ Boolean environment variables must be exactly `true` or `false`; numeric ones mu
 | --------------- | ----------------------- | -------------------------- | ------------------------------------------------------------------------ |
 | `port`          | `3000`                  | `TWEXTHUB_PORT`            | TCP port to listen on                                                    |
 | `dataDir`       | `./data`                | `TWEXTHUB_DATA_DIR`        | Directory holding published blobs and scratch space                      |
-| `apiRoot`       | `/v0`                   | `TWEXTHUB_API_ROOT`        | Prefix for all routes; `/v0`, `v0`, and `/v0/` are the same              |
+| `apiRoot`       | `/v1`                   | `TWEXTHUB_API_ROOT`        | Prefix for all routes; `/v1`, `v1`, and `/v1/` are the same              |
 | `publicBaseUrl` | `http://localhost:3000` | `TWEXTHUB_PUBLIC_BASE_URL` | Client-facing base URL; used to build download links                     |
 | `requireHttps`  | `false`                 | `TWEXTHUB_REQUIRE_HTTPS`   | Reject non-`https` requests with 403                                     |
 | `trustProxy`    | `false`                 | `TWEXTHUB_TRUST_PROXY`     | Express trust proxy: `true`, `false`, a hop count, or an address pattern |

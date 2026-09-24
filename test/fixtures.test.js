@@ -42,7 +42,7 @@ test('fixture greeter round-trips byte-for-byte', async () => {
   };
 
   const pub = await request(app)
-    .post(`/v0/@${ns}/${id}/versions`)
+    .post(`/v1/@${ns}/${id}/versions`)
     .set(bearer(owner.token))
     .send({ manifest: publishBody, code })
     .expect(201);
@@ -53,18 +53,18 @@ test('fixture greeter round-trips byte-for-byte', async () => {
 
   // approve so the fixture becomes downloadable
   const queue = await request(app)
-    .get('/v0/versions?status=pending')
+    .get('/v1/versions?status=pending')
     .set(bearer(admin.token))
     .expect(200);
   const entry = queue.body.data.find((v) => v.namespace === ns && v.id === id);
   assert.ok(entry);
   await request(app)
-    .patch(`/v0/@${ns}/${id}/versions/${version}`)
+    .patch(`/v1/@${ns}/${id}/versions/${version}`)
     .set(bearer(admin.token))
     .send({ status: 'approved' })
     .expect(200);
 
-  const dl = await request(app).get(`/v0/@${ns}/${id}/versions/${version}/download`).expect(200);
+  const dl = await request(app).get(`/v1/@${ns}/${id}/versions/${version}/download`).expect(200);
   assert.match(dl.headers['content-type'], /javascript/);
   assert.deepEqual(
     Buffer.from(dl.text, 'utf8'),
@@ -73,7 +73,7 @@ test('fixture greeter round-trips byte-for-byte', async () => {
   );
 
   // extension detail exposes colors and latest version
-  const detail = await request(app).get(`/v0/@${ns}/${id}`).expect(200);
+  const detail = await request(app).get(`/v1/@${ns}/${id}`).expect(200);
   assert.equal(detail.body.version, version);
   assert.equal(detail.body.color1, '#0094FF');
   assert.equal(detail.body.license, 'MIT');
@@ -102,26 +102,26 @@ test('fixture hello auto-publishes after first approval', async () => {
   };
 
   await request(app)
-    .post(`/v0/@${ns}/${id}/versions`)
+    .post(`/v1/@${ns}/${id}/versions`)
     .set(bearer(owner.token))
     .send({ manifest: publishBody, code })
     .expect(201);
 
   const queue = await request(app)
-    .get('/v0/versions?status=pending')
+    .get('/v1/versions?status=pending')
     .set(bearer(admin.token))
     .expect(200);
   const entry = queue.body.data.find((v) => v.namespace === ns && v.id === id);
   assert.ok(entry);
   await request(app)
-    .patch(`/v0/@${ns}/${id}/versions/${version}`)
+    .patch(`/v1/@${ns}/${id}/versions/${version}`)
     .set(bearer(admin.token))
     .send({ status: 'approved' })
     .expect(200);
 
   // promise of owner.published -> later publishes skip review
   const pub2 = await request(app)
-    .post(`/v0/@${ns}/${id}/versions`)
+    .post(`/v1/@${ns}/${id}/versions`)
     .set(bearer(owner.token))
     .send({
       manifest: { ...publishBody, version: '0.2.0' },
@@ -130,6 +130,6 @@ test('fixture hello auto-publishes after first approval', async () => {
     .expect(201);
   assert.equal(pub2.body.status, 'published');
 
-  const dl = await request(app).get(`/v0/@${ns}/${id}/versions/0.2.0/download`).expect(200);
+  const dl = await request(app).get(`/v1/@${ns}/${id}/versions/0.2.0/download`).expect(200);
   assert.deepEqual(Buffer.from(dl.text, 'utf8'), Buffer.from(replaced, 'utf8'));
 });

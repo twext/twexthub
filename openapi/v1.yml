@@ -31,7 +31,7 @@ info:
     tokens, act on `/admin/*` endpoints, or change account settings —
     an automation token calling any of those gets a `403`.
 servers:
-  - url: https://{host}/v0
+  - url: https://{host}/v1
     variables:
       host:
         default: hub.twext.dev

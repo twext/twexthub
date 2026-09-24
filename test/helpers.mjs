@@ -22,7 +22,7 @@ export function makeConfig(overrides = {}) {
   return {
     port: 0,
     dataDir,
-    apiRoot: '/v0',
+    apiRoot: '/v1',
     publicBaseUrl: 'http://hub.test:8080',
     requireHttps: false,
     database: { url: TEST_DATABASE_URL, maxConnections: 6 },
@@ -71,13 +71,13 @@ export function bearer(token) {
 }
 
 export async function signup(app, namespace, password = 'password123', displayName = namespace) {
-  return request(app).post('/v0/auth/signup').send({ namespace, password, displayName });
+  return request(app).post('/v1/auth/signup').send({ namespace, password, displayName });
 }
 
 export async function signupAndAccept(app, namespace, password = 'password123') {
   const r = await signup(app, namespace, password);
   assert.equal(r.status, 201, `signup failed: ${JSON.stringify(r.body)}`);
-  const accepted = await request(app).post('/v0/terms/accept').set(bearer(r.body.token));
+  const accepted = await request(app).post('/v1/terms/accept').set(bearer(r.body.token));
   assert.equal(accepted.status, 204, `terms accept failed: ${JSON.stringify(accepted.body)}`);
   return r.body;
 }

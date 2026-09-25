@@ -27,6 +27,7 @@ import { requireObjectBody } from './shared.js';
 import { blobPathFor, removeBlobIfUnused, sha256Hex, sha512Base64, storeBlob } from '../blobs.js';
 import { totalDownloads } from '../metrics.js';
 import { makeWebhooks, WebhookInputError } from '../webhooks.js';
+import { audit, auditSoon } from '../audit.js';
 
 export function makePackagesRouter({ sql, config, termsGate }) {
   const router = Router();
@@ -46,6 +47,24 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     return Boolean(row);
   }
 
+  // Owners and admins see everything; a private extension is additionally
+  // visible to accounts holding an explicit access grant.
+  async function canSee(user, row) {
+    if (row.visibility !== 'private') return true;
+    if (!user) return false;
+    if (user.role === 'admin' || user.namespace === row.namespace) return true;
+    const [ownerRow] = await sql`
+      SELECT 1 FROM extension_owners
+      WHERE owner_id = ${user.id} AND namespace = ${row.namespace} AND extension_id = ${row.extension_id}
+    `;
+    if (ownerRow) return true;
+    const [grant] = await sql`
+      SELECT 1 FROM extension_access
+      WHERE user_id = ${user.id} AND namespace = ${row.namespace} AND extension_id = ${row.extension_id}
+    `;
+    return Boolean(grant);
+  }
+
   async function loadNamespaceAccount(namespace) {
     const [owner] = await sql`SELECT * FROM users WHERE namespace = ${namespace}`;
     return owner;
@@ -55,6 +74,19 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     const [row] = await sql`
       SELECT * FROM versions
       WHERE namespace = ${namespace} AND extension_id = ${id} AND version = ${version}
+    `;
+    return row;
+  }
+
+  // Most recent non-rejected row, enough to decide visibility without pulling
+  // the whole version set. A direct status probe would miss extensions whose
+  // only row was rejected.
+  async function loadVisibility(namespace, id) {
+    const [row] = await sql`
+      SELECT namespace, extension_id, visibility FROM versions
+      WHERE namespace = ${namespace} AND extension_id = ${id} AND status <> 'rejected'
+      ORDER BY id DESC
+      LIMIT 1
     `;
     return row;
   }
@@ -95,6 +127,8 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     if (!range || !semver.validRange(range)) {
       throw fieldErrors([{ field: 'range', message: 'Must be a valid SemVer range.' }]);
     }
+    const visibility = await loadVisibility(namespace, id);
+    if (!visibility || !(await canSee(req.auth?.user, visibility))) throw notFound();
     const rows = await sql`
       SELECT * FROM versions
       WHERE namespace = ${namespace} AND extension_id = ${id}
@@ -102,7 +136,10 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     `;
     const candidates = rows
       .map((row) => ({ row, coerced: semver.valid(row.version) }))
-      .filter((entry) => entry.coerced && semver.satisfies(entry.coerced, range, { includePrerelease: true }));
+      .filter(
+        (entry) =>
+          entry.coerced && semver.satisfies(entry.coerced, range, { includePrerelease: true }),
+      );
     const best = maxVersionBySemver(candidates.map((entry) => entry.coerced));
     const match = candidates.find((entry) => entry.coerced === best);
     if (!match) throw notFound('No published version satisfies that range.');
@@ -178,6 +215,13 @@ export function makePackagesRouter({ sql, config, termsGate }) {
       if (typeof code !== 'string' || code.length === 0) {
         errors.push({ field: 'code', message: 'The compiled Twext output is required.' });
       }
+      if (
+        req.body.visibility !== undefined &&
+        req.body.visibility !== 'public' &&
+        req.body.visibility !== 'private'
+      ) {
+        errors.push({ field: 'visibility', message: 'Must be "public" or "private".' });
+      }
       if (errors.length > 0) throw fieldErrors(errors);
 
       if (!isValidNamespace(namespace)) throw notFound();
@@ -187,12 +231,38 @@ export function makePackagesRouter({ sql, config, termsGate }) {
         throw forbidden('You can only publish to an extension you own.');
       }
 
+      // Size caps: per-blob, then the account's cumulative quota (their own
+      // override when set, otherwise the configured default).
+      const codeBytes = Buffer.byteLength(code, 'utf8');
+      const maxBlob = config.limits?.maxBlobBytes ?? 2 * 1024 * 1024;
+      if (codeBytes > maxBlob) {
+        throw new HttpError(413, {
+          title: 'Payload Too Large',
+          detail: `Compiled output is ${codeBytes} bytes; the limit is ${maxBlob}.`,
+        });
+      }
+      const quota = owner.max_blob_bytes ?? config.limits?.maxAccountBlobBytes ?? 64 * 1024 * 1024;
+      if (Number(owner.blob_bytes ?? 0) + codeBytes > quota) {
+        throw new HttpError(413, {
+          title: 'Payload Too Large',
+          detail: `Publishing ${codeBytes} bytes would exceed the ${quota}-byte storage quota for @${owner.namespace}.`,
+        });
+      }
+
       const row = await publishVersion(sql, config, owner, {
         id,
         manifest,
         code,
+        visibility: req.body.visibility,
         stagedBy: req.auth.user,
       });
+      auditSoon(
+        sql,
+        req.auth.user,
+        'version.publish',
+        { namespace, id, version: row.version },
+        { status: row.status, visibility: row.visibility, bytes: codeBytes },
+      );
       if (row.status === 'published') {
         void webhooks.scheduleFor(namespace, id, 'version.published', {
           version: row.version,
@@ -245,6 +315,8 @@ export function makePackagesRouter({ sql, config, termsGate }) {
   router.get('/@:namespace/:id/tags', async (req, res) => {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    const visibility = await loadVisibility(namespace, id);
+    if (!visibility || !(await canSee(req.auth?.user, visibility))) throw notFound();
     const rows = await sql`
       SELECT tag, version FROM dist_tags
       WHERE namespace = ${namespace} AND extension_id = ${id}
@@ -287,6 +359,7 @@ export function makePackagesRouter({ sql, config, termsGate }) {
         ON CONFLICT (namespace, extension_id, tag)
         DO UPDATE SET version = EXCLUDED.version, owner_id = EXCLUDED.owner_id
       `;
+    auditSoon(sql, req.auth.user, 'tag.set', { namespace, id, version: normalized }, { tag });
     res.status(204).end();
   });
 
@@ -305,6 +378,7 @@ export function makePackagesRouter({ sql, config, termsGate }) {
       RETURNING 1
     `;
     if (!deleted) throw notFound();
+    auditSoon(sql, req.auth.user, 'tag.remove', { namespace, id }, { tag });
     res.status(204).end();
   });
 
@@ -312,9 +386,12 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     const row = await resolveVersion(req.params);
     const isVisible =
       row.status === 'published' || row.status === 'yanked' || row.status === 'deprecated';
-    const isOwner = req.auth?.user.namespace === req.params.namespace;
-    const isAdmin = req.auth?.user.role === 'admin';
-    if (!isVisible && !isOwner && !isAdmin) throw notFound();
+    if (!isVisible) {
+      const isOwner = req.auth?.user.namespace === req.params.namespace;
+      const isAdmin = req.auth?.user.role === 'admin';
+      if (!isOwner && !isAdmin) throw notFound();
+    }
+    if (isVisible && !(await canSee(req.auth?.user, row))) throw notFound();
     res.json(versionToObject(row, config));
   });
 
@@ -353,6 +430,13 @@ export function makePackagesRouter({ sql, config, termsGate }) {
         WHERE id = ${row.id}
         RETURNING *
       `;
+      auditSoon(
+        sql,
+        req.auth.user,
+        message === null ? 'version.undeprecate' : 'version.deprecate',
+        { namespace, id, version: updated.version },
+        { message: message ?? null },
+      );
       void webhooks.scheduleFor(namespace, id, 'version.deprecated', {
         version: updated.version,
         occurredAt: new Date().toISOString(),
@@ -401,6 +485,13 @@ export function makePackagesRouter({ sql, config, termsGate }) {
             reviewRejectedMessage(row.extension_id, row.version, reason),
             { namespace: row.namespace, id: row.extension_id, version: row.version, reason },
           );
+          await audit(
+            tx,
+            req.auth.user,
+            'version.reject',
+            { namespace, id, version: row.version },
+            { reason },
+          );
         }
         return rows[0];
       });
@@ -430,6 +521,7 @@ export function makePackagesRouter({ sql, config, termsGate }) {
           reviewApprovedMessage(row.namespace, row.extension_id, row.version),
           { namespace: row.namespace, id: row.extension_id, version: row.version },
         );
+        await audit(tx, req.auth.user, 'version.approve', { namespace, id, version: row.version });
       }
       return rows[0];
     });
@@ -453,6 +545,7 @@ export function makePackagesRouter({ sql, config, termsGate }) {
       throw forbidden('You can only yank your own extensions.');
     }
     await sql`UPDATE versions SET status = 'yanked' WHERE id = ${row.id}`;
+    auditSoon(sql, req.auth.user, 'version.yank', { namespace, id, version: row.version });
     void webhooks.scheduleFor(namespace, id, 'version.yanked', {
       version: row.version,
       occurredAt: new Date().toISOString(),
@@ -469,6 +562,7 @@ export function makePackagesRouter({ sql, config, termsGate }) {
       row.status === 'published' || row.status === 'yanked' || row.status === 'deprecated';
     const isAdmin = req.auth?.user.role === 'admin' && req.auth.tokenType === 'session';
     if (!isPublished && !(row.status === 'pending' && isAdmin)) throw notFound();
+    if (isPublished && !(await canSee(req.auth?.user, row))) throw notFound();
     const abs = row.blob_digest
       ? blobPathFor(config.dataDir, row.blob_digest)
       : path.join(config.dataDir, row.blob_path);
@@ -489,11 +583,8 @@ export function makePackagesRouter({ sql, config, termsGate }) {
   router.get('/@:namespace/:id/owners', async (req, res) => {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
-    const [account] = await sql`
-      SELECT 1 FROM versions v
-      WHERE v.namespace = ${namespace} AND v.extension_id = ${id} AND v.status <> 'rejected'
-    `;
-    if (!account) throw notFound();
+    const visibility = await loadVisibility(namespace, id);
+    if (!visibility || !(await canSee(req.auth?.user, visibility))) throw notFound();
     const rows = await sql`
       SELECT u.namespace, u.display_name, u.role, u.created_at, o.added_at
       FROM extension_owners o
@@ -540,6 +631,13 @@ export function makePackagesRouter({ sql, config, termsGate }) {
           { namespace: targetNamespace, id },
         );
       }
+      await audit(
+        tx,
+        req.auth.user,
+        'owner.add',
+        { namespace: targetNamespace, id },
+        { added: candidateUser.namespace },
+      );
     });
     void webhooks.scheduleFor(targetNamespace, id, 'owners.changed', {
       actor: req.auth.user.namespace,
@@ -592,6 +690,13 @@ export function makePackagesRouter({ sql, config, termsGate }) {
           removedAsOwnerMessage(req.auth.user.namespace, targetNamespace, id),
           { namespace: targetNamespace, id },
         );
+        await audit(
+          tx,
+          req.auth.user,
+          'owner.remove',
+          { namespace: targetNamespace, id },
+          { removed: candidateUser.namespace },
+        );
       }
       return [r].filter(Boolean);
     });
@@ -602,6 +707,101 @@ export function makePackagesRouter({ sql, config, termsGate }) {
       occurredAt: new Date().toISOString(),
     });
     res.status(204).end();
+  });
+
+  // Access grants for private extensions. Only meaningful on private
+  // extensions, but recorded either way so a later flip to private keeps
+  // grants intact.
+  router.put('/@:namespace/:id/access/:granteeNamespace', ownerChain, async (req, res) => {
+    const { namespace: targetNamespace, id, granteeNamespace: grantee } = req.params;
+    if (
+      !isValidNamespace(targetNamespace) ||
+      !isValidNamespace(grantee) ||
+      !isValidExtensionId(id)
+    ) {
+      throw notFound();
+    }
+    if (req.auth.user.namespace !== targetNamespace && req.auth.user.role !== 'admin') {
+      throw forbidden('Only an owner or an admin can grant access.');
+    }
+    const [existing] = await sql`
+      SELECT 1 FROM versions
+      WHERE namespace = ${targetNamespace} AND extension_id = ${id} AND status <> 'rejected'
+    `;
+    if (!existing) throw notFound();
+    const [granteeUser] = await sql`SELECT * FROM users WHERE namespace = ${grantee}`;
+    if (!granteeUser) throw notFound('No such account to grant.');
+    if (granteeUser.namespace === targetNamespace) {
+      throw fieldErrors([
+        { field: 'namespace', message: 'The namespace account always has access.' },
+      ]);
+    }
+    await sql.begin(async (tx) => {
+      await tx`
+        INSERT INTO extension_access (user_id, namespace, extension_id, granted_by)
+        VALUES (${granteeUser.id}, ${targetNamespace}, ${id}, ${req.auth.user.id})
+        ON CONFLICT (user_id, namespace, extension_id) DO NOTHING
+      `;
+      await audit(
+        tx,
+        req.auth.user,
+        'access.grant',
+        { namespace: targetNamespace, id },
+        { granted: granteeUser.namespace },
+      );
+    });
+    res.status(204).end();
+  });
+
+  router.delete('/@:namespace/:id/access/:granteeNamespace', ownerChain, async (req, res) => {
+    const { namespace: targetNamespace, id, granteeNamespace: grantee } = req.params;
+    if (
+      !isValidNamespace(targetNamespace) ||
+      !isValidNamespace(grantee) ||
+      !isValidExtensionId(id)
+    ) {
+      throw notFound();
+    }
+    if (req.auth.user.namespace !== targetNamespace && req.auth.user.role !== 'admin') {
+      throw forbidden('Only an owner or an admin can revoke access.');
+    }
+    const [granteeUser] = await sql`SELECT * FROM users WHERE namespace = ${grantee}`;
+    if (!granteeUser) throw notFound('No such account.');
+    const [revoked] = await sql.begin(async (tx) => {
+      const [r] = await tx`
+        DELETE FROM extension_access
+        WHERE user_id = ${granteeUser.id} AND namespace = ${targetNamespace} AND extension_id = ${id}
+        RETURNING 1
+      `;
+      if (r) {
+        await audit(
+          tx,
+          req.auth.user,
+          'access.revoke',
+          { namespace: targetNamespace, id },
+          { revoked: granteeUser.namespace },
+        );
+      }
+      return [r].filter(Boolean);
+    });
+    if (!revoked) throw notFound('That account has no access grant.');
+    res.status(204).end();
+  });
+
+  router.get('/@:namespace/:id/access', publishChain, async (req, res) => {
+    const { namespace, id } = req.params;
+    if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
+      throw forbidden('Only an owner or an admin can list access grants.');
+    }
+    const rows = await sql`
+      SELECT u.namespace, u.display_name, a.created_at
+      FROM extension_access a
+      JOIN users u ON u.id = a.user_id
+      WHERE a.namespace = ${namespace} AND a.extension_id = ${id}
+      ORDER BY a.created_at
+    `;
+    res.json({ data: rows });
   });
 
   router.get('/@:namespace/:id', async (req, res) => {
@@ -616,6 +816,7 @@ export function makePackagesRouter({ sql, config, termsGate }) {
         created_at DESC
     `;
     if (rows.length === 0) throw notFound();
+    if (!(await canSee(req.auth?.user, rows[0]))) throw notFound();
     const sorted = [...rows].sort((a, b) => compareSemver(b.version, a.version));
     const top = sorted.find((row) => row.status === 'published') ?? sorted[0];
     const summary = extensionDetailFromRow(
@@ -644,7 +845,7 @@ export function makePackagesRouter({ sql, config, termsGate }) {
           throw forbidden('You can only delete your own extensions.');
         }
         rows = await reserved`
-          SELECT blob_digest, blob_path, status FROM versions
+          SELECT blob_digest, blob_path, status, blob_size, visibility FROM versions
           WHERE namespace = ${namespace} AND extension_id = ${id}
         `;
         if (rows.length === 0) throw notFound();
@@ -652,6 +853,17 @@ export function makePackagesRouter({ sql, config, termsGate }) {
           throw conflict('A publish is in progress for this extension.');
         }
         await reserved`DELETE FROM versions WHERE namespace = ${namespace} AND extension_id = ${id}`;
+        // Refund the account's quota for every byte this extension charged.
+        const charged = rows.reduce((sum, row) => sum + Number(row.blob_size ?? 0), 0);
+        if (charged > 0) {
+          const [account] = await reserved`SELECT id FROM users WHERE namespace = ${namespace}`;
+          if (account) {
+            await reserved`
+              UPDATE users SET blob_bytes = GREATEST(blob_bytes - ${charged}, 0)
+              WHERE id = ${account.id}
+            `;
+          }
+        }
         await reserved`COMMIT`;
       } catch (error) {
         try {
@@ -670,6 +882,16 @@ export function makePackagesRouter({ sql, config, termsGate }) {
           }
         }),
       );
+      auditSoon(
+        sql,
+        req.auth.user,
+        'extension.delete',
+        { namespace, id },
+        {
+          versions: rows.length,
+          bytesRefunded: rows.reduce((sum, row) => sum + Number(row.blob_size ?? 0), 0),
+        },
+      );
       res.status(204).end();
     } finally {
       try {
@@ -683,7 +905,7 @@ export function makePackagesRouter({ sql, config, termsGate }) {
   return router;
 }
 
-async function publishVersion(sql, config, owner, { id, manifest, code, stagedBy }) {
+async function publishVersion(sql, config, owner, { id, manifest, code, visibility, stagedBy }) {
   const version = normalizeSemver(manifest.version);
   const name = typeof manifest.name === 'string' && manifest.name.length > 0 ? manifest.name : id;
   const codeBuffer = Buffer.from(code, 'utf8');
@@ -736,12 +958,13 @@ async function publishVersion(sql, config, owner, { id, manifest, code, stagedBy
         INSERT INTO versions (
           owner_id, namespace, extension_id, version, status,
           name, license, description, author, color1, color2, color3,
-          blob_path, blob_digest, blob_size, blob_sha512, search_text
+          blob_path, blob_digest, blob_size, blob_sha512, search_text, visibility
         ) VALUES (
           ${credentialOwner.id}, ${owner.namespace}, ${id}, ${version}, 'staging',
           ${name}, ${manifest.license}, ${manifest.description}, ${manifest.author ?? null},
           ${manifest.color1 ?? null}, ${manifest.color2 ?? null}, ${manifest.color3 ?? null},
-          ${blobRelative}, ${digest}, ${codeBuffer.length}, ${sha512}, ${searchText}
+          ${blobRelative}, ${digest}, ${codeBuffer.length}, ${sha512}, ${searchText},
+          ${visibility === 'private' ? 'private' : 'public'}
         )
         RETURNING *
       `;
@@ -749,6 +972,12 @@ async function publishVersion(sql, config, owner, { id, manifest, code, stagedBy
         INSERT INTO extension_owners (owner_id, namespace, extension_id, added_by)
         VALUES (${owner.id}, ${owner.namespace}, ${id}, ${owner.id})
         ON CONFLICT (namespace, extension_id, owner_id) DO NOTHING
+      `;
+      // Charge the blob bytes to the namespace account. Identical content is
+      // re-charged per version row; deleting a version refunds its bytes.
+      await tx`
+        UPDATE users SET blob_bytes = blob_bytes + ${codeBuffer.length}
+        WHERE id = ${owner.id}
       `;
       return staged;
     });

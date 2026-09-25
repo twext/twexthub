@@ -17,3 +17,6 @@ rateLimits:
 pagination:
   defaultLimit: 20
   maxLimit: 50
+limits:
+  maxBlobBytes: 2097152
+  maxAccountBlobBytes: 67108864

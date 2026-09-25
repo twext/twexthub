@@ -13,6 +13,7 @@ Every TwextHub instance is configured by defaults, a `config.yaml` file, and env
 - [Auth](#auth)
 - [Rate limits](#rate-limits)
 - [Pagination](#pagination)
+- [Limits](#limits)
 - [CORS](#cors)
 - [Behavior notes](#behavior-notes)
 - [Data directory layout](#data-directory-layout)
@@ -77,6 +78,15 @@ Boolean environment variables must be exactly `true` or `false`; numeric ones mu
 | ------------------------- | ------- | ----------------------------------- | -------------------------------------------- |
 | `pagination.defaultLimit` | `20`    | `TWEXTHUB_PAGINATION_DEFAULT_LIMIT` | Page size when none is given                 |
 | `pagination.maxLimit`     | `50`    | `TWEXTHUB_PAGINATION_MAX_LIMIT`     | Upper bound on `limit` for any list endpoint |
+
+## Limits
+
+| Key                          | Default    | Environment                       | Purpose                                            |
+| ---------------------------- | ---------- | --------------------------------- | -------------------------------------------------- |
+| `limits.maxBlobBytes`        | `2097152`  | `TWEXTHUB_MAX_BLOB_BYTES`         | Upper bound on a single published blob             |
+| `limits.maxAccountBlobBytes` | `67108864` | `TWEXTHUB_MAX_ACCOUNT_BLOB_BYTES` | Per-account storage quota, applied at publish time |
+
+Publishing a version charges its blob bytes to the namespace account's running total. Deleting the extension refunds every byte it charged. An admin can override an account's cumulative quota with `PATCH /v1/admin/users/:namespace/quota`; a `null` `maxBlobBytes` resets it to the configured default.
 
 ## CORS
 

@@ -64,6 +64,7 @@ export function versionToObject(row, config) {
     name: row.name,
     license: row.license,
     description: row.description,
+    visibility: row.visibility ?? 'public',
     createdAt: row.created_at.toISOString(),
   };
   if (row.author) out.author = row.author;

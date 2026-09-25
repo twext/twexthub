@@ -59,12 +59,31 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     name: sql`s.name ASC, s.namespace ASC, s.extension_id ASC`,
   };
 
+  // Anonymous and unprivileged callers never see private extensions; owners
+  // and admins do. Grants do not apply here: the private surface is
+  // detail/download only, so listing stays a single-query affair.
+  function visibilityFilter(user) {
+    if (user?.role === 'admin') return sql``;
+    if (user) {
+      return sql`
+        AND (s.visibility = 'public' OR s.namespace = ${user.namespace}
+          OR EXISTS (
+            SELECT 1 FROM extension_owners o
+            WHERE o.owner_id = ${user.id} AND o.namespace = s.namespace
+              AND o.extension_id = s.extension_id
+          ))
+      `;
+    }
+    return sql`AND s.visibility = 'public'`;
+  }
+
   async function listLatestVersions({
     limit,
     cursor,
     sort = 'recent',
     license,
     searchFilter = sql``,
+    user = null,
   }) {
     const rows = await sql`
       SELECT s.*, COALESCE(d.total, 0)::bigint AS downloads FROM (
@@ -86,6 +105,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
         GROUP BY namespace, extension_id
       ) d ON d.namespace = s.namespace AND d.extension_id = s.extension_id
       WHERE rn = 1
+        ${visibilityFilter(user)}
         ${license ? sql`AND s.license = ${license}` : sql``}
         ${searchFilter}
         ${cursorCondition(cursor, sort)}
@@ -135,7 +155,9 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
         ? req.query.license
         : null;
     const cursor = decodeCursor(req.query.cursor, { k: 'string', ns: 'string', id: 'string' });
-    res.json(await listLatestVersions({ limit, cursor, sort, license }));
+    res.json(
+      await listLatestVersions({ limit, cursor, sort, license, user: req.auth?.user ?? null }),
+    );
   });
 
   router.get('/extensions/trending', async (req, res) => {
@@ -185,7 +207,16 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     const searchFilter = folded
       ? sql`AND search_text LIKE ${'%' + escapeLike(folded) + '%'}`
       : sql``;
-    res.json(await listLatestVersions({ limit, cursor, sort, license, searchFilter }));
+    res.json(
+      await listLatestVersions({
+        limit,
+        cursor,
+        sort,
+        license,
+        searchFilter,
+        user: req.auth?.user ?? null,
+      }),
+    );
   });
 
   router.get('/meta', (req, res) => {
@@ -246,6 +277,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
         FROM versions v
         WHERE namespace = ${namespace} AND extension_id = ${id}
           AND status IN ('published', 'deprecated')
+          AND v.visibility = 'public'
       ) s
       WHERE rn = 1
     `;
@@ -293,6 +325,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
         ) AS rn
         FROM versions v
         WHERE status IN ('published', 'deprecated') AND published_at IS NOT NULL
+          AND v.visibility = 'public'
       ) s
       WHERE rn = 1
       ORDER BY published_at DESC

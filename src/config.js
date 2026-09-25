@@ -31,6 +31,10 @@ export const DEFAULTS = {
     defaultLimit: 20,
     maxLimit: 50,
   },
+  limits: {
+    maxBlobBytes: 2 * 1024 * 1024,
+    maxAccountBlobBytes: 64 * 1024 * 1024,
+  },
   cors: {
     allowedOrigins: '*',
   },
@@ -65,6 +69,8 @@ const ENV_OVERRIDES = [
   ['rateLimits.signupWindowMinutes', 'TWEXTHUB_SIGNUP_WINDOW_MINUTES'],
   ['pagination.defaultLimit', 'TWEXTHUB_PAGINATION_DEFAULT_LIMIT'],
   ['pagination.maxLimit', 'TWEXTHUB_PAGINATION_MAX_LIMIT'],
+  ['limits.maxBlobBytes', 'TWEXTHUB_MAX_BLOB_BYTES'],
+  ['limits.maxAccountBlobBytes', 'TWEXTHUB_MAX_ACCOUNT_BLOB_BYTES'],
   ['cors.allowedOrigins', 'TWEXTHUB_CORS_ALLOWED_ORIGINS'],
 ];
 

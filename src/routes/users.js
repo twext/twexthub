@@ -10,6 +10,7 @@ import { isValidNamespace } from '../util.js';
 import { userToObject } from '../serialize.js';
 import { notifyUser, roleChangedMessage, tokensRevokedMessage } from '../notify.js';
 import { requireObjectBody } from './shared.js';
+import { audit } from '../audit.js';
 
 export function makeUsersRouter({ sql, config, termsGate }) {
   const router = Router();
@@ -207,6 +208,16 @@ export function makeUsersRouter({ sql, config, termsGate }) {
       }
       if (role !== undefined) {
         await notifyUser(tx, target.id, 'role.changed', roleChangedMessage(role), { role });
+        await audit(
+          tx,
+          req.auth.user,
+          'role.change',
+          { namespace: target.namespace },
+          {
+            role,
+            previousRole: target.role,
+          },
+        );
       }
       return tx`SELECT * FROM users WHERE id = ${target.id}`;
     });

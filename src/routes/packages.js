@@ -24,7 +24,14 @@ import {
   reviewRejectedMessage,
 } from '../notify.js';
 import { requireObjectBody } from './shared.js';
-import { blobPathFor, removeBlobIfUnused, sha256Hex, sha512Base64, storeBlob } from '../blobs.js';
+import {
+  BLOB_GC_LOCK_KEY,
+  blobPathFor,
+  removeBlobIfUnused,
+  sha256Hex,
+  sha512Base64,
+  storeBlob,
+} from '../blobs.js';
 import { sourcePathFor, removeSourceIfUnused, storeSource } from '../sources.js';
 import { manifestFromProject } from '../project-manifest.js';
 import { extractTarballBuffer } from '../tarball.js';
@@ -1056,9 +1063,10 @@ async function publishVersion(
       SET source_path = ${source.path}, source_digest = ${source.digest}
       WHERE id = ${staged.id}
     `;
-    await storeBlob(config.dataDir, tmpPath, codeBuffer);
-
     const row = await sql.begin(async (tx) => {
+      // GC holds the exclusive lock; publishers share it through promotion.
+      await tx`SELECT pg_advisory_xact_lock_shared(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
+      await storeBlob(config.dataDir, tmpPath, codeBuffer);
       const promoted = await tx`
         UPDATE versions
         SET status = ${finalStatus},

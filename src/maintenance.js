@@ -1,39 +1,42 @@
 import { readdir, readFile, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
-import { blobPathFor, sha256Hex } from './blobs.js';
+import { BLOB_GC_LOCK_KEY, blobPathFor, sha256Hex } from './blobs.js';
 
 // Blob garbage collection: a file under blobs/ whose digest no version row
 // references is deleted. Sources are handled by removeSourceIfUnused at the
 // call sites that already know the digest; this sweep only covers blobs so a
 // crash between the DB delete and the file removal cannot strand bytes.
 export async function gcBlobs(sql, dataDir) {
-  const blobsDir = path.join(dataDir, 'blobs');
-  const known = await sql`SELECT DISTINCT blob_digest FROM versions WHERE blob_digest IS NOT NULL`;
-  const referenced = new Set(known.map((row) => row.blob_digest));
+  return sql.begin(async (tx) => {
+    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
+    const blobsDir = path.join(dataDir, 'blobs');
+    const known = await tx`SELECT DISTINCT blob_digest FROM versions WHERE blob_digest IS NOT NULL`;
+    const referenced = new Set(known.map((row) => row.blob_digest));
 
-  // A blob lands on disk before the versions row that references it, so a file
-  // younger than an hour may still belong to a publish in flight. Leave those
-  // to the next pass rather than deleting them out from under it.
-  const cutoff = Date.now() - 60 * 60 * 1000;
+    // A blob lands on disk before the versions row that references it, so a file
+    // younger than an hour may still belong to a publish in flight. Leave those
+    // to the next pass rather than deleting them out from under it.
+    const cutoff = Date.now() - 60 * 60 * 1000;
 
-  let removed = 0;
-  for (const prefix of await readdir(blobsDir)) {
-    const prefixDir = path.join(blobsDir, prefix);
-    for (const rest of await readdir(prefixDir)) {
-      const digest = prefix + rest;
-      if (referenced.has(digest)) continue;
-      const abs = path.join(prefixDir, rest);
-      const info = await stat(abs).catch(() => null);
-      if (!info || info.mtimeMs > cutoff) continue;
-      try {
-        await unlink(abs);
-        removed += 1;
-      } catch {
-        // Gone already, or another sweep got there first.
+    let removed = 0;
+    for (const prefix of await readdir(blobsDir)) {
+      const prefixDir = path.join(blobsDir, prefix);
+      for (const rest of await readdir(prefixDir)) {
+        const digest = prefix + rest;
+        if (referenced.has(digest)) continue;
+        const abs = path.join(prefixDir, rest);
+        const info = await stat(abs).catch(() => null);
+        if (!info || info.mtimeMs > cutoff) continue;
+        try {
+          await unlink(abs);
+          removed += 1;
+        } catch {
+          // Gone already, or another sweep got there first.
+        }
       }
     }
-  }
-  return removed;
+    return removed;
+  });
 }
 
 // Verify every referenced blob against its stored digest. Missing or

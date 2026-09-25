@@ -90,7 +90,7 @@ export async function trendingExtensions(sql, { limit = 10, visibility = sql`` }
            COALESCE(SUM(d.total_downloads), 0)::bigint AS downloads
     FROM extension_daily_downloads d
     JOIN latest s ON s.namespace = d.namespace AND s.extension_id = d.extension_id AND s.rn = 1
-    WHERE d.day >= ${new Date(Date.now() - 7 * DAY_MS).toISOString()}::date
+    WHERE d.day >= ${new Date(utcMidnight(new Date()).getTime() - 6 * DAY_MS).toISOString()}::date
       ${visibility}
     GROUP BY d.namespace, d.extension_id
     ORDER BY downloads DESC, d.namespace ASC, d.extension_id ASC

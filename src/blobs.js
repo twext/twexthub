@@ -3,6 +3,8 @@ import { createReadStream } from 'node:fs';
 import { copyFile, mkdir, rename, rm, stat, unlink, utimes } from 'node:fs/promises';
 import path from 'node:path';
 
+export const BLOB_GC_LOCK_KEY = 'blob-gc';
+
 export function sha256Hex(buffer) {
   return createHash('sha256').update(buffer).digest('hex');
 }

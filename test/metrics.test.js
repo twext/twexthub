@@ -87,6 +87,29 @@ test('downloads are counted, surfaced, and feed trending', async () => {
   assert.ok(Number(stats.body.downloads) >= 2);
 });
 
+test('trending includes six UTC days ago but excludes seven UTC days ago', async () => {
+  const { ownerNs, ownerToken } = await makePublished();
+  await publishProject(app, ownerNs, 'recent', ownerToken, { version: '1.0.0' });
+  await publishProject(app, ownerNs, 'old', ownerToken, { version: '1.0.0' });
+
+  const now = new Date();
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const sixDaysAgo = new Date(today - 6 * 86400000);
+  const sevenDaysAgo = new Date(today - 7 * 86400000);
+  await sql`
+    INSERT INTO download_events (namespace, extension_id, version, user_agent, created_at)
+    VALUES (${ownerNs}, 'recent', '1.0.0', 'recent', ${sixDaysAgo.toISOString()}),
+           (${ownerNs}, 'old', '1.0.0', 'old', ${sevenDaysAgo.toISOString()})
+  `;
+  await aggregateDay(sixDaysAgo);
+  await aggregateDay(sevenDaysAgo);
+
+  const trending = await request(app).get('/v1/extensions/trending').expect(200);
+  const ids = trending.body.data.map((entry) => entry.id);
+  assert.ok(ids.includes('recent'));
+  assert.ok(!ids.includes('old'));
+});
+
 test('trending selects a deprecated version when a newer version was yanked', async () => {
   const { ownerNs, ownerToken } = await makePublished();
   await publishProject(app, ownerNs, 'hello', ownerToken, { version: '2.0.0' });

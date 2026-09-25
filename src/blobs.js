@@ -65,17 +65,25 @@ export async function storeBlob(dataDir, tmpPath, buffer) {
   return { digest, abs, size: buffer.length, sha512: sha512Base64(buffer) };
 }
 
+// Deletes a blob file when no other version row references its digest. Runs
+// under the exclusive GC advisory lock so a publish of the same digest cannot
+// be mid-flight: publishers hold the shared lock from before storeBlob until
+// the version promotion commits, so cleanup either sees the new version row
+// (and keeps the file) or completes before the publisher re-creates it.
 export async function removeBlobIfUnused(sql, config, digest, exceptId) {
   if (!digest) return;
-  const [keeper] = await sql`
-    SELECT 1 FROM versions
-    WHERE blob_digest = ${digest} AND id != ${exceptId}
-    LIMIT 1
-  `;
-  if (keeper) return;
-  try {
-    await unlink(blobPathFor(config.dataDir, digest));
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-  }
+  await sql.begin(async (tx) => {
+    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
+    const [keeper] = await tx`
+      SELECT 1 FROM versions
+      WHERE blob_digest = ${digest} AND id != ${exceptId}
+      LIMIT 1
+    `;
+    if (keeper) return;
+    try {
+      await unlink(blobPathFor(config.dataDir, digest));
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+  });
 }

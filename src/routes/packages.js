@@ -1095,7 +1095,6 @@ async function publishVersion(
     }
     return row;
   } catch (error) {
-    rmSync(tmpPath, { force: true });
     if (error.code === '23505') {
       if (error.constraint === 'versions_one_pending_idx') {
         throw forbidden('The owner already has a version awaiting review.');
@@ -1103,5 +1102,10 @@ async function publishVersion(
       throw new HttpError(409, { detail: `Version ${version} already exists for this extension.` });
     }
     throw error;
+  } finally {
+    // The upload file is only needed until storeBlob copies it into place;
+    // drop it on success and failure alike so publishes leave no uncharged
+    // compiled copy behind.
+    rmSync(tmpPath, { force: true });
   }
 }

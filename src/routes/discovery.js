@@ -293,18 +293,21 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     if (rows.length === 0) throw notFound();
     const row = rows[0];
     // The badge is a fixed 190px wide, so a long label has to be cut before the
-    // width heuristic runs or the second rect gets a negative width.
-    const label =
+    // width heuristic runs or the second rect gets a negative width. Length is
+    // taken from the escaped text: escapes expand (& -> 5 chars) and geometry
+    // must be derived from what is actually rendered.
+    const rawLabel =
       typeof req.query.label === 'string' && req.query.label.length > 0
         ? req.query.label.slice(0, 25)
         : id;
+    const label = xmlEscape(rawLabel);
     const downloads = Number((await totalDownloads(sql, namespace, id)) ?? 0);
     const license = row.license;
     const color = LICENSE_BADGE_COLORS[license] ?? '#0070F3';
     const versionText = xmlEscape(`v${row.version}`);
     const downloadsText = xmlEscape(downloads === 1 ? '1 download' : `${downloads} downloads`);
     const licenseText = xmlEscape(license);
-    const labelEscaped = xmlEscape(label);
+    const labelEscaped = label;
     // shields-style flat badge: two pills, 18px tall, DejaVu-ish width heuristic
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="190" height="20" role="img" aria-label="${labelEscaped}: ${versionText}">
   <linearGradient id="s" x2="0" y2="100%">
@@ -318,7 +321,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     <rect width="190" height="20" fill="url(#s)"/>
   </g>
   <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11">
-    <text x="${(label.length * 7 + 12) / 2}" y="14">${labelEscaped}</text>
+    <text x="${(label.length * 7 + 12) / 2}" y="14">${label}</text>
     <text x="${label.length * 7 + 12 + (190 - label.length * 7 - 12) / 2}" y="14">${versionText} | ${downloadsText} | ${licenseText} ${color === '#4c1' ? '' : ''}</text>
   </g>
 </svg>`;

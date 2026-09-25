@@ -67,18 +67,22 @@ Boolean environment variables must be exactly `true` or `false`; numeric ones mu
 
 ## Rate limits
 
-| Key                                  | Default | Environment                            | Purpose                                                   |
-| ------------------------------------ | ------- | -------------------------------------- | --------------------------------------------------------- |
-| `rateLimits.loginAttemptsPerWindow`  | `5`     | `TWEXTHUB_LOGIN_ATTEMPTS_PER_WINDOW`   | Failed logins allowed per window                          |
-| `rateLimits.loginWindowMinutes`      | `15`    | `TWEXTHUB_LOGIN_WINDOW_MINUTES`        | Window length for login attempts                          |
-| `rateLimits.signupsPerIpPerWindow`   | `5`     | `TWEXTHUB_SIGNUPS_PER_IP_PER_WINDOW`   | Accounts per IP per window                                |
-| `rateLimits.signupWindowMinutes`     | `15`    | `TWEXTHUB_SIGNUP_WINDOW_MINUTES`       | Window length for signups                                 |
-| `rateLimits.publishPerWindow`        | `30`    | `TWEXTHUB_PUBLISH_PER_WINDOW`          | Publishes per account per window; `null` disables         |
-| `rateLimits.publishWindowMinutes`    | `60`    | `TWEXTHUB_PUBLISH_WINDOW_MINUTES`      | Window length for publishes                               |
-| `rateLimits.downloadsPerIpPerWindow` | `240`   | `TWEXTHUB_DOWNLOADS_PER_IP_PER_WINDOW` | Download endpoint hits per IP per window; `null` disables |
-| `rateLimits.downloadWindowMinutes`   | `5`     | `TWEXTHUB_DOWNLOAD_WINDOW_MINUTES`     | Window length for download hits                           |
+| Key                                  | Default | Environment                            | Purpose                                                              |
+| ------------------------------------ | ------- | -------------------------------------- | -------------------------------------------------------------------- |
+| `rateLimits.loginAttemptsPerWindow`  | `5`     | `TWEXTHUB_LOGIN_ATTEMPTS_PER_WINDOW`   | Failed logins allowed per window                                     |
+| `rateLimits.loginWindowMinutes`      | `15`    | `TWEXTHUB_LOGIN_WINDOW_MINUTES`        | Window length for login attempts                                     |
+| `rateLimits.signupsPerIpPerWindow`   | `5`     | `TWEXTHUB_SIGNUPS_PER_IP_PER_WINDOW`   | Accounts per IP per window                                           |
+| `rateLimits.signupWindowMinutes`     | `15`    | `TWEXTHUB_SIGNUP_WINDOW_MINUTES`       | Window length for signups                                            |
+| `rateLimits.publishPerWindow`        | `30`    | `TWEXTHUB_PUBLISH_PER_WINDOW`          | Publishes per account per window; `null` disables                    |
+| `rateLimits.publishWindowMinutes`    | `60`    | `TWEXTHUB_PUBLISH_WINDOW_MINUTES`      | Window length for publishes                                          |
+| `rateLimits.downloadsPerIpPerWindow` | `240`   | `TWEXTHUB_DOWNLOADS_PER_IP_PER_WINDOW` | Download endpoint hits per IP per window; `null` disables            |
+| `rateLimits.downloadWindowMinutes`   | `5`     | `TWEXTHUB_DOWNLOAD_WINDOW_MINUTES`     | Window length for download hits                                      |
+| `rateLimits.routesPerIpPerWindow`    | `600`   | `TWEXTHUB_ROUTES_PER_IP_PER_WINDOW`    | Global per-IP cap applied to every route; loopback traffic is exempt |
+| `rateLimits.routeWindowMinutes`      | `15`    | `TWEXTHUB_ROUTE_WINDOW_MINUTES`        | Window length for the global per-IP cap                              |
 
 Publishes are limited per account rather than per IP — CI runners commonly share an egress address — while downloads are limited per IP. The download bucket counts every hit on the download route, including ones that end in 404, so a scraper cannot probe it for free. Set either `...PerWindow` value to `null` to turn that bucket off.
+
+On top of those buckets, a coarse per-IP middleware (`express-rate-limit`) caps every route at `routesPerIpPerWindow` per `routeWindowMinutes` as a denial-of-service backstop. Requests from loopback addresses are exempt so local health probes cannot lock the service out; keep `trustProxy` set correctly or an attacker could spoof loopback via `X-Forwarded-For`.
 
 ## Pagination
 

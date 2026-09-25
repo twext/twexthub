@@ -37,6 +37,13 @@ export function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+// Query parameters and route parameters arrive as strings under normal
+// routing, but a crafted query can surface arrays or objects. Returning a
+// non-string as null keeps downstream string operations on verified values.
+export function asString(value) {
+  return typeof value === 'string' ? value : null;
+}
+
 // "v0", "/v0", "/v0/" all mean the same thing; "''" or "/" means "no prefix".
 export function normalizeApiRoot(value) {
   if (value === undefined || value === null) return 'v0';

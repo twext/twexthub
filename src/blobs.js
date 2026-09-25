@@ -19,13 +19,20 @@ export function hashFile(abs) {
     const stream = createReadStream(abs);
     stream.on('data', (chunk) => hash.update(chunk));
     stream.on('end', () => resolve(hash.digest('hex')));
-    stream.on('error', reject);
+    stream.on('error', (error) => {
+      // Both the stream and the hash must stop on failure; an abandoned hash
+      // would otherwise keep buffering a file that is being replaced.
+      hash.destroy();
+      stream.destroy();
+      reject(error);
+    });
   });
 }
 
 // Blobs are keyed by digest so identical publishes share one file on disk.
 // The digest is addressed as blobs/<first two hex chars>/<rest> to keep
-// directory fan-out low.
+// directory fan-out low. Callers must pass a digest that was computed by
+// sha256Hex or matched against /^[0-9a-f]{64}$/ — never a raw request value.
 export function blobPathFor(dataDir, digest) {
   return path.join(dataDir, 'blobs', digest.slice(0, 2), digest.slice(2));
 }

@@ -3,6 +3,7 @@ import { loadConfig } from './config.js';
 import { createDb } from './db.js';
 import { makeAuthenticate, makeRequireTerms } from './auth.js';
 import { makeRateLimiter } from './rate-limit.js';
+import { makeHttpRateLimiter } from './http-rate-limit.js';
 import { makeRequestTelemetry } from './observability.js';
 import { makeCors } from './cors.js';
 import { HttpError, notFound, errorHandler } from './errors.js';
@@ -33,6 +34,11 @@ export function createApp(opts = {}) {
   }
 
   app.use(makeCors(config.cors));
+
+  // Coarse per-IP DoS backstop for every route, including the file-serving
+  // and ownership-checked endpoints. The DB-backed buckets in rate-limit.js
+  // layer their precise login/signup/publish/download windows on top.
+  app.use(makeHttpRateLimiter(config));
 
   // Counts and timings for /admin/metrics; also the structured request log
   // when `logging.requests` is on. Mounted before the routers so unmatched

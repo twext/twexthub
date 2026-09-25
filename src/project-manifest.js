@@ -1,4 +1,4 @@
-import { isPlainObject, isValidExtensionId, normalizeSemver } from './util.js';
+import { colorPattern, isPlainObject, isValidExtensionId, normalizeSemver } from './util.js';
 
 // Derive the publish manifest from twext.yml. The registry no longer accepts
 // pre-compiled code: the manifest is whatever the project declares so a review
@@ -46,7 +46,7 @@ export function manifestFromProject(projectConfig, pathId) {
   for (const color of ['color1', 'color2', 'color3']) {
     if (
       ext[color] !== undefined &&
-      (typeof ext[color] !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(ext[color]))
+      (typeof ext[color] !== 'string' || !colorPattern.test(ext[color]))
     ) {
       errors.push({
         field: `extension.${color}`,
@@ -65,11 +65,15 @@ export function manifestFromProject(projectConfig, pathId) {
         : pathId;
   return {
     errors: [],
+    // String() keeps every stored field a verified string even if a future
+    // edit relaxes a check above; the database columns are TEXT.
     manifest: {
       version: normalizeSemver(projectConfig.version),
-      name,
-      license: typeof projectConfig.license === 'string' ? projectConfig.license : 'MIT',
-      description: typeof projectConfig.description === 'string' ? projectConfig.description : '',
+      name: String(name),
+      license: String(typeof projectConfig.license === 'string' ? projectConfig.license : 'MIT'),
+      description: String(
+        typeof projectConfig.description === 'string' ? projectConfig.description : '',
+      ),
       author: typeof projectConfig.author === 'string' ? projectConfig.author : null,
       color1: typeof ext.color1 === 'string' ? ext.color1 : null,
       color2: typeof ext.color2 === 'string' ? ext.color2 : null,

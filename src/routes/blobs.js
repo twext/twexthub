@@ -14,8 +14,12 @@ export function makeBlobsRouter({ sql, config }) {
   const router = Router();
 
   router.get('/blobs/:digest', async (req, res) => {
-    const { digest } = req.params;
-    if (!/^[0-9a-f]{64}$/.test(digest)) throw notFound();
+    // The capture is the only value that reaches blobPathFor: a digest that
+    // survived this match is pure lowercase hex, so no separator or traversal
+    // sequence can be part of the assembled path.
+    const digestMatch = /^([0-9a-f]{64})$/.exec(req.params.digest);
+    if (!digestMatch) throw notFound();
+    const [, digest] = digestMatch;
     const abs = blobPathFor(config.dataDir, digest);
     if (!existsSync(abs)) throw notFound();
     const rows = await sql`

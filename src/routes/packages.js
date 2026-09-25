@@ -8,6 +8,7 @@ import YAML from 'yaml';
 import { canSee as canSeeExtension, requireAuth, requireScope } from '../auth.js';
 import { conflict, forbidden, HttpError, fieldErrors, notFound } from '../errors.js';
 import {
+  asString,
   buildSearchText,
   compareSemver,
   isValidExtensionId,
@@ -166,7 +167,9 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
       }
       if (!isValidNamespace(namespace)) throw notFound();
 
-      const visibility = req.query.visibility ?? 'public';
+      // asString rejects arrays/objects smuggled through a crafted query
+      // string, so only a real string can reach the visibility check below.
+      const visibility = asString(req.query.visibility) ?? 'public';
       if (visibility !== 'public' && visibility !== 'private') {
         throw fieldErrors([{ field: 'visibility', message: 'Must be "public" or "private".' }]);
       }
@@ -187,7 +190,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
       }
 
       const maxSource = config.limits?.maxSourceBytes ?? 1024 * 1024;
-      if (tarball.length > maxSource) {
+      if (!(tarball instanceof Buffer) || tarball.length > maxSource) {
         throw new HttpError(413, {
           title: 'Payload Too Large',
           detail: `Source tarball is ${tarball.length} bytes; the limit is ${maxSource}.`,
@@ -246,6 +249,11 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         // Size caps: per-blob, then the account's cumulative quota (their own
         // override when set, otherwise the configured default). Both the served
         // blob and the retained source count toward the quota.
+        // The compiler resolves to a Buffer in every branch (see compileProject);
+        // the guard also gives the length computations below a type-narrowed value.
+        if (!(compiled instanceof Buffer)) {
+          throw new HttpError(500, { detail: 'Compiler returned no compiled output.' });
+        }
         const codeBytes = compiled.length;
         const maxBlob = config.limits?.maxBlobBytes ?? 2 * 1024 * 1024;
         if (codeBytes > maxBlob) {
@@ -256,7 +264,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         }
         const quota =
           owner.max_blob_bytes ?? config.limits?.maxAccountBlobBytes ?? 64 * 1024 * 1024;
-        const charge = codeBytes + tarball.length;
+        const charge = codeBytes + (tarball instanceof Buffer ? tarball.length : 0);
         if (Number(owner.blob_bytes ?? 0) + charge > quota) {
           throw new HttpError(413, {
             title: 'Payload Too Large',

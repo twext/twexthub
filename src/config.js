@@ -30,6 +30,8 @@ export const DEFAULTS = {
     publishWindowMinutes: 60,
     downloadsPerIpPerWindow: 240,
     downloadWindowMinutes: 5,
+    routesPerIpPerWindow: 600,
+    routeWindowMinutes: 15,
   },
   pagination: {
     defaultLimit: 20,
@@ -84,6 +86,8 @@ const ENV_OVERRIDES = [
   ['rateLimits.publishWindowMinutes', 'TWEXTHUB_PUBLISH_WINDOW_MINUTES'],
   ['rateLimits.downloadsPerIpPerWindow', 'TWEXTHUB_DOWNLOADS_PER_IP_PER_WINDOW'],
   ['rateLimits.downloadWindowMinutes', 'TWEXTHUB_DOWNLOAD_WINDOW_MINUTES'],
+  ['rateLimits.routesPerIpPerWindow', 'TWEXTHUB_ROUTES_PER_IP_PER_WINDOW'],
+  ['rateLimits.routeWindowMinutes', 'TWEXTHUB_ROUTE_WINDOW_MINUTES'],
   ['pagination.defaultLimit', 'TWEXTHUB_PAGINATION_DEFAULT_LIMIT'],
   ['pagination.maxLimit', 'TWEXTHUB_PAGINATION_MAX_LIMIT'],
   ['limits.maxBlobBytes', 'TWEXTHUB_MAX_BLOB_BYTES'],

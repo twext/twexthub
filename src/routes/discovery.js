@@ -33,13 +33,17 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
   const SORT_TYPES = {
     recent: 'timestamptz',
     updated: 'timestamptz',
-    downloads: 'bigint',
+    // int8 rather than the bigint alias: the cast is emitted as a quoted type
+    // name, and only int8 is a real entry in pg_type.
+    downloads: 'int8',
     name: 'text',
   };
 
   function cursorCondition(cursor, sort) {
     if (!cursor) return sql``;
-    const col = sql('s.' + SORT_COLUMNS[sort]);
+    // downloads is a joined aggregate, not a column of the versions subquery.
+    const col =
+      sort === 'downloads' ? sql`COALESCE(d.total, 0)::bigint` : sql('s.' + SORT_COLUMNS[sort]);
     if (sort === 'name') {
       return sql`
         AND (${col}, s.namespace, s.extension_id) > (${cursor.k}::text, ${cursor.ns}, ${cursor.id})
@@ -117,7 +121,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     const last = page[page.length - 1];
     const sortKey =
       sort === 'downloads'
-        ? Number(last?.downloads ?? 0)
+        ? String(Number(last?.downloads ?? 0))
         : sort === 'name'
           ? last?.name
           : (sort === 'recent' ? last?.published_at : last?.updated_at)?.toISOString();
@@ -167,21 +171,24 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
       return res.json({ data: [], pagination: { nextCursor: null, hasMore: false } });
     }
     const t = trending;
+    // Trending is a flat (namespace, id) list, so the pair has to be joined as a
+    // pair: two ANY() lists would match every combination of both columns.
     const namespaces = t.map((e) => e.namespace);
     const ids = t.map((e) => e.id);
     const rows = await sql`
       SELECT * FROM (
         SELECT v.*,
           row_number() OVER (
-            PARTITION BY namespace, extension_id
-            ORDER BY CASE WHEN status = 'published' THEN 0 ELSE 1 END,
-                     published_at DESC, id DESC
+            PARTITION BY v.namespace, v.extension_id
+            ORDER BY CASE WHEN v.status = 'published' THEN 0 ELSE 1 END,
+                     v.published_at DESC, v.id DESC
           ) AS rn
         FROM versions v
-        WHERE namespace = ANY (${namespaces})
-          AND extension_id = ANY (${ids})
+        JOIN unnest(${namespaces}::text[], ${ids}::text[]) AS trending(namespace, extension_id)
+          ON trending.namespace = v.namespace AND trending.extension_id = v.extension_id
       ) s
       WHERE rn = 1 AND status IN ('published', 'deprecated')
+        ${visibilityFilter(req.auth?.user ?? null)}
     `;
     const byKey = new Map(trending.map((e) => [`${e.namespace}/${e.id}`, e]));
     const page = rows
@@ -283,9 +290,11 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     `;
     if (rows.length === 0) throw notFound();
     const row = rows[0];
+    // The badge is a fixed 190px wide, so a long label has to be cut before the
+    // width heuristic runs or the second rect gets a negative width.
     const label =
       typeof req.query.label === 'string' && req.query.label.length > 0
-        ? req.query.label.slice(0, 30)
+        ? req.query.label.slice(0, 25)
         : id;
     const downloads = Number((await totalDownloads(sql, namespace, id)) ?? 0);
     const license = row.license;
@@ -295,7 +304,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     const licenseText = xmlEscape(license);
     const labelEscaped = xmlEscape(label);
     // shields-style flat badge: two pills, 18px tall, DejaVu-ish width heuristic
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="190" height="20" role="img" aria-label="${labelEscaped}: v${versionText}">
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="190" height="20" role="img" aria-label="${labelEscaped}: ${versionText}">
   <linearGradient id="s" x2="0" y2="100%">
     <stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
     <stop offset="1" stop-opacity=".1"/>

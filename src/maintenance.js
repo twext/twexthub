@@ -1,4 +1,4 @@
-import { readdir, readFile, unlink } from 'node:fs/promises';
+import { readdir, readFile, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { blobPathFor, sha256Hex } from './blobs.js';
 
@@ -11,14 +11,26 @@ export async function gcBlobs(sql, dataDir) {
   const known = await sql`SELECT DISTINCT blob_digest FROM versions WHERE blob_digest IS NOT NULL`;
   const referenced = new Set(known.map((row) => row.blob_digest));
 
+  // A blob lands on disk before the versions row that references it, so a file
+  // younger than an hour may still belong to a publish in flight. Leave those
+  // to the next pass rather than deleting them out from under it.
+  const cutoff = Date.now() - 60 * 60 * 1000;
+
   let removed = 0;
   for (const prefix of await readdir(blobsDir)) {
     const prefixDir = path.join(blobsDir, prefix);
     for (const rest of await readdir(prefixDir)) {
       const digest = prefix + rest;
       if (referenced.has(digest)) continue;
-      await unlink(path.join(prefixDir, rest)).catch(() => {});
-      removed += 1;
+      const abs = path.join(prefixDir, rest);
+      const info = await stat(abs).catch(() => null);
+      if (!info || info.mtimeMs > cutoff) continue;
+      try {
+        await unlink(abs);
+        removed += 1;
+      } catch {
+        // Gone already, or another sweep got there first.
+      }
     }
   }
   return removed;

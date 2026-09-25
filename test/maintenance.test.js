@@ -41,16 +41,27 @@ test('gc removes blobs no version references and keeps live ones', async () => {
   const liveAbs = blobPathFor(config.dataDir, row.blob_digest);
   assert.ok(fs.existsSync(liveAbs));
 
-  // An orphan: correct shape, never referenced by any row.
+  // An orphan: correct shape, never referenced by any row. Backdated, because
+  // the sweep leaves anything under an hour old alone in case a publish is
+  // still in flight between the file write and its versions row.
   const orphanDigest = 'f'.repeat(64);
   const orphanAbs = blobPathFor(config.dataDir, orphanDigest);
   fs.mkdirSync(path.dirname(orphanAbs), { recursive: true });
   fs.writeFileSync(orphanAbs, 'orphaned bytes');
+  const stale = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  fs.utimesSync(orphanAbs, stale, stale);
+
+  // A second orphan, still fresh.
+  const freshDigest = 'e'.repeat(64);
+  const freshAbs = blobPathFor(config.dataDir, freshDigest);
+  fs.mkdirSync(path.dirname(freshAbs), { recursive: true });
+  fs.writeFileSync(freshAbs, 'in flight bytes');
 
   const removed = await gcBlobs(sql, config.dataDir);
   assert.equal(removed, 1);
   assert.ok(fs.existsSync(liveAbs), 'referenced blob survives');
-  assert.ok(!fs.existsSync(orphanAbs), 'orphan is gone');
+  assert.ok(!fs.existsSync(orphanAbs), 'stale orphan is gone');
+  assert.ok(fs.existsSync(freshAbs), 'fresh orphan is left for the next pass');
 });
 
 test('scrub reports missing and corrupted blobs and updates the error gauge', async () => {

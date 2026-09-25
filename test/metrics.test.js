@@ -38,6 +38,13 @@ test('downloads are counted, surfaced, and feed trending', async () => {
   const { ownerNs, adminToken } = await makePublished();
   const w = await signupAndAccept(app, uniqNs());
   await publishAs(w.user.namespace, w.token, adminToken, 'widget', '1.0.0', '// widget');
+  // gizmo needs a published version of its own, otherwise the trending lookup
+  // finds nothing for it and the 7-day window is never actually exercised.
+  // widget already published, so this one lands as published without review.
+  await publishProject(app, w.user.namespace, 'gizmo', w.token, {
+    version: '1.0.0',
+    code: '// gizmo',
+  });
 
   await request(app).get(`/v1/@${ownerNs}/hello/versions/latest/download`).expect(200);
   await request(app).get(`/v1/@${ownerNs}/hello/versions/latest/download`).expect(200);

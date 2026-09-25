@@ -5,7 +5,7 @@ import { randomBytes } from 'node:crypto';
 import express, { Router } from 'express';
 import semver from 'semver';
 import YAML from 'yaml';
-import { requireAuth, requireScope } from '../auth.js';
+import { canSee as canSeeExtension, requireAuth, requireScope } from '../auth.js';
 import { conflict, forbidden, HttpError, fieldErrors, notFound } from '../errors.js';
 import {
   buildSearchText,
@@ -51,23 +51,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     return Boolean(row);
   }
 
-  // Owners and admins see everything; a private extension is additionally
-  // visible to accounts holding an explicit access grant.
-  async function canSee(user, row) {
-    if (row.visibility !== 'private') return true;
-    if (!user) return false;
-    if (user.role === 'admin' || user.namespace === row.namespace) return true;
-    const [ownerRow] = await sql`
-      SELECT 1 FROM extension_owners
-      WHERE owner_id = ${user.id} AND namespace = ${row.namespace} AND extension_id = ${row.extension_id}
-    `;
-    if (ownerRow) return true;
-    const [grant] = await sql`
-      SELECT 1 FROM extension_access
-      WHERE user_id = ${user.id} AND namespace = ${row.namespace} AND extension_id = ${row.extension_id}
-    `;
-    return Boolean(grant);
-  }
+  const canSee = (user, row) => canSeeExtension(sql, user, row);
 
   async function loadNamespaceAccount(namespace) {
     const [owner] = await sql`SELECT * FROM users WHERE namespace = ${namespace}`;

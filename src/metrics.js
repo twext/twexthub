@@ -1,9 +1,15 @@
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+// Buckets are keyed on the UTC date the event falls in, so day boundaries are
+// UTC midnight too. Local midnight would split a day into two buckets on any
+// host that isn't on UTC.
+function utcMidnight(date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+}
+
 export function aggregateDayLoader(sql) {
   return async function aggregateDay(day = new Date()) {
-    const dayStart = new Date(day);
-    dayStart.setHours(0, 0, 0, 0);
+    const dayStart = utcMidnight(day);
     const dayEnd = new Date(dayStart.getTime() + DAY_MS);
     await sql`
       INSERT INTO extension_daily_downloads (namespace, extension_id, day, total_downloads, distinct_downloads)
@@ -35,7 +41,7 @@ export function dailyAggregationJob(sql) {
     if (running) return;
     running = true;
     try {
-      const yesterday = new Date(new Date().setHours(0, 0, 0, 0) - DAY_MS);
+      const yesterday = new Date(utcMidnight(new Date()).getTime() - DAY_MS);
       await aggregateDay(yesterday);
       await aggregateDay(new Date());
     } catch (error) {

@@ -1,7 +1,14 @@
 import { existsSync, statSync } from 'node:fs';
 import { Router } from 'express';
 import { notFound } from '../errors.js';
+import { canSee } from '../auth.js';
 import { blobPathFor, hashFile } from '../blobs.js';
+
+// A digest is only as secret as the URL carrying it, so the blob route applies
+// the same status and visibility rules as the download route: anyone can fetch
+// compiled output that is published and public, everything else needs to pass
+// the caller's access check.
+const PUBLIC_STATUSES = new Set(['published', 'deprecated', 'yanked']);
 
 export function makeBlobsRouter({ sql, config }) {
   const router = Router();
@@ -11,19 +18,29 @@ export function makeBlobsRouter({ sql, config }) {
     if (!/^[0-9a-f]{64}$/.test(digest)) throw notFound();
     const abs = blobPathFor(config.dataDir, digest);
     if (!existsSync(abs)) throw notFound();
-    const [row] = await sql`
-      SELECT blob_size FROM versions
+    const rows = await sql`
+      SELECT namespace, extension_id, status, visibility, blob_size
+      FROM versions
       WHERE blob_digest = ${digest}
       ORDER BY id DESC
-      LIMIT 1
     `;
-    if (row?.blob_size !== null && row?.blob_size !== undefined) {
+    if (rows.length === 0) throw notFound();
+    const [row] = rows;
+    const isPublic = rows.some(
+      (candidate) => PUBLIC_STATUSES.has(candidate.status) && candidate.visibility === 'public',
+    );
+    if (isPublic) {
+      res.set('Cache-Control', 'public, max-age=31536000, immutable');
+    } else {
+      if (!(await canSee(sql, req.auth?.user ?? null, row))) throw notFound();
+      res.set('Cache-Control', 'private, no-store');
+    }
+    if (row.blob_size !== null && row.blob_size !== undefined) {
       if (statSync(abs).size !== Number(row.blob_size)) {
         throw notFound('Blob integrity check failed.');
       }
     }
     if ((await hashFile(abs)) !== digest) throw notFound('Blob integrity check failed.');
-    res.set('Cache-Control', 'public, max-age=31536000, immutable');
     res.type('application/javascript');
     res.sendFile(abs);
   });

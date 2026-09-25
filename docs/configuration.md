@@ -145,7 +145,7 @@ data/
 
 `blobs/` and `sources/` hold durable, content-addressed content; both must be preserved. `tmp/` and `quarantine/` are swept of anything older than an hour on boot.
 
-A background maintenance job runs hourly-ish: it deletes files under `blobs/` that no `versions` row references, and once a day re-hashes every stored blob, logging and exporting (`twexthub_storage_integrity_errors`) any file that is missing or no longer matches its recorded digest. The scrub never deletes; an operator decides what to do about a mismatch.
+A background maintenance job runs hourly-ish: it deletes files under `blobs/` that no `versions` row references and are at least an hour old (a blob is written to disk before its `versions` row exists, so anything younger is left for the next pass), and once a day re-hashes every stored blob, logging and exporting (`twexthub_storage_integrity_errors`) any file that is missing or no longer matches its recorded digest. The scrub never deletes; an operator decides what to do about a mismatch.
 
 ## Request size limits
 

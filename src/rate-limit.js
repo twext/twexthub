@@ -61,16 +61,16 @@ export function makeRateLimiter(sql, config) {
     };
   }
 
+  // `??` would swallow a configured null, which is how an operator turns a
+  // bucket off, so the defaults only fill in an absent key.
   function publishCheck(bucket) {
-    return windowedCheck(bucket, limits.publishPerWindow ?? 30, limits.publishWindowMinutes ?? 60);
+    const max = limits.publishPerWindow === undefined ? 30 : limits.publishPerWindow;
+    return windowedCheck(bucket, max, limits.publishWindowMinutes ?? 60);
   }
 
   function downloadCheck(bucket) {
-    return windowedCheck(
-      bucket,
-      limits.downloadsPerIpPerWindow ?? 240,
-      limits.downloadWindowMinutes ?? 5,
-    );
+    const max = limits.downloadsPerIpPerWindow === undefined ? 240 : limits.downloadsPerIpPerWindow;
+    return windowedCheck(bucket, max, limits.downloadWindowMinutes ?? 5);
   }
 
   const maxWindow = Math.max(

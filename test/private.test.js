@@ -2,6 +2,7 @@ import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
 import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
+import { aggregateDayLoader } from '../src/metrics.js';
 
 let app;
 let sql;
@@ -75,6 +76,29 @@ test('private extensions are hidden from public surfaces but visible to the owne
   await request(app).get(`/v1/@${ns}/secret/owners`).expect(404);
   await request(app).get('/v1/extensions/trending').expect(200);
 
+  // Trending is public, so a private extension with download activity has to
+  // stay off it for anonymous callers and show up for the owner.
+  await sql`
+    INSERT INTO download_events (namespace, extension_id, version, user_agent, remote_addr)
+    VALUES (${ns}, 'secret', '1.0.0', 'test', '10.0.0.1')
+  `;
+  await aggregateDayLoader(sql)(new Date());
+  const anonTrending = await request(app).get('/v1/extensions/trending').expect(200);
+  assert.ok(!anonTrending.body.data.some((e) => e.id === 'secret'));
+  const ownerTrending = await request(app)
+    .get('/v1/extensions/trending')
+    .set(bearer(owner.token))
+    .expect(200);
+  assert.ok(ownerTrending.body.data.some((e) => e.id === 'secret'));
+
+  // Blobs are content-addressed, so knowing the digest is not authorization:
+  // the blob route has to run the same visibility check as the download.
+  const [blob] = await sql`
+    SELECT blob_digest FROM versions
+    WHERE namespace = ${ns} AND extension_id = 'secret' AND blob_digest IS NOT NULL
+  `;
+  await request(app).get(`/v1/blobs/${blob.blob_digest}`).expect(404);
+
   // The namespace account reads its own private extension, downloads the
   // compiled blob, and fetches the source tarball.
   const detail = await request(app).get(`/v1/@${ns}/secret`).set(bearer(owner.token)).expect(200);
@@ -83,6 +107,11 @@ test('private extensions are hidden from public surfaces but visible to the owne
     .get(`/v1/@${ns}/secret/versions/1.0.0/download`)
     .set(bearer(owner.token))
     .expect(200);
+  const blobFetch = await request(app)
+    .get(`/v1/blobs/${blob.blob_digest}`)
+    .set(bearer(owner.token))
+    .expect(200);
+  assert.match(blobFetch.headers['cache-control'], /private, no-store/);
   const src = await request(app)
     .get(`/v1/@${ns}/secret/versions/1.0.0/source`)
     .set(bearer(owner.token))

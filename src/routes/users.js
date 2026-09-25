@@ -12,6 +12,19 @@ import { notifyUser, roleChangedMessage, tokensRevokedMessage } from '../notify.
 import { requireObjectBody } from './shared.js';
 import { audit } from '../audit.js';
 
+// A bare /^https?:\/\// prefix accepts "https://" with no host and anything the
+// URL parser would reject, so parse it and check what came back.
+function isHttpUrl(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  return parsed.hostname.length > 0;
+}
+
 export function makeUsersRouter({ sql, config, termsGate }) {
   const router = Router();
 
@@ -119,7 +132,7 @@ export function makeUsersRouter({ sql, config, termsGate }) {
       ['bannerUrl', bannerUrl],
     ]) {
       if (value === undefined || value === null) continue;
-      if (typeof value !== 'string' || value.length > 400 || !/^https?:\/\//.test(value)) {
+      if (typeof value !== 'string' || value.length > 400 || !isHttpUrl(value)) {
         errors.push({
           field,
           message: 'Must be an http(s) URL of at most 400 characters, or null to clear.',
@@ -286,12 +299,11 @@ function identiconSvg(namespace) {
   const hash = createHash('sha256').update(namespace).digest();
   const cells = [];
   for (let y = 0; y < 8; y += 1) {
-    const row = [];
+    const left = [];
     for (let x = 0; x < 4; x += 1) {
-      const bit = hash[y * 4 + x] % 2 === 1;
-      row.push(bit, bit); // mirror to the right half
+      left.push(hash[y * 4 + x] % 2 === 1);
     }
-    cells.push(row);
+    cells.push([...left, ...left.toReversed()]);
   }
   const hue = hash[31] % 360;
   const rect = [];

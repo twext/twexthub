@@ -130,6 +130,29 @@ test('paginating with sort=name walks every page', async () => {
   assert.equal(new Set(seen).size, seen.length, 'no duplicates across pages');
 });
 
+test('paginating with sort=downloads walks every page', async () => {
+  const { ns } = await seedExtensions();
+  for (let i = 0; i < 3; i += 1) await downloadNs(sql, ns, 'zoo');
+  await downloadNs(sql, ns, 'minterm');
+  const { aggregateDayLoader } = await import('../src/metrics.js');
+  await aggregateDayLoader(sql)(new Date());
+
+  const seen = [];
+  let cursor = null;
+  let guard = 0;
+  do {
+    const url =
+      '/v1/extensions?sort=downloads&limit=2' +
+      (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
+    const r = await request(app).get(url).expect(200);
+    for (const e of r.body.data) seen.push(e.id);
+    cursor = r.body.pagination.nextCursor;
+    guard += 1;
+    assert.ok(guard < 10, 'pagination did not terminate');
+  } while (cursor);
+  assert.deepEqual(seen, ['zoo', 'minterm', 'alpaca']);
+});
+
 test('badge renders an SVG with version, downloads, and license', async () => {
   const { ns } = await seedExtensions();
   await downloadNs(sql, ns, 'zoo');

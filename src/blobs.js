@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { copyFile, mkdir, stat, unlink } from 'node:fs/promises';
+import { copyFile, mkdir, stat, unlink, utimes } from 'node:fs/promises';
 import path from 'node:path';
 
 export function sha256Hex(buffer) {
@@ -42,7 +42,16 @@ export async function storeBlob(dataDir, tmpPath, buffer) {
   await mkdir(path.dirname(abs), { recursive: true });
   const existing = await readSize(abs);
   if (existing === buffer.length) {
-    // Identical bytes already on disk; drop the upload.
+    // Identical bytes already on disk; drop the upload. The mtime refresh keeps
+    // the reuse window open against gcBlobs, which skips files under an hour
+    // old, and covers the gap where the file disappears mid-publish.
+    try {
+      const now = new Date();
+      await utimes(abs, now, now);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      await copyFile(tmpPath, abs);
+    }
   } else {
     await copyFile(tmpPath, abs);
   }

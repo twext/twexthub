@@ -103,10 +103,16 @@ test('the download bucket is per IP, keyed on real paths, and a null limit disab
   const second = await request(tightApp).get(`/v1/@${ns}/hello/versions/1.0.0/download`);
   assert.equal(second.status, 429);
 
-  // With the bucket disabled, repeated hits sail through.
-  await request(looseApp).get(`/v1/@${ns}/hello/versions/1.0.0/download`).expect(200);
-  await request(looseApp).get(`/v1/@${ns}/hello/versions/1.0.0/download`).expect(200);
-  await request(looseApp).get(`/v1/@${ns}/hello/versions/1.0.0/download`).expect(200);
+  // With the bucket disabled, repeated hits sail through and nothing is counted:
+  // a null limit has to beat the 240-per-window default to be meaningful.
+  await sql`DELETE FROM rate_limit_entries WHERE bucket LIKE 'download:%'`;
+  for (let i = 0; i < 3; i += 1) {
+    await request(looseApp).get(`/v1/@${ns}/hello/versions/1.0.0/download`).expect(200);
+  }
+  const disabled = await sql`
+    SELECT 1 FROM rate_limit_entries WHERE bucket LIKE 'download:%'
+  `;
+  assert.equal(disabled.length, 0, 'a null download limit records no bucket');
 });
 
 test('signup and login limits still work alongside the new buckets', async () => {

@@ -1,4 +1,4 @@
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -1065,12 +1065,18 @@ async function publishVersion(
     // only the committed version may write its blob and source. A crash before
     // they are placed leaves a staging row that reconcileOnBoot promotes once
     // both exist or removes when either is missing.
-    const source = await storeSource(config.dataDir, sourceBuffer);
-    await sql`
-      UPDATE versions
-      SET source_path = ${source.path}, source_digest = ${source.digest}
-      WHERE id = ${staged.id}
-    `;
+    await sql.begin(async (tx) => {
+      // GC holds the exclusive lock; publishers share it until the source
+      // digest commits, so cleanup cannot unlink a source another publish is
+      // about to reference.
+      await tx`SELECT pg_advisory_xact_lock_shared(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
+      const stored = await storeSource(config.dataDir, sourceBuffer);
+      await tx`
+        UPDATE versions
+        SET source_path = ${stored.path}, source_digest = ${stored.digest}
+        WHERE id = ${staged.id}
+      `;
+    });
     const row = await sql.begin(async (tx) => {
       // GC holds the exclusive lock; publishers share it through promotion.
       await tx`SELECT pg_advisory_xact_lock_shared(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
@@ -1114,6 +1120,6 @@ async function publishVersion(
     // The upload file is only needed until storeBlob copies it into place;
     // drop it on success and failure alike so publishes leave no uncharged
     // compiled copy behind.
-    rmSync(tmpPath, { force: true });
+    await rm(tmpPath, { force: true });
   }
 }

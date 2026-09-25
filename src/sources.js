@@ -1,10 +1,14 @@
 import { mkdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { sha256Hex } from './blobs.js';
+import { BLOB_GC_LOCK_KEY, sha256Hex } from './blobs.js';
 
 // Sources are keyed by digest just like blobs, so identical tarballs share one
 // file. Addressed as sources/<first two hex chars>/<rest> for fan-out.
+// Publication and cleanup coordinate through BLOB_GC_LOCK_KEY: publishers hold
+// the shared lock from storing the file until the referencing row commits, and
+// removeSourceIfUnused holds the exclusive lock across the keeper check and the
+// unlink — the same discipline the blob path follows.
 export function sourcePathFor(dataDir, digest) {
   return path.join(dataDir, 'sources', digest.slice(0, 2), digest.slice(2));
 }
@@ -28,13 +32,16 @@ export async function storeSource(dataDir, buffer) {
 
 export async function removeSourceIfUnused(sql, config, digest) {
   if (!digest) return;
-  const [keeper] = await sql`
-    SELECT 1 FROM versions WHERE source_digest = ${digest} LIMIT 1
-  `;
-  if (keeper) return;
-  try {
-    await unlink(sourcePathFor(config.dataDir, digest));
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-  }
+  await sql.begin(async (tx) => {
+    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
+    const [keeper] = await tx`
+      SELECT 1 FROM versions WHERE source_digest = ${digest} LIMIT 1
+    `;
+    if (keeper) return;
+    try {
+      await unlink(sourcePathFor(config.dataDir, digest));
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+  });
 }

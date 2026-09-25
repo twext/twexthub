@@ -31,7 +31,7 @@ async function makePublished() {
   const ownerNs = uniqNs();
   const ob = await signupAndAccept(app, ownerNs);
   await publishAs(ownerNs, ob.token, ab.token, 'hello', '1.0.0', '// v1.0.0');
-  return { ownerNs, adminToken: ab.token };
+  return { ownerNs, ownerToken: ob.token, adminToken: ab.token };
 }
 
 test('downloads are counted, surfaced, and feed trending', async () => {
@@ -85,4 +85,25 @@ test('downloads are counted, surfaced, and feed trending', async () => {
 
   const stats = await request(app).get('/v1/stats').expect(200);
   assert.ok(Number(stats.body.downloads) >= 2);
+});
+
+test('trending selects a deprecated version when a newer version was yanked', async () => {
+  const { ownerNs, ownerToken } = await makePublished();
+  await publishProject(app, ownerNs, 'hello', ownerToken, { version: '2.0.0' });
+  await sql`
+    UPDATE versions SET status = 'deprecated'
+    WHERE namespace = ${ownerNs} AND extension_id = 'hello' AND version = '1.0.0'
+  `;
+  await sql`
+    UPDATE versions SET status = 'yanked'
+    WHERE namespace = ${ownerNs} AND extension_id = 'hello' AND version = '2.0.0'
+  `;
+  await sql`
+    INSERT INTO extension_daily_downloads (namespace, extension_id, day, total_downloads)
+    VALUES (${ownerNs}, 'hello', CURRENT_DATE, 3)
+  `;
+
+  const trending = await request(app).get('/v1/extensions/trending').expect(200);
+  assert.equal(trending.body.data.length, 1);
+  assert.equal(trending.body.data[0].version, '1.0.0');
 });

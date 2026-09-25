@@ -119,6 +119,38 @@ test('private extensions are hidden from public surfaces but visible to the owne
   assert.match(src.headers['content-type'], /gzip/);
 });
 
+test('private downloads do not consume anonymous trending slots', async () => {
+  const admin = await signupAndAccept(app, uniqNs());
+  const owner = await signupAndAccept(app, uniqNs());
+  const ns = owner.user.namespace;
+  await publishPrivate({ owner });
+  await request(app)
+    .patch(`/v1/@${ns}/secret/versions/1.0.0`)
+    .set(bearer(admin.token))
+    .send({ status: 'approved' })
+    .expect(200);
+  await publishProject(app, ns, 'open', owner.token, { code: '// open' });
+
+  await sql`
+    INSERT INTO extension_daily_downloads (namespace, extension_id, day, total_downloads)
+    VALUES (${ns}, 'secret', CURRENT_DATE, 5), (${ns}, 'open', CURRENT_DATE, 1)
+  `;
+  const anonymous = await request(app).get('/v1/extensions/trending?limit=1').expect(200);
+  assert.deepEqual(
+    anonymous.body.data.map((entry) => entry.id),
+    ['open'],
+  );
+
+  const owned = await request(app)
+    .get('/v1/extensions/trending?limit=1')
+    .set(bearer(owner.token))
+    .expect(200);
+  assert.deepEqual(
+    owned.body.data.map((entry) => entry.id),
+    ['secret'],
+  );
+});
+
 test('access grants open private detail/download to the grantee and revoke cleanly', async () => {
   const admin = await signupAndAccept(app, uniqNs());
   const owner = await signupAndAccept(app, uniqNs());

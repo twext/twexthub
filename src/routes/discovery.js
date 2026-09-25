@@ -166,7 +166,8 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
 
   router.get('/extensions/trending', async (req, res) => {
     const limit = Math.min(Number(req.query.limit ?? 10) || 10, 50);
-    const trending = await trendingExtensions(sql, { limit });
+    const user = req.auth?.user ?? null;
+    const trending = await trendingExtensions(sql, { limit, visibility: visibilityFilter(user) });
     if (trending.length === 0) {
       return res.json({ data: [], pagination: { nextCursor: null, hasMore: false } });
     }
@@ -186,9 +187,10 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
         FROM versions v
         JOIN unnest(${namespaces}::text[], ${ids}::text[]) AS trending(namespace, extension_id)
           ON trending.namespace = v.namespace AND trending.extension_id = v.extension_id
+        WHERE v.status IN ('published', 'deprecated')
       ) s
-      WHERE rn = 1 AND status IN ('published', 'deprecated')
-        ${visibilityFilter(req.auth?.user ?? null)}
+      WHERE rn = 1
+        ${visibilityFilter(user)}
     `;
     const byKey = new Map(trending.map((e) => [`${e.namespace}/${e.id}`, e]));
     const page = rows

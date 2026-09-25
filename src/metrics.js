@@ -74,14 +74,26 @@ export async function totalDownloads(sql, namespace, extensionId) {
   return rows[0]?.total ?? 0n;
 }
 
-export async function trendingExtensions(sql, { limit = 10 } = {}) {
+export async function trendingExtensions(sql, { limit = 10, visibility = sql`` } = {}) {
   const rows = await sql`
-    SELECT namespace, extension_id,
-           COALESCE(SUM(total_downloads), 0)::bigint AS downloads
-    FROM extension_daily_downloads
-    WHERE day >= ${new Date(Date.now() - 7 * DAY_MS).toISOString()}::date
-    GROUP BY namespace, extension_id
-    ORDER BY downloads DESC, namespace ASC, extension_id ASC
+    WITH latest AS (
+      SELECT v.namespace, v.extension_id, v.visibility,
+        row_number() OVER (
+          PARTITION BY v.namespace, v.extension_id
+          ORDER BY CASE WHEN v.status = 'published' THEN 0 ELSE 1 END,
+                   v.published_at DESC, v.id DESC
+        ) AS rn
+      FROM versions v
+      WHERE v.status IN ('published', 'deprecated')
+    )
+    SELECT d.namespace, d.extension_id,
+           COALESCE(SUM(d.total_downloads), 0)::bigint AS downloads
+    FROM extension_daily_downloads d
+    JOIN latest s ON s.namespace = d.namespace AND s.extension_id = d.extension_id AND s.rn = 1
+    WHERE d.day >= ${new Date(Date.now() - 7 * DAY_MS).toISOString()}::date
+      ${visibility}
+    GROUP BY d.namespace, d.extension_id
+    ORDER BY downloads DESC, d.namespace ASC, d.extension_id ASC
     LIMIT ${limit}
   `;
   return rows.map((row) => ({

@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { copyFile, mkdir, stat, unlink, utimes } from 'node:fs/promises';
+import { copyFile, mkdir, rename, rm, stat, unlink, utimes } from 'node:fs/promises';
 import path from 'node:path';
 
 export function sha256Hex(buffer) {
@@ -42,18 +42,23 @@ export async function storeBlob(dataDir, tmpPath, buffer) {
   await mkdir(path.dirname(abs), { recursive: true });
   const existing = await readSize(abs);
   if (existing === buffer.length) {
-    // Identical bytes already on disk; drop the upload. The mtime refresh keeps
-    // the reuse window open against gcBlobs, which skips files under an hour
-    // old, and covers the gap where the file disappears mid-publish.
     try {
-      const now = new Date();
-      await utimes(abs, now, now);
+      if ((await hashFile(abs)) === digest) {
+        // Refresh the reuse window against gcBlobs, which skips recent files.
+        const now = new Date();
+        await utimes(abs, now, now);
+        return { digest, abs, size: buffer.length, sha512: sha512Base64(buffer) };
+      }
     } catch (error) {
       if (error.code !== 'ENOENT') throw error;
-      await copyFile(tmpPath, abs);
     }
-  } else {
-    await copyFile(tmpPath, abs);
+  }
+  const staged = path.join(path.dirname(abs), `.${path.basename(abs)}.${randomUUID()}.tmp`);
+  try {
+    await copyFile(tmpPath, staged);
+    await rename(staged, abs);
+  } finally {
+    await rm(staged, { force: true });
   }
   return { digest, abs, size: buffer.length, sha512: sha512Base64(buffer) };
 }

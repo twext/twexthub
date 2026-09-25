@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireAdmin } from '../auth.js';
+import { renderRegistryMetrics } from '../observability.js';
 import { fieldErrors, notFound } from '../errors.js';
 import { legalDocumentToObject } from '../serialize.js';
 import { notifyUsersMatching, termsBumpedMessage } from '../notify.js';
@@ -13,6 +14,12 @@ import { requireObjectBody } from './shared.js';
 
 export function makeAdminRouter({ sql, config, termsGate }) {
   const router = Router();
+
+  router.get('/admin/metrics', requireAdmin, async (req, res) => {
+    res
+      .type('text/plain; version=0.0.4; charset=utf-8')
+      .send(await renderRegistryMetrics(sql, req.app.locals.telemetry));
+  });
 
   function makeLegalDocumentHandler(kind, bodyError) {
     return async (req, res) => {

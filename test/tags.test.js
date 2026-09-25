@@ -1,7 +1,7 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept } from './helpers.mjs';
+import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
 
 let app;
 before(async () => {
@@ -12,10 +12,6 @@ after(async () => {
   await (await boot()).sql.end();
 });
 
-function manifest(version) {
-  return { id: 'hello', version, license: 'MIT', name: 'hello', description: 'd' };
-}
-
 async function makeOwnerWithVersions() {
   const adminNs = uniqNs();
   const ab = await signupAndAccept(app, adminNs);
@@ -24,11 +20,7 @@ async function makeOwnerWithVersions() {
   const outsiderNs = uniqNs();
   const outside = await signupAndAccept(app, outsiderNs);
   async function publish(version) {
-    await request(app)
-      .post(`/v1/@${ownerNs}/hello/versions`)
-      .set(bearer(ob.token))
-      .send({ manifest: manifest(version), code: `// v${version}` })
-      .expect(201);
+    await publishProject(app, ownerNs, 'hello', ob.token, { version, code: `// v${version}` });
   }
   await publish('1.0.0');
   await request(app)

@@ -91,6 +91,12 @@ export function downloadUrl(config, namespace, id, version) {
   return `${config.publicBaseUrl.replace(/\/$/, '')}${root}/@${namespace}/${id}/versions/${version}/download`;
 }
 
+export function sourceUrl(config, namespace, id, version) {
+  const apiRoot = normalizeApiRoot(config.apiRoot);
+  const root = apiRoot ? `/${apiRoot}` : '';
+  return `${config.publicBaseUrl.replace(/\/$/, '')}${root}/@${namespace}/${id}/versions/${version}/source`;
+}
+
 export function extensionSummaryFromRow(row) {
   return {
     namespace: row.namespace,
@@ -115,8 +121,13 @@ export function extensionDetailFromRow(row, versions) {
 }
 
 export function pendingVersionToObject(row, config) {
-  return {
+  const out = {
     ...versionToObject(row, config),
     ownerNamespace: row.namespace,
   };
+  if (row.build_log) out.buildLog = row.build_log;
+  if (row.build_error) out.buildError = row.build_error;
+  if (row.source_path)
+    out.sourceUrl = sourceUrl(config, row.namespace, row.extension_id, row.version);
+  return out;
 }

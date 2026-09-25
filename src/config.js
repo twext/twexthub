@@ -26,6 +26,10 @@ export const DEFAULTS = {
     loginWindowMinutes: 15,
     signupsPerIpPerWindow: 5,
     signupWindowMinutes: 15,
+    publishPerWindow: 30,
+    publishWindowMinutes: 60,
+    downloadsPerIpPerWindow: 240,
+    downloadWindowMinutes: 5,
   },
   pagination: {
     defaultLimit: 20,
@@ -34,6 +38,15 @@ export const DEFAULTS = {
   limits: {
     maxBlobBytes: 2 * 1024 * 1024,
     maxAccountBlobBytes: 64 * 1024 * 1024,
+    maxSourceBytes: 1024 * 1024,
+  },
+  compiler: {
+    command: null,
+    timeoutMs: 30_000,
+    memoryMb: 192,
+  },
+  logging: {
+    requests: false,
   },
   cors: {
     allowedOrigins: '*',
@@ -67,10 +80,19 @@ const ENV_OVERRIDES = [
   ['rateLimits.loginWindowMinutes', 'TWEXTHUB_LOGIN_WINDOW_MINUTES'],
   ['rateLimits.signupsPerIpPerWindow', 'TWEXTHUB_SIGNUPS_PER_IP_PER_WINDOW'],
   ['rateLimits.signupWindowMinutes', 'TWEXTHUB_SIGNUP_WINDOW_MINUTES'],
+  ['rateLimits.publishPerWindow', 'TWEXTHUB_PUBLISH_PER_WINDOW'],
+  ['rateLimits.publishWindowMinutes', 'TWEXTHUB_PUBLISH_WINDOW_MINUTES'],
+  ['rateLimits.downloadsPerIpPerWindow', 'TWEXTHUB_DOWNLOADS_PER_IP_PER_WINDOW'],
+  ['rateLimits.downloadWindowMinutes', 'TWEXTHUB_DOWNLOAD_WINDOW_MINUTES'],
   ['pagination.defaultLimit', 'TWEXTHUB_PAGINATION_DEFAULT_LIMIT'],
   ['pagination.maxLimit', 'TWEXTHUB_PAGINATION_MAX_LIMIT'],
   ['limits.maxBlobBytes', 'TWEXTHUB_MAX_BLOB_BYTES'],
   ['limits.maxAccountBlobBytes', 'TWEXTHUB_MAX_ACCOUNT_BLOB_BYTES'],
+  ['limits.maxSourceBytes', 'TWEXTHUB_MAX_SOURCE_BYTES'],
+  ['compiler.command', 'TWEXTHUB_COMPILER'],
+  ['compiler.timeoutMs', 'TWEXTHUB_COMPILER_TIMEOUT_MS'],
+  ['compiler.memoryMb', 'TWEXTHUB_COMPILER_MEMORY_MB'],
+  ['logging.requests', 'TWEXTHUB_LOG_REQUESTS'],
   ['cors.allowedOrigins', 'TWEXTHUB_CORS_ALLOWED_ORIGINS'],
 ];
 

@@ -1,7 +1,7 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept } from './helpers.mjs';
+import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
 
 let app;
 before(async () => {
@@ -12,15 +12,8 @@ after(async () => {
   await (await boot()).sql.end();
 });
 
-function manifest(version, extra = {}) {
-  return { id: 'hello', version, license: 'MIT', name: 'hello', description: 'd', ...extra };
-}
-
 function publish(ns, token, version) {
-  return request(app)
-    .post(`/v1/@${ns}/hello/versions`)
-    .set(bearer(token))
-    .send({ manifest: manifest(version), code: `// v${version}` });
+  return publishProject(app, ns, 'hello', token, { version, code: `// v${version}` });
 }
 
 function approve(adminToken, ns, version) {
@@ -42,9 +35,9 @@ async function makeAdminAndOwner() {
 test('deprecating flags a version but keeps it listable and downloadable', async () => {
   const { adminToken, ownerToken, ownerNs } = await makeAdminAndOwner();
   // first publish is pending; approve to unlock auto-publish
-  await publish(ownerNs, ownerToken, '1.0.0').expect(201);
+  await publish(ownerNs, ownerToken, '1.0.0');
   await approve(adminToken, ownerNs, '1.0.0');
-  await publish(ownerNs, ownerToken, '2.0.0').expect(201);
+  await publish(ownerNs, ownerToken, '2.0.0');
 
   const upgrade = await request(app)
     .patch(`/v1/@${ownerNs}/hello/versions/2.0.0/deprecate`)
@@ -89,9 +82,9 @@ test('non-owners cannot deprecate; admin can', async () => {
   const outsiderNs = uniqNs();
   const outside = await signupAndAccept(app, outsiderNs);
 
-  await publish(ownerNs, ownerToken, '1.0.0').expect(201);
+  await publish(ownerNs, ownerToken, '1.0.0');
   await approve(adminToken, ownerNs, '1.0.0');
-  await publish(ownerNs, ownerToken, '2.0.0').expect(201);
+  await publish(ownerNs, ownerToken, '2.0.0');
 
   const denied = await request(app)
     .patch(`/v1/@${ownerNs}/hello/versions/2.0.0/deprecate`)

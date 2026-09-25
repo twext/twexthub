@@ -63,7 +63,9 @@ export async function reconcileOnBoot(sql, config) {
     `;
     for (const row of staging) {
       const blobAbs = path.join(dataDir, row.blob_path);
-      if (existsSync(blobAbs)) {
+      const sourceAbs = row.source_path ? path.join(dataDir, row.source_path) : null;
+      const complete = existsSync(blobAbs) && (!sourceAbs || existsSync(sourceAbs));
+      if (complete) {
         const [owner] = await tx`SELECT has_published FROM users WHERE id = ${row.owner_id}`;
         const status = owner?.has_published ? 'published' : 'pending';
         await tx`
@@ -77,7 +79,7 @@ export async function reconcileOnBoot(sql, config) {
       } else {
         await tx`DELETE FROM versions WHERE id = ${row.id}`;
         console.log(
-          `removed staging version ${row.namespace}/${row.extension_id}@${row.version} (blob missing)`,
+          `removed staging version ${row.namespace}/${row.extension_id}@${row.version} (blob or source missing)`,
         );
       }
     }

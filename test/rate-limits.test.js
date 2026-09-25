@@ -1,0 +1,121 @@
+import { test, before, beforeEach, after } from 'node:test';
+import assert from 'node:assert/strict';
+import request from 'supertest';
+import { makeConfig, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
+import { createApp } from '../src/app.js';
+import { createDb, ensureDataDirs } from '../src/db.js';
+
+// Separate app instances: the shared boot() cache is built once per process,
+// and these tests need their own tiny rate-limit config to be exercisable.
+let sql;
+let looseApp;
+let tightApp;
+
+function makeRateConfig(overrides = {}) {
+  return makeConfig({
+    rateLimits: {
+      loginAttemptsPerWindow: 5,
+      loginWindowMinutes: 15,
+      signupsPerIpPerWindow: 5,
+      signupWindowMinutes: 15,
+      publishPerWindow: null,
+      publishWindowMinutes: 60,
+      downloadsPerIpPerWindow: null,
+      downloadWindowMinutes: 5,
+      ...overrides,
+    },
+  });
+}
+
+before(async () => {
+  // One shared database and dataDir; the apps differ only in rate limits.
+  const loose = makeRateConfig();
+  const tight = makeRateConfig({
+    publishPerWindow: 2,
+    downloadsPerIpPerWindow: 1,
+  });
+  tight.dataDir = loose.dataDir;
+  sql = createDb(loose);
+  ensureDataDirs(loose.dataDir);
+  looseApp = createApp({ config: loose, sql }).app;
+  tightApp = createApp({ config: tight, sql }).app;
+});
+
+beforeEach(async () => {
+  // Shared database, so clear the rows both app instances see.
+  await sql.unsafe(`
+    TRUNCATE TABLE automation_tokens, sessions, versions, rate_limit_entries, notifications,
+    users, legal_documents, download_events, extension_daily_downloads, dist_tags,
+    webhook_deliveries, webhooks
+    RESTART IDENTITY CASCADE
+  `);
+  await sql`
+    INSERT INTO legal_documents (kind, version, body)
+    VALUES ('terms', 1, 'Placeholder terms.'), ('privacy', 1, 'Placeholder privacy.')
+  `;
+});
+
+after(async () => {
+  await sql?.end();
+});
+
+test('the publish bucket is counted per account and rejects past the cap', async () => {
+  const owner = await signupAndAccept(tightApp, uniqNs());
+  const ns = owner.user.namespace;
+
+  // An empty body fails validation with 415, but the bucket still counts it:
+  // the server did the work.
+  const publish = () =>
+    request(tightApp)
+      .post(`/v1/@${ns}/widget/versions`)
+      .set(bearer(owner.token))
+      .set('Content-Type', 'application/gzip')
+      .send(Buffer.alloc(0));
+
+  await publish().expect(415);
+  await publish().expect(415);
+  const third = await publish();
+  assert.equal(third.status, 429);
+  assert.ok(third.headers['retry-after'], 'a Retry-After rides the 429');
+
+  // A different account has its own bucket.
+  const peer = await signupAndAccept(tightApp, uniqNs());
+  await request(tightApp)
+    .post(`/v1/@${peer.user.namespace}/widget/versions`)
+    .set(bearer(peer.token))
+    .set('Content-Type', 'application/gzip')
+    .send(Buffer.alloc(0))
+    .expect(415);
+});
+
+test('the download bucket is per IP, keyed on real paths, and a null limit disables it', async () => {
+  const admin = await signupAndAccept(tightApp, uniqNs());
+  const owner = await signupAndAccept(tightApp, uniqNs());
+  const ns = owner.user.namespace;
+  await publishProject(tightApp, ns, 'hello', owner.token, { code: '// dl' });
+  await request(tightApp)
+    .patch(`/v1/@${ns}/hello/versions/1.0.0`)
+    .set(bearer(admin.token))
+    .send({ status: 'approved' })
+    .expect(200);
+
+  await request(tightApp).get(`/v1/@${ns}/hello/versions/1.0.0/download`).expect(200);
+  const second = await request(tightApp).get(`/v1/@${ns}/hello/versions/1.0.0/download`);
+  assert.equal(second.status, 429);
+
+  // With the bucket disabled, repeated hits sail through.
+  await request(looseApp).get(`/v1/@${ns}/hello/versions/1.0.0/download`).expect(200);
+  await request(looseApp).get(`/v1/@${ns}/hello/versions/1.0.0/download`).expect(200);
+  await request(looseApp).get(`/v1/@${ns}/hello/versions/1.0.0/download`).expect(200);
+});
+
+test('signup and login limits still work alongside the new buckets', async () => {
+  const ns = uniqNs();
+  for (let i = 0; i < 5; i += 1) {
+    await request(tightApp).post('/v1/auth/login').send({ namespace: ns, password: 'wrong-pass' });
+  }
+  const sixth = await request(tightApp)
+    .post('/v1/auth/login')
+    .send({ namespace: ns, password: 'wrong-pass' });
+  assert.equal(sixth.status, 429);
+});

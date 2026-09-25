@@ -1,7 +1,7 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept } from './helpers.mjs';
+import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
 
 let app;
 let sql;
@@ -13,10 +13,6 @@ after(async () => {
   await sql.end();
 });
 
-function manifest(id, version, extra = {}) {
-  return { id, version, license: 'MIT', name: id, description: `desc ${id}`, ...extra };
-}
-
 // Publishes several extensions under fresh namespaces. Returns their metadata
 // for the assertions below.
 async function seedExtensions() {
@@ -25,11 +21,12 @@ async function seedExtensions() {
   const ns = owner.user.namespace;
 
   const first = async (id, version, extra) => {
-    await request(app)
-      .post(`/v1/@${ns}/${id}/versions`)
-      .set(bearer(owner.token))
-      .send({ manifest: manifest(id, version, extra), code: `// ${id}` })
-      .expect(201);
+    await publishProject(app, ns, id, owner.token, {
+      version,
+      code: `// ${id}`,
+      description: `desc ${id}`,
+      ...extra,
+    });
     const queue = await request(app)
       .get('/v1/versions?status=pending')
       .set(bearer(admin.token))
@@ -42,11 +39,12 @@ async function seedExtensions() {
       .expect(200);
   };
   const rest = async (id, version, extra) => {
-    await request(app)
-      .post(`/v1/@${ns}/${id}/versions`)
-      .set(bearer(owner.token))
-      .send({ manifest: manifest(id, version, extra), code: `// ${id}` })
-      .expect(201);
+    await publishProject(app, ns, id, owner.token, {
+      version,
+      code: `// ${id}`,
+      description: `desc ${id}`,
+      ...extra,
+    });
   };
 
   // Publish order: minterm (Apache), alpaca (MIT), zoo (MIT) — alphabetical

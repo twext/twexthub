@@ -3,6 +3,7 @@ import { loadConfig } from './config.js';
 import { createDb } from './db.js';
 import { makeAuthenticate, makeRequireTerms } from './auth.js';
 import { makeRateLimiter } from './rate-limit.js';
+import { makeRequestTelemetry } from './observability.js';
 import { makeCors } from './cors.js';
 import { HttpError, notFound, errorHandler } from './errors.js';
 import { normalizeApiRoot } from './util.js';
@@ -33,6 +34,13 @@ export function createApp(opts = {}) {
 
   app.use(makeCors(config.cors));
 
+  // Counts and timings for /admin/metrics; also the structured request log
+  // when `logging.requests` is on. Mounted before the routers so unmatched
+  // paths still count.
+  const telemetry = makeRequestTelemetry({ logRequests: config.logging?.requests === true });
+  app.locals.telemetry = telemetry;
+  app.use(telemetry.middleware);
+
   const jsonBody = express.json({ limit: '100kb' });
   app.use((req, res, next) => {
     const isPublish = req.method === 'POST' && /\/@[^/?]+\/[^/?]+\/versions\/?$/.test(req.path);
@@ -61,5 +69,5 @@ export function createApp(opts = {}) {
   app.use((req, res, next) => next(notFound()));
   app.use(errorHandler);
 
-  return { app, sql, config, rateLimiter };
+  return { app, sql, config, rateLimiter, telemetry };
 }

@@ -1,7 +1,7 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept } from './helpers.mjs';
+import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
 import { aggregateDayLoader } from '../src/metrics.js';
 
 let app;
@@ -17,11 +17,7 @@ after(async () => {
 });
 
 async function publishAs(ns, nsToken, adminToken, id, version, code) {
-  await request(app)
-    .post(`/v1/@${ns}/${id}/versions`)
-    .set(bearer(nsToken))
-    .send({ manifest: { id, version, license: 'MIT', name: id, description: 'd' }, code })
-    .expect(201);
+  await publishProject(app, ns, id, nsToken, { version, code });
   await request(app)
     .patch(`/v1/@${ns}/${id}/versions/${version}`)
     .set(bearer(adminToken))

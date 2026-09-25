@@ -50,7 +50,35 @@ export function makeRateLimiter(sql, config) {
     if (count > max) throw tooManyRequests(secondsUntilReset(windowMinutes));
   }
 
-  const maxWindow = Math.max(limits.loginWindowMinutes, limits.signupWindowMinutes);
+  // Publish and download are throttled with plain count-and-reject windows:
+  // every request counts (an attempt that fails validation is still work the
+  // server did), and a null limit disables the bucket entirely.
+  function windowedCheck(bucket, max, windowMinutes) {
+    if (max === null || max === undefined) return async () => {};
+    return async () => {
+      const count = await record(bucket, windowMinutes);
+      if (count > max) throw tooManyRequests(secondsUntilReset(windowMinutes));
+    };
+  }
+
+  function publishCheck(bucket) {
+    return windowedCheck(bucket, limits.publishPerWindow ?? 30, limits.publishWindowMinutes ?? 60);
+  }
+
+  function downloadCheck(bucket) {
+    return windowedCheck(
+      bucket,
+      limits.downloadsPerIpPerWindow ?? 240,
+      limits.downloadWindowMinutes ?? 5,
+    );
+  }
+
+  const maxWindow = Math.max(
+    limits.loginWindowMinutes,
+    limits.signupWindowMinutes,
+    limits.publishWindowMinutes ?? 60,
+    limits.downloadWindowMinutes ?? 5,
+  );
   const cleanupInterval = setInterval(async () => {
     try {
       const cutoff = new Date(Date.now() - maxWindow * 60_000);
@@ -64,6 +92,8 @@ export function makeRateLimiter(sql, config) {
   return {
     loginCheck,
     signupCheck,
+    publishCheck,
+    downloadCheck,
     stop() {
       clearInterval(cleanupInterval);
     },

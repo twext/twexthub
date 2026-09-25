@@ -1,13 +1,13 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept } from './helpers.mjs';
+import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
 
 let app;
 let sql;
 before(async () => {
   ({ app, sql } = await boot({
-    limits: { maxBlobBytes: 40, maxAccountBlobBytes: 100 },
+    limits: { maxBlobBytes: 5000, maxAccountBlobBytes: 8000 },
   }));
 });
 beforeEach(resetDb);
@@ -15,15 +15,22 @@ after(async () => {
   await sql.end();
 });
 
-function manifest(id, version) {
-  return { id, version, license: 'MIT', name: id, description: 'd' };
-}
-
-async function publishPrivate({ owner, id = 'secret', version = '1.0.0', code = 'x' }) {
-  return request(app)
-    .post(`/v1/@${owner.user.namespace}/${id}/versions`)
-    .set(bearer(owner.token))
-    .send({ manifest: manifest(id, version), code, visibility: 'private' });
+async function publishPrivate(
+  { owner, id = 'secret', version = '1.0.0', code = 'const answer = 42;' },
+  status = 201,
+) {
+  return publishProject(
+    app,
+    owner.user.namespace,
+    id,
+    owner.token,
+    {
+      visibility: 'private',
+      version,
+      code,
+    },
+    status,
+  );
 }
 
 async function expectStatus(promise, status) {
@@ -36,9 +43,8 @@ test('private extensions are hidden from public surfaces but visible to the owne
   const admin = await signupAndAccept(app, uniqNs());
   const owner = await signupAndAccept(app, uniqNs());
   const ns = owner.user.namespace;
-  const code = '// secret@1.0.0';
 
-  const published = await publishPrivate({ owner, code });
+  const published = await publishPrivate({ owner, code: '// secret@1.0.0' });
   assert.equal(published.status, 201);
   assert.equal(published.body.visibility, 'private');
   await request(app)
@@ -64,17 +70,24 @@ test('private extensions are hidden from public surfaces but visible to the owne
   await request(app).get(`/v1/@${ns}/secret/versions/1.0.0`).expect(404);
   await request(app).get(`/v1/@${ns}/secret/versions/resolve?range=^1.0`).expect(404);
   await request(app).get(`/v1/@${ns}/secret/versions/1.0.0/download`).expect(404);
+  await request(app).get(`/v1/@${ns}/secret/versions/1.0.0/source`).expect(401);
   await request(app).get(`/v1/@${ns}/secret/tags`).expect(404);
   await request(app).get(`/v1/@${ns}/secret/owners`).expect(404);
   await request(app).get('/v1/extensions/trending').expect(200);
 
-  // The namespace account reads and downloads its own private extension.
+  // The namespace account reads its own private extension, downloads the
+  // compiled blob, and fetches the source tarball.
   const detail = await request(app).get(`/v1/@${ns}/secret`).set(bearer(owner.token)).expect(200);
   assert.equal(detail.body.id, 'secret');
   await request(app)
     .get(`/v1/@${ns}/secret/versions/1.0.0/download`)
     .set(bearer(owner.token))
     .expect(200);
+  const src = await request(app)
+    .get(`/v1/@${ns}/secret/versions/1.0.0/source`)
+    .set(bearer(owner.token))
+    .expect(200);
+  assert.match(src.headers['content-type'], /gzip/);
 });
 
 test('access grants open private detail/download to the grantee and revoke cleanly', async () => {
@@ -141,19 +154,25 @@ test('blob size caps and the account quota are enforced on publish', async () =>
   const owner = await signupAndAccept(app, uniqNs());
   const ns = owner.user.namespace;
 
-  // A single blob over maxBlobBytes is rejected outright.
-  const oversized = await publishPrivate({ owner, id: 'big', code: 'x'.repeat(60) });
-  assert.equal(oversized.status, 413);
-  assert.match(oversized.body.detail, /limit is 40/);
+  // A single compiled output over maxBlobBytes is rejected outright. The
+  // default project compiles to ~500 bytes, so a large embedded literal pushes
+  // the build past the 5000-byte cap.
+  const oversized = await expectStatus(
+    publishPrivate(
+      {
+        owner,
+        id: 'big',
+        code: `util.log(${JSON.stringify('x'.repeat(6000))});`,
+      },
+      413,
+    ),
+    413,
+  );
+  assert.match(oversized.body.detail, /limit is 5000/);
 
   // First publish is pending and must clear review before the next one,
   // because an owner can only have one version awaiting review at a time.
-  const first = await publishPrivate({
-    owner,
-    id: 'batch',
-    version: '1.0.0',
-    code: 'a'.repeat(40),
-  });
+  const first = await publishPrivate({ owner, id: 'batch' });
   assert.equal(first.status, 201);
   await request(app)
     .patch(`/v1/@${ns}/batch/versions/1.0.0`)
@@ -164,19 +183,25 @@ test('blob size caps and the account quota are enforced on publish', async () =>
     owner,
     id: 'batch',
     version: '2.0.0',
-    code: 'b'.repeat(2),
+    code: '// second',
   });
   assert.equal(second.status, 201);
 
-  // Force the account near its quota, then the next publish must be refused.
-  await sql`UPDATE users SET blob_bytes = 90 WHERE namespace = ${ns}`;
-  const overflowing = await publishPrivate({
-    owner,
-    id: 'batch',
-    version: '3.0.0',
-    code: 'c'.repeat(20),
-  });
-  assert.equal(overflowing.status, 413);
+  // Force the account near its quota; the charge covers both the compiled blob
+  // and the retained source tarball, so even a small publish must be refused.
+  await sql`UPDATE users SET blob_bytes = 7990 WHERE namespace = ${ns}`;
+  const overflowing = await expectStatus(
+    publishPrivate(
+      {
+        owner,
+        id: 'batch',
+        version: '3.0.0',
+        code: '// overflow',
+      },
+      413,
+    ),
+    413,
+  );
   assert.match(overflowing.body.detail, /quota/);
 });
 
@@ -198,7 +223,7 @@ test('admins can read and tune per-account quota, and only admins view the audit
     .get(`/v1/admin/users/${ns}/quota`)
     .set(bearer(admin.token))
     .expect(200);
-  assert.equal(afterPublish.body.blobBytes, 15);
+  assert.ok(Number(afterPublish.body.blobBytes) > 0, 'publish bytes are tracked');
 
   // A per-account override replaces the default; non-admins cannot set it.
   await request(app)
@@ -260,22 +285,22 @@ test('admins can read and tune per-account quota, and only admins view the audit
   assert.equal(seen.size, 4);
 });
 
-test('deleting the extension refunds the account quota', async () => {
+test('deleting the extension refunds the account quota including source bytes', async () => {
   const admin = await signupAndAccept(app, uniqNs());
   const owner = await signupAndAccept(app, uniqNs());
   const ns = owner.user.namespace;
 
-  await expectStatus(publishPrivate({ owner, id: 'temp', code: 'x'.repeat(20) }), 201);
+  await expectStatus(publishPrivate({ owner, id: 'temp', code: '// temp' }), 201);
   const charged = await request(app)
     .get(`/v1/admin/users/${ns}/quota`)
     .set(bearer(admin.token))
     .expect(200);
-  assert.equal(charged.body.blobBytes, 20);
+  assert.ok(Number(charged.body.blobBytes) > 0);
 
   await request(app).delete(`/v1/@${ns}/temp`).set(bearer(owner.token)).expect(204);
   const refunded = await request(app)
     .get(`/v1/admin/users/${ns}/quota`)
     .set(bearer(admin.token))
     .expect(200);
-  assert.equal(refunded.body.blobBytes, 0);
+  assert.equal(Number(refunded.body.blobBytes), 0);
 });

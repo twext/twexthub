@@ -2,7 +2,7 @@ import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept } from './helpers.mjs';
+import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
 import {
   attemptDelivery,
   makeWebhooks,
@@ -20,21 +20,13 @@ after(async () => {
   await sql.end();
 });
 
-function manifest(id, version) {
-  return { id, version, license: 'MIT', name: id, description: 'd' };
-}
-
 // scheduleFor runs fire-and-forget; give it a tick to land its inserts.
 function settle() {
   return new Promise((resolve) => setTimeout(resolve, 50));
 }
 
 async function publishApproved(ns, token, adminToken, id, version) {
-  await request(app)
-    .post(`/v1/@${ns}/${id}/versions`)
-    .set(bearer(token))
-    .send({ manifest: manifest(id, version), code: `// ${id}@${version}` })
-    .expect(201);
+  await publishProject(app, ns, id, token, { version, code: `// ${id}@${version}` });
   await request(app)
     .patch(`/v1/@${ns}/${id}/versions/${version}`)
     .set(bearer(adminToken))
@@ -128,11 +120,10 @@ test('registry events schedule deliveries for subscribed hooks', async () => {
 
   // 2.0.0 publishes straight to 'published' since the owner's first version
   // was approved; no admin call needed.
-  await request(app)
-    .post(`/v1/@${ns}/hooked/versions`)
-    .set(bearer(owner.token))
-    .send({ manifest: manifest('hooked', '2.0.0'), code: '// hooked@2.0.0' })
-    .expect(201);
+  await publishProject(app, ns, 'hooked', owner.token, {
+    version: '2.0.0',
+    code: '// hooked@2.0.0',
+  });
   await request(app)
     .patch(`/v1/@${ns}/hooked/versions/2.0.0/deprecate`)
     .set(bearer(owner.token))
@@ -181,11 +172,10 @@ test('version.rejected fires from the review endpoint', async () => {
     .set(bearer(newcomer.token))
     .send({ url: PUBLIC_URL, events: ['version.rejected'] })
     .expect(201);
-  await request(app)
-    .post(`/v1/@${newcomerNs}/fresh/versions`)
-    .set(bearer(newcomer.token))
-    .send({ manifest: manifest('fresh', '1.0.0'), code: '// x' })
-    .expect(201);
+  await publishProject(app, newcomerNs, 'fresh', newcomer.token, {
+    version: '1.0.0',
+    code: '// x',
+  });
   await request(app)
     .patch(`/v1/@${newcomerNs}/fresh/versions/1.0.0`)
     .set(bearer(admin.token))

@@ -1,7 +1,7 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept } from './helpers.mjs';
+import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
 
 let app;
 before(async () => {
@@ -11,10 +11,6 @@ beforeEach(resetDb);
 after(async () => {
   await (await boot()).sql.end();
 });
-
-function manifest(obj = {}) {
-  return { id: 'hello', version: '1.0.0', license: 'MIT', name: 'hello', description: 'd', ...obj };
-}
 
 test('create/list/update/delete automation tokens', async () => {
   const { token } = await signupAndAccept(app, uniqNs());
@@ -61,10 +57,7 @@ test('automation token can publish with publish scope', async () => {
     .expect(201);
   const auto = created.body.token;
 
-  const pub = await request(app)
-    .post(`/v1/@${ns}/hello/versions`)
-    .set(bearer(auto))
-    .send({ manifest: manifest(), code: 'x' });
+  const pub = await publishProject(app, ns, 'hello', auto);
   assert.equal(pub.status, 201);
 
   const queue = await request(app)
@@ -104,11 +97,7 @@ test('yank scope: yank own version once approved', async () => {
   const { user, token } = await signupAndAccept(app, uniqNs());
   const ns = user.namespace;
 
-  const pub = await request(app)
-    .post(`/v1/@${ns}/hello/versions`)
-    .set(bearer(token))
-    .send({ manifest: manifest(), code: 'x' })
-    .expect(201);
+  const pub = await publishProject(app, ns, 'hello', token);
   const version = pub.body.version;
 
   const queue = await request(app)

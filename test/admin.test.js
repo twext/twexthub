@@ -1,7 +1,7 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept } from './helpers.mjs';
+import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
 
 let app;
 let sql;
@@ -48,25 +48,12 @@ test('bumping terms forces re-acceptance for other users', async () => {
     .send({ body: 'Terms v2.' })
     .expect(200);
 
-  const pub = await request(app)
-    .post(`/v1/@${ns}/aaa/versions`)
-    .set(bearer(token))
-    .send({
-      manifest: { id: 'aaa', version: '1.0.0', license: 'MIT', name: 'aaa', description: 'd' },
-      code: 'x',
-    });
+  const pub = await publishProject(app, ns, 'aaa', token, {}, 403);
   assert.equal(pub.status, 403);
   assert.match(pub.body.detail, /Terms/i);
 
   await request(app).post('/v1/terms/accept').set(bearer(token)).expect(204);
-  const after = await request(app)
-    .post(`/v1/@${ns}/aaa/versions`)
-    .set(bearer(token))
-    .send({
-      manifest: { id: 'aaa', version: '1.0.0', license: 'MIT', name: 'aaa', description: 'd' },
-      code: 'x',
-    })
-    .expect(201);
+  const after = await publishProject(app, ns, 'aaa', token);
   assert.equal(after.body.status, 'pending');
 });
 

@@ -1,7 +1,7 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept } from './helpers.mjs';
+import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
 
 let app;
 let sql;
@@ -13,10 +13,6 @@ after(async () => {
   await sql.end();
 });
 
-function manifest(id, version) {
-  return { id, version, license: 'MIT', name: id, description: 'd' };
-}
-
 async function makeSetup() {
   const admin = await signupAndAccept(app, uniqNs());
   const owner = await signupAndAccept(app, uniqNs());
@@ -24,11 +20,7 @@ async function makeSetup() {
   // The first publish is held for review; after its approval the rest go
   // straight to 'published'.
   const publish = async (version, approve) => {
-    await request(app)
-      .post(`/v1/@${ns}/ranger/versions`)
-      .set(bearer(owner.token))
-      .send({ manifest: manifest('ranger', version), code: `// ${version}` })
-      .expect(201);
+    await publishProject(app, ns, 'ranger', owner.token, { version, code: `// ${version}` });
     if (approve) {
       await request(app)
         .patch(`/v1/@${ns}/ranger/versions/${version}`)
@@ -74,11 +66,7 @@ test('resolve prefers strictly-published over deprecated', async () => {
     ['1.0.0', true],
     ['1.1.0', false],
   ]) {
-    await request(app)
-      .post(`/v1/@${ons}/dep/versions`)
-      .set(bearer(owner.token))
-      .send({ manifest: manifest('dep', version), code: `// ${version}` })
-      .expect(201);
+    await publishProject(app, ons, 'dep', owner.token, { version, code: `// ${version}` });
     if (approve) {
       await request(app)
         .patch(`/v1/@${ons}/dep/versions/${version}`)
@@ -109,11 +97,7 @@ test('yanked versions never satisfy a range', async () => {
     ['1.0.0', true],
     ['1.1.0', false],
   ]) {
-    await request(app)
-      .post(`/v1/@${ns}/yank/versions`)
-      .set(bearer(owner.token))
-      .send({ manifest: manifest('yank', version), code: `// ${version}` })
-      .expect(201);
+    await publishProject(app, ns, 'yank', owner.token, { version, code: `// ${version}` });
     if (approve) {
       await request(app)
         .patch(`/v1/@${ns}/yank/versions/${version}`)

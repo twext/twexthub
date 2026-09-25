@@ -1,7 +1,7 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept } from './helpers.mjs';
+import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
 
 let app;
 before(async () => {
@@ -12,15 +12,19 @@ after(async () => {
   await (await boot()).sql.end();
 });
 
-function manifest(id, version, extra = {}) {
-  return { id, version, license: 'MIT', name: id, description: 'A test extension.', ...extra };
-}
-
-function publish(nsToken, ns, id, version, extra = {}) {
-  return request(app)
-    .post(`/v1/@${ns}/${id}/versions`)
-    .set(bearer(nsToken))
-    .send({ manifest: manifest(id, version, extra), code: '// ' + id + ' ' + version });
+function publish(nsToken, ns, id, version, extra = {}, status = 201) {
+  return publishProject(
+    app,
+    ns,
+    id,
+    nsToken,
+    {
+      version,
+      code: `// ${id} ${version}`,
+      ...extra,
+    },
+    status,
+  );
 }
 
 // First publish of an owner is pending; approve it to unlock auto-publishing.
@@ -44,13 +48,13 @@ test('extensions lists published extensions, newest first, latest version each',
   const owner = await signupAndAccept(app, uniqNs());
   const ns = owner.user.namespace;
 
-  const alpha10 = await publish(owner.token, ns, 'alpha', '1.0.0').expect(201);
+  const alpha10 = await publish(owner.token, ns, 'alpha', '1.0.0');
   assert.equal(alpha10.body.status, 'pending');
   await approvePending(admin.token, ns, 'alpha');
 
   // Once approved, later publishes from the same owner skip review.
-  await publish(owner.token, ns, 'beta', '1.0.0').expect(201);
-  await publish(owner.token, ns, 'alpha', '1.1.0').expect(201);
+  await publish(owner.token, ns, 'beta', '1.0.0');
+  await publish(owner.token, ns, 'alpha', '1.1.0');
 
   const r = await request(app).get('/v1/extensions').expect(200);
   assert.deepEqual(
@@ -72,9 +76,9 @@ test('search filters by name/id/namespace', async () => {
   await publish(owner.token, ns, 'banana', '1.0.0', {
     description: 'yellow fruit',
     name: 'Sweet Banana',
-  }).expect(201);
+  });
   await approvePending(admin.token, ns, 'banana');
-  await publish(owner.token, ns, 'grape', '1.0.0', { description: 'purple fruit' }).expect(201);
+  await publish(owner.token, ns, 'grape', '1.0.0', { description: 'purple fruit' });
 
   const id = await request(app).get('/v1/search?query=banana').expect(200);
   assert.equal(id.body.data.length, 1);
@@ -99,10 +103,10 @@ test('extensions pagination cursor walks all pages', async () => {
   const owner = await signupAndAccept(app, uniqNs());
   const ns = owner.user.namespace;
 
-  await publish(owner.token, ns, 'ext0', '1.0.0').expect(201);
+  await publish(owner.token, ns, 'ext0', '1.0.0');
   await approvePending(admin.token, ns, 'ext0');
   for (let i = 1; i < 5; i += 1) {
-    await publish(owner.token, ns, 'ext' + i, '1.0.0').expect(201);
+    await publish(owner.token, ns, 'ext' + i, '1.0.0');
   }
 
   const seen = [];
@@ -127,13 +131,13 @@ test('stats reports published count, pending, and authors', async () => {
   const owner = await signupAndAccept(app, uniqNs());
   const ns = owner.user.namespace;
 
-  await publish(owner.token, ns, 'aaa', '1.0.0').expect(201);
+  await publish(owner.token, ns, 'aaa', '1.0.0');
   let stats = await request(app).get('/v1/stats').expect(200);
   assert.equal(stats.body.published, 0);
   assert.equal(stats.body.pending, 1);
 
   await approvePending(admin.token, ns, 'aaa');
-  await publish(owner.token, ns, 'bbb', '1.0.0').expect(201);
+  await publish(owner.token, ns, 'bbb', '1.0.0');
 
   stats = await request(app).get('/v1/stats').expect(200);
   assert.equal(stats.body.published, 2);
@@ -162,7 +166,7 @@ test('publish without accepting terms is forbidden', async () => {
     .post('/v1/auth/signup')
     .send({ namespace: uniqNs(), password: 'password123', displayName: 'd' });
   const { token } = r.body;
-  const pub = await publish(token, r.body.user.namespace, 'aaa', '1.0.0');
+  const pub = await publish(token, r.body.user.namespace, 'aaa', '1.0.0', {}, 403);
   assert.equal(pub.status, 403);
   assert.match(pub.body.detail, /Terms/i);
 });

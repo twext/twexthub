@@ -1,7 +1,15 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signup, signupAndAccept } from './helpers.mjs';
+import {
+  boot,
+  resetDb,
+  bearer,
+  uniqNs,
+  signup,
+  signupAndAccept,
+  publishProject,
+} from './helpers.mjs';
 
 let app, sql;
 before(async () => {
@@ -279,13 +287,7 @@ async function promoteToAdmin(namespace) {
 }
 
 async function publishPending(app, { token, namespace, id, version }) {
-  return request(app)
-    .post(`/v1/@${namespace}/${id}/versions`)
-    .set(bearer(token))
-    .send({
-      manifest: { id, version, license: 'MIT', description: 'test extension' },
-      code: 'console.log(1);',
-    });
+  return publishProject(app, namespace, id, token, { version, code: 'console.log(1);' });
 }
 
 async function notificationsFor(token, query = '') {

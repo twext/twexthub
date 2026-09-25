@@ -12,7 +12,9 @@ TwextHub is a registry for Twext-compiled extensions. Publishers submit compiled
 - [Run with Docker](#run-with-docker)
 - [Configuration](#configuration)
 - [Behind a reverse proxy](#behind-a-reverse-proxy)
+- [The build sandbox](#the-build-sandbox)
 - [Blobs must live on persistent storage](#blobs-must-live-on-persistent-storage)
+- [Monitoring](#monitoring)
 - [Upgrades](#upgrades)
 - [Backups](#backups)
 - [Boot-time cleanup](#boot-time-cleanup)
@@ -100,7 +102,22 @@ Point the proxy at the server's port. Two things need attention when one is in f
 - Set `TWEXTHUB_TRUST_PROXY` to the appropriate [Express trust proxy](https://expressjs.com/en/guide/behind-proxies.html) value (`1` for a single proxy hop, `true` to trust all). Without it the server sees the proxy's address instead of the client's. The per-IP signup limit (5 per 15 minutes by default) then adds up signups from every visitor into one bucket and starts returning 429 for everyone.
 - If the proxy terminates TLS, `TWEXTHUB_TRUST_PROXY` is also what lets `TWEXTHUB_REQUIRE_HTTPS` tell real clients from plain HTTP.
 
-Publish requests can carry up to 25 MB of JSON. nginx's default `client_max_body_size` is 1 MB, so raise it for the instance; otherwise large publishes die at the proxy.
+Publish requests carry a gzipped source tarball (up to `limits.maxSourceBytes`, 1 MB by default). nginx's default `client_max_body_size` is 1 MB, so raise it for the instance; otherwise large publishes die at the proxy.
+
+## The build sandbox
+
+The hub compiles every publish itself: the uploaded tarball is expanded under `dataDir/tmp/`, and `twext build` runs there in a child process. The sandbox is:
+
+- **Filesystem** — Node's permission model restricts the child to reads and writes inside the extracted project directory plus reads of the server's own `node_modules` (the compiler and its dependencies). A `twext.yml` cannot redirect the output elsewhere; the output path is forced inside the sandbox directory.
+- **Memory** — `compiler.memoryMb` (192 MB default) caps the child's V8 old-generation heap; the child is killed if it grows past that.
+- **Time** — `compiler.timeoutMs` (30 s default) SIGKILLs the child.
+- **No secrets** — the child gets a scrubbed `process.env` minus `NODE_OPTIONS`.
+
+Node's permission model does not gate outbound sockets, so an extension's build step could attempt network egress. Isolate that at the deployment boundary: run the container with no egress (Docker's `--network none` for a dedicated builder, or an egress firewall), or accept the risk if only moderated accounts can publish. The sandbox prevents code from escaping the box; it does not stop it from calling out.
+
+Operators can substitute their own compiler with `TWEXTHUB_COMPILER` (a binary or script invoked as `<command> build -o <out>`); see the [compiler configuration](configuration.md#compiler).
+
+A failed build rejects the publish with `422` and reports the compiler's output as `buildLog`; nothing is staged. Moderation reviews the source tarball and build log — the queue's `sourceUrl` fetches the exact uploaded bytes — so what an admin approves is what compiles into the served blob.
 
 ## Blobs must live on persistent storage
 
@@ -111,6 +128,20 @@ Published blobs are written to the local disk under `dataDir`, not to the databa
 
 Point `TWEXTHUB_DATA_DIR` (or `dataDir`) at the persistent mount and keep it in sync with database backups.
 
+## Monitoring
+
+`GET /v1/admin/metrics` renders Prometheus text format for an authenticated admin session — point a scraper's bearer token at it. Exposed gauges and counters:
+
+- `twexthub_users_total`, `twexthub_extensions_published_total`, `twexthub_versions_total{status}`, `twexthub_downloads_total`
+- `twexthub_storage_bytes{kind="blob"|"source"}` — bytes currently charged to accounts
+- `twexthub_storage_integrity_errors` — blobs that failed the last daily integrity scrub (see below)
+- `twexthub_process_uptime_seconds`
+- `twexthub_http_requests_total{method,route,status}` and `twexthub_http_request_duration_seconds_sum/count{method,route}` — per-route traffic; routes are labeled by pattern, never raw path
+
+The daily integrity scrub re-hashes every stored blob and compares against its recorded digest. Failures are logged at warn level and exported through the gauge, but nothing is deleted: a mismatch usually means disk corruption or a stray writer, and the operator decides between restoring the file from backup or deleting the affected version.
+
+Scrape frequency note: the registry gauges are computed per scrape; per-route counters are in-memory and reset on restart.
+
 ## Upgrades
 
 Releases are tagged with semver, and `latest` tracks `main`. To upgrade, pull the new image or deploy the new tree and restart — new migrations apply automatically on boot. A database backup before the restart is cheap insurance if a migration goes wrong mid-run.
@@ -120,17 +151,21 @@ Releases are tagged with semver, and `latest` tracks `main`. To upgrade, pull th
 Two things hold state: the Postgres database and the data directory.
 
 - Database: a standard `pg_dump`, restored onto a fresh database with `psql`.
-- Data directory: the compiled extension blobs. Blobs are written once at publish time and cannot be regenerated, so losing the data directory while keeping the database leaves published versions listed but their download endpoints 404ing. Back up `blobs/` (or the whole `dataDir`) together with the database.
+- Data directory: compiled blobs (`blobs/`) **and** uploaded source tarballs (`sources/`). Both are written once at publish time and cannot be regenerated — losing either while keeping the database leaves versions listed but their download or source endpoints 404ing. Back up both directories (or the whole `dataDir`) together with the database.
 
-`tmp/` and `quarantine/` inside the data directory are scratch space; only `blobs/` matters for restores.
+Both trees are content-addressed by SHA-256 (`blobs/<xx>/<rest>`, `sources/<xx>/<rest>`), so a restore is a plain file copy — no paths to rewrite. If a restore leaves a file missing, the daily scrub surfaces it through `twexthub_storage_integrity_errors` and the affected download returns 404.
+
+`tmp/` and `quarantine/` inside the data directory are scratch space; they matter for no restore.
 
 ## Boot-time cleanup
 
 On every start the server reconciles leftover state:
 
-- Staging versions older than an hour are promoted to `pending` or `published` when their blob exists, and removed when it does not. That is crash recovery for publishes interrupted mid-write.
+- Staging versions older than an hour are promoted to `pending` or `published` when their blob and source both exist, and removed when either is missing. That is crash recovery for publishes interrupted mid-write.
 - Temp uploads and quarantined account data older than an hour are swept.
 - Expired sessions and stale rate-limit rows are deleted.
+
+A hard kill mid-publish therefore leaves the registry consistent after the next boot. Between boots, a background job garbage-collects blob files that no database row references (crash residue from deletes) and runs the daily integrity scrub described under Monitoring.
 
 A hard kill mid-publish therefore leaves the registry consistent after the next boot.
 

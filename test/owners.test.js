@@ -1,7 +1,7 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept } from './helpers.mjs';
+import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
 
 let app;
 let sql;
@@ -13,21 +13,15 @@ after(async () => {
   await sql.end();
 });
 
-function manifest(id, version) {
-  return { id, version, license: 'MIT', name: id, description: 'd' };
-}
-
 async function makeSetup() {
   const admin = await signupAndAccept(app, uniqNs());
   const ownerA = await signupAndAccept(app, uniqNs());
   const coowner = await signupAndAccept(app, uniqNs());
   const outsider = await signupAndAccept(app, uniqNs());
 
-  await request(app)
-    .post(`/v1/@${ownerA.user.namespace}/hello/versions`)
-    .set(bearer(ownerA.token))
-    .send({ manifest: manifest('hello', '1.0.0'), code: '// hello@1.0.0' })
-    .expect(201);
+  await publishProject(app, ownerA.user.namespace, 'hello', ownerA.token, {
+    code: '// hello@1.0.0',
+  });
   await request(app)
     .patch(`/v1/@${ownerA.user.namespace}/hello/versions/1.0.0`)
     .set(bearer(admin.token))
@@ -66,11 +60,10 @@ test('adding an owner grants publish/yank/tag access and notifies them', async (
   assert.match(notes.body.data[0].message, /manage @.*\/hello/);
 
   // co-owner publishes and yanks
-  await request(app)
-    .post(`/v1/@${ns}/hello/versions`)
-    .set(bearer(coowner.token))
-    .send({ manifest: manifest('hello', '2.0.0'), code: '// hello@2.0.0' })
-    .expect(201);
+  await publishProject(app, ns, 'hello', coowner.token, {
+    version: '2.0.0',
+    code: '// hello@2.0.0',
+  });
   await request(app)
     .delete(`/v1/@${ns}/hello/versions/2.0.0`)
     .set(bearer(coowner.token))
@@ -84,11 +77,17 @@ test('adding an owner grants publish/yank/tag access and notifies them', async (
     .expect(204);
 
   // ...but a fresh outsider still cannot
-  await request(app)
-    .post(`/v1/@${ns}/hello/versions`)
-    .set(bearer(outsider.token))
-    .send({ manifest: manifest('hello', '3.0.0'), code: '// x' })
-    .expect(403);
+  await publishProject(
+    app,
+    ns,
+    'hello',
+    outsider.token,
+    {
+      version: '3.0.0',
+      code: '// x',
+    },
+    403,
+  );
 
   // removing an owner revokes the grant and notifies
   await request(app)
@@ -99,11 +98,17 @@ test('adding an owner grants publish/yank/tag access and notifies them', async (
   const after = await request(app).get(`/v1/@${ns}/hello/owners`).expect(200);
   assert.ok(!after.body.data.some((u) => u.namespace === coowner.user.namespace));
 
-  await request(app)
-    .post(`/v1/@${ns}/hello/versions`)
-    .set(bearer(coowner.token))
-    .send({ manifest: manifest('hello', '3.0.0'), code: '// x' })
-    .expect(403);
+  await publishProject(
+    app,
+    ns,
+    'hello',
+    coowner.token,
+    {
+      version: '3.0.0',
+      code: '// x',
+    },
+    403,
+  );
 
   // admin can still hand management around (transfer: grant then remove)
   await request(app)

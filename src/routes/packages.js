@@ -1,21 +1,21 @@
 import { existsSync, rmSync } from 'node:fs';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import express, { Router } from 'express';
 import semver from 'semver';
+import YAML from 'yaml';
 import { requireAuth, requireScope } from '../auth.js';
 import { conflict, forbidden, HttpError, fieldErrors, notFound } from '../errors.js';
 import {
   buildSearchText,
   compareSemver,
-  isPlainObject,
   isValidExtensionId,
   isValidNamespace,
   maxVersionBySemver,
   normalizeSemver,
 } from '../util.js';
-import { extensionDetailFromRow, versionToObject } from '../serialize.js';
+import { extensionDetailFromRow, sourceUrl, versionToObject } from '../serialize.js';
 import {
   addedAsOwnerMessage,
   notifyUser,
@@ -25,11 +25,15 @@ import {
 } from '../notify.js';
 import { requireObjectBody } from './shared.js';
 import { blobPathFor, removeBlobIfUnused, sha256Hex, sha512Base64, storeBlob } from '../blobs.js';
+import { sourcePathFor, removeSourceIfUnused, storeSource } from '../sources.js';
+import { manifestFromProject } from '../project-manifest.js';
+import { extractTarballBuffer } from '../tarball.js';
+import { compileProject } from '../compiler.js';
 import { totalDownloads } from '../metrics.js';
 import { makeWebhooks, WebhookInputError } from '../webhooks.js';
 import { audit, auditSoon } from '../audit.js';
 
-export function makePackagesRouter({ sql, config, termsGate }) {
+export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
   const router = Router();
   const webhooks = makeWebhooks({ sql });
 
@@ -149,120 +153,138 @@ export function makePackagesRouter({ sql, config, termsGate }) {
   router.post(
     '/@:namespace/:id/versions',
     requireAuth,
-    express.json({ limit: '25mb' }),
+    express.raw({
+      type: ['application/gzip', 'application/octet-stream'],
+      limit: config.limits?.maxSourceBytes ?? 1024 * 1024,
+    }),
     termsGate,
     requireScope('publish'),
+    async (req, res, next) => {
+      try {
+        // Counted per account, not per IP: CI runners often share egress IPs.
+        await rateLimiter.publishCheck(`publish:${req.auth.user.namespace}`)();
+        next();
+      } catch (error) {
+        next(error);
+      }
+    },
     async (req, res) => {
       const { namespace, id } = req.params;
-      requireObjectBody(req);
       if (!isValidExtensionId(id)) {
         throw fieldErrors([{ field: 'id', message: 'Invalid extension id.' }]);
       }
-
-      const { manifest, code } = req.body;
-      const errors = [];
-      if (!isPlainObject(manifest)) {
-        errors.push({ field: 'manifest', message: 'Manifest is required.' });
-      } else {
-        if (!isValidExtensionId(manifest.id)) {
-          errors.push({
-            field: 'manifest.id',
-            message: 'Must match a-z and 0-9, up to 64 characters.',
-          });
-        }
-        if (manifest.id !== id) {
-          errors.push({
-            field: 'manifest.id',
-            message: `Must equal the id in the path ("${id}").`,
-          });
-        }
-        if (!normalizeSemver(manifest.version)) {
-          errors.push({ field: 'manifest.version', message: 'Must be a valid SemVer string.' });
-        }
-        if (typeof manifest.license !== 'string' || manifest.license.length === 0) {
-          errors.push({
-            field: 'manifest.license',
-            message: 'License (SPDX identifier) is required.',
-          });
-        }
-        if (typeof manifest.description !== 'string') {
-          errors.push({ field: 'manifest.description', message: 'Description is required.' });
-        }
-        if (
-          manifest.name !== undefined &&
-          (typeof manifest.name !== 'string' || manifest.name.length === 0)
-        ) {
-          errors.push({
-            field: 'manifest.name',
-            message: 'Must be a non-empty string when provided.',
-          });
-        }
-        if (manifest.author !== undefined && typeof manifest.author !== 'string') {
-          errors.push({ field: 'manifest.author', message: 'Must be a string when provided.' });
-        }
-        for (const color of ['color1', 'color2', 'color3']) {
-          if (
-            manifest[color] !== undefined &&
-            (typeof manifest[color] !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(manifest[color]))
-          ) {
-            errors.push({
-              field: `manifest.${color}`,
-              message: `Must be "#RRGGBB" when provided.`,
-            });
-          }
-        }
-      }
-      if (typeof code !== 'string' || code.length === 0) {
-        errors.push({ field: 'code', message: 'The compiled Twext output is required.' });
-      }
-      if (
-        req.body.visibility !== undefined &&
-        req.body.visibility !== 'public' &&
-        req.body.visibility !== 'private'
-      ) {
-        errors.push({ field: 'visibility', message: 'Must be "public" or "private".' });
-      }
-      if (errors.length > 0) throw fieldErrors(errors);
-
       if (!isValidNamespace(namespace)) throw notFound();
+
+      const visibility = req.query.visibility ?? 'public';
+      if (visibility !== 'public' && visibility !== 'private') {
+        throw fieldErrors([{ field: 'visibility', message: 'Must be "public" or "private".' }]);
+      }
+
+      if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+        throw new HttpError(415, {
+          title: 'Unsupported Media Type',
+          detail:
+            'Publish a gzip tarball (application/gzip) containing twext.yml, src/, and a package.json with "type": "module".',
+        });
+      }
+      const tarball = req.body;
+
       const owner = await loadNamespaceAccount(namespace);
       if (!owner) throw notFound('No such publishing account.');
       if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
         throw forbidden('You can only publish to an extension you own.');
       }
 
-      // Size caps: per-blob, then the account's cumulative quota (their own
-      // override when set, otherwise the configured default).
-      const codeBytes = Buffer.byteLength(code, 'utf8');
-      const maxBlob = config.limits?.maxBlobBytes ?? 2 * 1024 * 1024;
-      if (codeBytes > maxBlob) {
+      const maxSource = config.limits?.maxSourceBytes ?? 1024 * 1024;
+      if (tarball.length > maxSource) {
         throw new HttpError(413, {
           title: 'Payload Too Large',
-          detail: `Compiled output is ${codeBytes} bytes; the limit is ${maxBlob}.`,
+          detail: `Source tarball is ${tarball.length} bytes; the limit is ${maxSource}.`,
         });
       }
-      const quota = owner.max_blob_bytes ?? config.limits?.maxAccountBlobBytes ?? 64 * 1024 * 1024;
-      if (Number(owner.blob_bytes ?? 0) + codeBytes > quota) {
-        throw new HttpError(413, {
-          title: 'Payload Too Large',
-          detail: `Publishing ${codeBytes} bytes would exceed the ${quota}-byte storage quota for @${owner.namespace}.`,
-        });
+
+      const jobDir = await mkdtemp(path.join(config.dataDir, 'tmp', 'build-'));
+      let manifest;
+      let buildLog;
+      let compiled;
+      try {
+        const projectDir = path.join(jobDir, 'project');
+        await mkdir(projectDir, { recursive: true });
+        try {
+          await extractTarballBuffer(tarball, projectDir, {
+            maxTotalBytes: maxSource * 16,
+          });
+        } catch (error) {
+          throw new HttpError(422, {
+            title: 'Invalid Tarball',
+            detail: error.message,
+          });
+        }
+
+        let projectText;
+        try {
+          projectText = await readFile(path.join(projectDir, 'twext.yml'), 'utf8');
+        } catch {
+          throw fieldErrors([
+            { field: 'twext.yml', message: 'The tarball must contain a twext.yml project file.' },
+          ]);
+        }
+        let projectConfig;
+        try {
+          projectConfig = YAML.parse(projectText) ?? {};
+        } catch (error) {
+          throw fieldErrors([
+            { field: 'twext.yml', message: `twext.yml is not valid YAML: ${error.message}` },
+          ]);
+        }
+        const derived = manifestFromProject(projectConfig, id);
+        if (derived.errors.length > 0) throw fieldErrors(derived.errors);
+        manifest = derived.manifest;
+
+        const build = await compileProject(config, projectDir);
+        buildLog = build.log;
+        if (!build.ok) {
+          throw new HttpError(422, {
+            title: 'Build Failed',
+            detail: build.error,
+            extra: { buildLog, buildError: build.error },
+          });
+        }
+        compiled = build.code;
+
+        // Size caps: per-blob, then the account's cumulative quota (their own
+        // override when set, otherwise the configured default). Both the served
+        // blob and the retained source count toward the quota.
+        const codeBytes = compiled.length;
+        const maxBlob = config.limits?.maxBlobBytes ?? 2 * 1024 * 1024;
+        if (codeBytes > maxBlob) {
+          throw new HttpError(413, {
+            title: 'Payload Too Large',
+            detail: `Compiled output is ${codeBytes} bytes; the limit is ${maxBlob}.`,
+          });
+        }
+        const quota =
+          owner.max_blob_bytes ?? config.limits?.maxAccountBlobBytes ?? 64 * 1024 * 1024;
+        const charge = codeBytes + tarball.length;
+        if (Number(owner.blob_bytes ?? 0) + charge > quota) {
+          throw new HttpError(413, {
+            title: 'Payload Too Large',
+            detail: `Publishing ${charge} bytes would exceed the ${quota}-byte storage quota for @${owner.namespace}.`,
+          });
+        }
+      } finally {
+        await rm(jobDir, { recursive: true, force: true });
       }
 
       const row = await publishVersion(sql, config, owner, {
         id,
         manifest,
-        code,
-        visibility: req.body.visibility,
+        code: compiled,
+        sourceBuffer: tarball,
+        buildLog,
+        visibility,
         stagedBy: req.auth.user,
       });
-      auditSoon(
-        sql,
-        req.auth.user,
-        'version.publish',
-        { namespace, id, version: row.version },
-        { status: row.status, visibility: row.visibility, bytes: codeBytes },
-      );
       if (row.status === 'published') {
         void webhooks.scheduleFor(namespace, id, 'version.published', {
           version: row.version,
@@ -270,7 +292,13 @@ export function makePackagesRouter({ sql, config, termsGate }) {
           actor: req.auth.user.namespace,
         });
       }
-      res.status(201).json(versionToObject(row, config));
+      res.status(201).json({
+        ...versionToObject(row, config),
+        ...(buildLog ? { buildLog } : {}),
+        ...(row.source_path
+          ? { sourceUrl: sourceUrl(config, row.namespace, row.extension_id, row.version) }
+          : {}),
+      });
     },
   );
 
@@ -554,7 +582,12 @@ export function makePackagesRouter({ sql, config, termsGate }) {
     res.status(204).end();
   });
 
-  router.get('/@:namespace/:id/versions/:version/download', async (req, res) => {
+  router.get('/@:namespace/:id/versions/:version/download', async (req, res, next) => {
+    try {
+      await rateLimiter.downloadCheck(`download:${req.ip}`)();
+    } catch (error) {
+      return next(error);
+    }
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     const row = await resolveVersion(req.params);
@@ -579,6 +612,31 @@ export function makePackagesRouter({ sql, config, termsGate }) {
       throw notFound('Compiled output is missing.');
     }
   });
+
+  router.get(
+    '/@:namespace/:id/versions/:version/source',
+    requireAuth,
+    termsGate,
+    async (req, res) => {
+      const { namespace, id } = req.params;
+      if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+      if (req.auth.tokenType !== 'session') {
+        throw forbidden('Automation tokens cannot access this endpoint.');
+      }
+      if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
+        throw notFound('Only an owner or an admin can fetch the source.');
+      }
+      const row = await resolveVersion(req.params);
+      if (!row.source_path || !row.source_digest) {
+        throw notFound('Source is unavailable for this version.');
+      }
+      const abs = sourcePathFor(config.dataDir, row.source_digest);
+      if (!existsSync(abs)) throw notFound('Source is missing.');
+      res.type('application/gzip');
+      res.set('Content-Disposition', `attachment; filename="${id}-${row.version}.tgz"`);
+      res.sendFile(abs);
+    },
+  );
 
   router.get('/@:namespace/:id/owners', async (req, res) => {
     const { namespace, id } = req.params;
@@ -845,7 +903,8 @@ export function makePackagesRouter({ sql, config, termsGate }) {
           throw forbidden('You can only delete your own extensions.');
         }
         rows = await reserved`
-          SELECT blob_digest, blob_path, status, blob_size, visibility FROM versions
+          SELECT blob_digest, blob_path, status, blob_size, visibility, source_digest, source_size
+          FROM versions
           WHERE namespace = ${namespace} AND extension_id = ${id}
         `;
         if (rows.length === 0) throw notFound();
@@ -854,7 +913,10 @@ export function makePackagesRouter({ sql, config, termsGate }) {
         }
         await reserved`DELETE FROM versions WHERE namespace = ${namespace} AND extension_id = ${id}`;
         // Refund the account's quota for every byte this extension charged.
-        const charged = rows.reduce((sum, row) => sum + Number(row.blob_size ?? 0), 0);
+        const charged = rows.reduce(
+          (sum, row) => sum + Number(row.blob_size ?? 0) + Number(row.source_size ?? 0),
+          0,
+        );
         if (charged > 0) {
           const [account] = await reserved`SELECT id FROM users WHERE namespace = ${namespace}`;
           if (account) {
@@ -882,6 +944,10 @@ export function makePackagesRouter({ sql, config, termsGate }) {
           }
         }),
       );
+      const dedupedSources = new Set(rows.map((row) => row.source_digest).filter(Boolean));
+      await Promise.all(
+        [...dedupedSources].map((digest) => removeSourceIfUnused(sql, config, digest)),
+      );
       auditSoon(
         sql,
         req.auth.user,
@@ -889,7 +955,10 @@ export function makePackagesRouter({ sql, config, termsGate }) {
         { namespace, id },
         {
           versions: rows.length,
-          bytesRefunded: rows.reduce((sum, row) => sum + Number(row.blob_size ?? 0), 0),
+          bytesRefunded: rows.reduce(
+            (sum, row) => sum + Number(row.blob_size ?? 0) + Number(row.source_size ?? 0),
+            0,
+          ),
         },
       );
       res.status(204).end();
@@ -905,10 +974,15 @@ export function makePackagesRouter({ sql, config, termsGate }) {
   return router;
 }
 
-async function publishVersion(sql, config, owner, { id, manifest, code, visibility, stagedBy }) {
+async function publishVersion(
+  sql,
+  config,
+  owner,
+  { id, manifest, code, sourceBuffer, buildLog, visibility, stagedBy },
+) {
   const version = normalizeSemver(manifest.version);
   const name = typeof manifest.name === 'string' && manifest.name.length > 0 ? manifest.name : id;
-  const codeBuffer = Buffer.from(code, 'utf8');
+  const codeBuffer = code;
   const digest = sha256Hex(codeBuffer);
   const sha512 = sha512Base64(codeBuffer);
   const blobRelative = path.join('blobs', digest.slice(0, 2), digest.slice(2));
@@ -930,7 +1004,10 @@ async function publishVersion(sql, config, owner, { id, manifest, code, visibili
   try {
     await writeFile(tmpPath, codeBuffer);
 
-    const staged = await sql.begin(async (tx) => {
+    // The source tarball is only stored once the uniqueness checks commit, so
+    // a lower/duplicate publish never leaves an orphaned source file.
+    let staged;
+    await sql.begin(async (tx) => {
       // Serialize per namespace/extension so concurrent publishes cannot both
       // validate against the same ceiling snapshot.
       await tx`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
@@ -954,17 +1031,19 @@ async function publishVersion(sql, config, owner, { id, manifest, code, visibili
         });
       }
 
-      const [staged] = await tx`
+      const [recorded] = await tx`
         INSERT INTO versions (
           owner_id, namespace, extension_id, version, status,
           name, license, description, author, color1, color2, color3,
-          blob_path, blob_digest, blob_size, blob_sha512, search_text, visibility
+          blob_path, blob_digest, blob_size, blob_sha512, search_text, visibility,
+          source_size, build_log
         ) VALUES (
           ${credentialOwner.id}, ${owner.namespace}, ${id}, ${version}, 'staging',
           ${name}, ${manifest.license}, ${manifest.description}, ${manifest.author ?? null},
           ${manifest.color1 ?? null}, ${manifest.color2 ?? null}, ${manifest.color3 ?? null},
           ${blobRelative}, ${digest}, ${codeBuffer.length}, ${sha512}, ${searchText},
-          ${visibility === 'private' ? 'private' : 'public'}
+          ${visibility === 'private' ? 'private' : 'public'},
+          ${sourceBuffer.length}, ${buildLog}
         )
         RETURNING *
       `;
@@ -973,21 +1052,26 @@ async function publishVersion(sql, config, owner, { id, manifest, code, visibili
         VALUES (${owner.id}, ${owner.namespace}, ${id}, ${owner.id})
         ON CONFLICT (namespace, extension_id, owner_id) DO NOTHING
       `;
-      // Charge the blob bytes to the namespace account. Identical content is
-      // re-charged per version row; deleting a version refunds its bytes.
+      // Charge the blob and source bytes to the namespace account. Identical
+      // content is re-charged per version row; deleting a version refunds it.
       await tx`
-        UPDATE users SET blob_bytes = blob_bytes + ${codeBuffer.length}
+        UPDATE users SET blob_bytes = blob_bytes + ${codeBuffer.length + sourceBuffer.length}
         WHERE id = ${owner.id}
       `;
-      return staged;
+      staged = recorded;
     });
 
-    // The staging row commits before the blob is placed: uniqueness checks in
-    // the transaction reject duplicate/lower-version publishes, so only the
-    // committed version may write its blob. A crash before blob placement
-    // leaves a staging row that reconcileOnBoot promotes once its blob exists
-    // or removes when the blob is missing; promoting before storing the blob
-    // would let a rolled-back request reach a later status.
+    // The staging row commits before either artifact is placed: uniqueness
+    // checks in the transaction reject duplicate/lower-version publishes, so
+    // only the committed version may write its blob and source. A crash before
+    // they are placed leaves a staging row that reconcileOnBoot promotes once
+    // both exist or removes when either is missing.
+    const source = await storeSource(config.dataDir, sourceBuffer);
+    await sql`
+      UPDATE versions
+      SET source_path = ${source.path}, source_digest = ${source.digest}
+      WHERE id = ${staged.id}
+    `;
     await storeBlob(config.dataDir, tmpPath, codeBuffer);
 
     const row = await sql.begin(async (tx) => {
@@ -998,6 +1082,20 @@ async function publishVersion(sql, config, owner, { id, manifest, code, visibili
         WHERE id = ${staged.id}
         RETURNING *
       `;
+      // The audit commits with the promotion so a pending publish is never
+      // recorded until it sticks, and the write can never race a reset.
+      await audit(
+        tx,
+        stagedBy,
+        'version.publish',
+        { namespace: owner.namespace, id, version: staged.version },
+        {
+          status: finalStatus,
+          visibility,
+          bytes: codeBuffer.length,
+          sourceBytes: sourceBuffer.length,
+        },
+      );
       return promoted[0];
     });
     if (!row) {

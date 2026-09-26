@@ -1,26 +1,32 @@
 import { normalizeApiRoot } from './util.js';
 
-// An uploaded image is reported as this account's own canonical path so every
+// An uploaded image is reported as this account's own canonical URL so every
 // consumer -- the web UI, an extension fetching a profile, anything that only
 // reads the serialized user -- resolves it without knowing that uploads exist.
-// The path is built from the configured api root rather than a hardcoded "/v1"
-// so a deployment that mounts the API elsewhere still emits a working URL.
-function profileImagePath(apiRoot, namespace, kind) {
-  return `/${normalizeApiRoot(apiRoot)}/users/${namespace}/${kind}`;
+//
+// It is absolute, and built from publicBaseUrl and the configured api root the
+// same way downloadUrl is, for the same reason: the web client is usually served
+// from a different origin than the API, often behind a path the instance cannot
+// see, so a relative path here is resolved against the web origin and points at
+// nothing. A hardcoded "/v1" would also break a deployment that mounts the API
+// elsewhere.
+function profileImagePath(config, namespace, kind) {
+  const root = normalizeApiRoot(config.apiRoot);
+  return `${config.publicBaseUrl.replace(/\/$/, '')}${root ? `/${root}` : ''}/users/${namespace}/${kind}`;
 }
 
 // An account can hold an upload and a URL at once, and the upload is what the
 // instance serves. A URL is the fallback, kept so that removing an upload does
 // not leave the account with no image, and it is also the pointer a consumer can
 // read to find the original file the account linked to.
-function imageUrl(row, kind, apiRoot) {
+function imageUrl(row, kind, config) {
   const digest = kind === 'avatar' ? row.avatar_blob_digest : row.banner_blob_digest;
-  if (digest) return profileImagePath(apiRoot, row.namespace, kind);
+  if (digest) return profileImagePath(config, row.namespace, kind);
   const external = kind === 'avatar' ? row.avatar_url : row.banner_url;
   return external ?? null;
 }
 
-export function userToObject(row, apiRoot) {
+export function userToObject(row, config) {
   return {
     namespace: row.namespace,
     displayName: row.display_name,
@@ -29,8 +35,8 @@ export function userToObject(row, apiRoot) {
     bio: row.bio ?? '',
     website: row.website ?? null,
     github: row.github ?? null,
-    avatarUrl: imageUrl(row, 'avatar', apiRoot),
-    bannerUrl: imageUrl(row, 'banner', apiRoot),
+    avatarUrl: imageUrl(row, 'avatar', config),
+    bannerUrl: imageUrl(row, 'banner', config),
     createdAt: row.created_at.toISOString(),
     termsAcceptedVersion: row.terms_accepted_version ?? null,
   };

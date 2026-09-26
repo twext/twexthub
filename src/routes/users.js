@@ -40,12 +40,12 @@ export function makeUsersRouter({ sql, config, termsGate }) {
   function serializePublicUser(row, req) {
     const isOwner = req.auth?.user.namespace === row.namespace;
     const isAdmin = req.auth?.user.role === 'admin';
-    if (isOwner || isAdmin) return userToObject(row, config.apiRoot);
+    if (isOwner || isAdmin) return userToObject(row, config);
     const {
       role: _role,
       termsAcceptedVersion: _terms,
       ...rest
-    } = userToObject(row, config.apiRoot);
+    } = userToObject(row, config);
     return rest;
   }
 
@@ -145,7 +145,7 @@ export function makeUsersRouter({ sql, config, termsGate }) {
           await removeProfileImageBlob(sql, config, stored.previous, target.id);
         }
         const [updated] = await sql`SELECT * FROM users WHERE id = ${target.id}`;
-        res.json(userToObject(updated, config.apiRoot));
+        res.json(userToObject(updated, config));
       } catch (error) {
         if (error?.type === 'entity.too.large') {
           throw payloadTooLarge(
@@ -181,7 +181,7 @@ export function makeUsersRouter({ sql, config, termsGate }) {
         RETURNING *
       `;
       if (digest) await removeProfileImageBlob(sql, config, digest, target.id);
-      res.json(userToObject(updated, config.apiRoot));
+      res.json(userToObject(updated, config));
     },
   ];
 
@@ -351,7 +351,7 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     });
     if (!updated) throw notFound();
 
-    res.json(userToObject(updated, config.apiRoot));
+    res.json(userToObject(updated, config));
   });
 
   router.delete('/:namespace', requireSession, async (req, res) => {

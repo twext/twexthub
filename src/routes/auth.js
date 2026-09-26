@@ -76,7 +76,7 @@ export function makeAuthRouter({ sql, config, rateLimiter }) {
       throw error;
     }
 
-    res.status(201).json({ user: userToObject(user, config.apiRoot), token });
+    res.status(201).json({ user: userToObject(user, config), token });
   });
 
   router.post('/login', async (req, res) => {
@@ -103,7 +103,7 @@ export function makeAuthRouter({ sql, config, rateLimiter }) {
     }
 
     const token = await createSession(sql, user.id);
-    res.json({ user: userToObject(user, config.apiRoot), token });
+    res.json({ user: userToObject(user, config), token });
   });
 
   router.post('/logout', requireAuth, async (req, res) => {
@@ -117,7 +117,7 @@ export function makeAuthRouter({ sql, config, rateLimiter }) {
   });
 
   router.get('/me', requireAuth, (req, res) => {
-    res.json(userToObject(req.auth.user, config.apiRoot));
+    res.json(userToObject(req.auth.user, config));
   });
 
   return router;

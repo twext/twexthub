@@ -106,7 +106,7 @@ describe('uploading a profile image', () => {
     const ns = await account();
     const res = await put(ns, 'avatar', pngBytes(), 'image/png');
     assert.equal(res.status, 200);
-    assert.equal(res.body.avatarUrl, `/v1/users/${ns}/avatar`);
+    assert.equal(res.body.avatarUrl, `${config.publicBaseUrl}/v1/users/${ns}/avatar`);
 
     const [row] = await sql`SELECT * FROM users WHERE namespace = ${ns}`;
     assert.match(row.avatar_blob_digest, /^[0-9a-f]{64}$/);
@@ -119,7 +119,7 @@ describe('uploading a profile image', () => {
     const ns = await account();
     const res = await put(ns, 'banner', pngBytes(), 'image/png');
     assert.equal(res.status, 200);
-    assert.equal(res.body.bannerUrl, `/v1/users/${ns}/banner`);
+    assert.equal(res.body.bannerUrl, `${config.publicBaseUrl}/v1/users/${ns}/banner`);
   });
 
   test('deduplicates identical uploads across accounts', async () => {
@@ -148,7 +148,7 @@ describe('uploading a profile image', () => {
     assert.equal(row.avatar_url, 'https://cdn.example/old.png');
     assert.ok(row.avatar_blob_digest);
     // The upload is what a visitor is shown, not the linked file.
-    assert.equal(res.body.avatarUrl, `/v1/users/${ns}/avatar`);
+    assert.equal(res.body.avatarUrl, `${config.publicBaseUrl}/v1/users/${ns}/avatar`);
     const served = await request(app).get(`/v1/users/${ns}/avatar`);
     assert.equal(served.status, 200);
     assert.equal(served.headers['content-type'], 'image/png');
@@ -364,7 +364,7 @@ describe('swapping one image source for another', () => {
     assert.ok(existsSync(stored));
     // The upload is still what the profile reports, so the URL only takes over
     // once the upload is removed.
-    assert.equal(res.body.avatarUrl, `/v1/users/${ns}/avatar`);
+    assert.equal(res.body.avatarUrl, `${config.publicBaseUrl}/v1/users/${ns}/avatar`);
   });
 
   test('falls back to the URL once the upload is removed', async () => {
@@ -468,7 +468,7 @@ describe('visibility', () => {
     await put(ns, 'avatar', pngBytes(), 'image/png');
     const res = await request(app).get(`/v1/users/${ns}`);
     assert.equal(res.status, 200);
-    assert.equal(res.body.avatarUrl, `/v1/users/${ns}/avatar`);
+    assert.equal(res.body.avatarUrl, `${config.publicBaseUrl}/v1/users/${ns}/avatar`);
   });
 
   test('includes it in the auth payload, so the UI needs no second fetch', async () => {
@@ -478,7 +478,7 @@ describe('visibility', () => {
       .get('/v1/auth/me')
       .set(bearer(tokens.get(ns)));
     assert.equal(res.status, 200);
-    assert.equal(res.body.avatarUrl, `/v1/users/${ns}/avatar`);
+    assert.equal(res.body.avatarUrl, `${config.publicBaseUrl}/v1/users/${ns}/avatar`);
   });
 
   test('carries the other profile fields the auth payload used to drop', async () => {

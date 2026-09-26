@@ -1,7 +1,7 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept } from './helpers.mjs';
+import { boot, resetDb, bearer, uniqNs, signupAndAccept, FIXTURE_PASSWORD } from './helpers.mjs';
 
 let app;
 before(async () => {
@@ -25,7 +25,7 @@ test('sessions lists only the current session for a user', async () => {
   // a second session appears for the same user
   const r = await request(app)
     .post('/v1/auth/login')
-    .send({ namespace: ns, password: 'password123' })
+    .send({ namespace: ns, password: FIXTURE_PASSWORD })
     .expect(200);
   const secondToken = r.body.token;
 
@@ -39,7 +39,7 @@ test('deleting a session revokes it', async () => {
 
   const login = await request(app)
     .post('/v1/auth/login')
-    .send({ namespace: ns, password: 'password123' })
+    .send({ namespace: ns, password: FIXTURE_PASSWORD })
     .expect(200);
   const secondToken = login.body.token;
 

@@ -1,7 +1,15 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signup, signupAccept } from './helpers.mjs';
+import {
+  boot,
+  resetDb,
+  bearer,
+  uniqNs,
+  signup,
+  signupAccept,
+  FIXTURE_PASSWORD,
+} from './helpers.mjs';
 
 let app;
 before(async () => {
@@ -57,7 +65,7 @@ test('logout revokes the current session', async () => {
   await request(app).get('/v1/auth/me').set(bearer(token)).expect(401);
   const login = await request(app)
     .post('/v1/auth/login')
-    .send({ namespace: user.namespace, password: 'password123' })
+    .send({ namespace: user.namespace, password: FIXTURE_PASSWORD })
     .expect(200);
   assert.ok(login.body.token);
 });

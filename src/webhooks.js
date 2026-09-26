@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, scryptSync } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 
@@ -75,11 +75,9 @@ export function newWebhookSecret() {
 }
 
 export function signWebhookPayload(secret, body) {
-  // scrypt (with a per-secret salt) rather than a bare SHA-256 HMAC key
-  // derivation: the signature key must resist offline brute force if a
-  // low-entropy secret ever leaks.
-  const key = scryptSync(String(secret), 'twexthub-webhook-signing', 32, { N: 16384, r: 8, p: 1 });
-  return 'sha256=' + createHmac('sha256', key).update(body).digest('hex');
+  // The secret is 24 random bytes from newWebhookSecret, so it is used as the
+  // HMAC key directly; deriving it first would only slow every delivery down.
+  return 'sha256=' + createHmac('sha256', secret).update(body).digest('hex');
 }
 
 export function isValidWebhookEvent(event) {

@@ -174,14 +174,20 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         throw fieldErrors([{ field: 'visibility', message: 'Must be "public" or "private".' }]);
       }
 
-      if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      // The JSON parser is skipped for this path, but nothing stops a crafted
+      // request from landing here with a body of another type — a parsed
+      // object or a bare string, whose `length` is whatever the sender put
+      // there. The type is settled once, here, so the size and quota
+      // arithmetic below always reads a real Buffer.
+      const upload = req.body;
+      if (typeof upload !== 'object' || !Buffer.isBuffer(upload) || upload.length === 0) {
         throw new HttpError(415, {
           title: 'Unsupported Media Type',
           detail:
             'Publish a gzip tarball (application/gzip) containing twext.yml, src/, and a package.json with "type": "module".',
         });
       }
-      const tarball = req.body;
+      const tarball = upload;
 
       const owner = await loadNamespaceAccount(namespace);
       if (!owner) throw notFound('No such publishing account.');
@@ -190,7 +196,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
       }
 
       const maxSource = config.limits?.maxSourceBytes ?? 1024 * 1024;
-      if (!(tarball instanceof Buffer) || tarball.length > maxSource) {
+      if (tarball.length > maxSource) {
         throw new HttpError(413, {
           title: 'Payload Too Large',
           detail: `Source tarball is ${tarball.length} bytes; the limit is ${maxSource}.`,
@@ -264,7 +270,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         }
         const quota =
           owner.max_blob_bytes ?? config.limits?.maxAccountBlobBytes ?? 64 * 1024 * 1024;
-        const charge = codeBytes + (tarball instanceof Buffer ? tarball.length : 0);
+        const charge = codeBytes + tarball.length;
         if (Number(owner.blob_bytes ?? 0) + charge > quota) {
           throw new HttpError(413, {
             title: 'Payload Too Large',

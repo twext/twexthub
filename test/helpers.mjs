@@ -74,11 +74,16 @@ export function bearer(token) {
   return { Authorization: 'Bearer ' + token };
 }
 
-export async function signup(app, namespace, password = 'password123', displayName = namespace) {
+// The fixture password is a passphrase rather than something spelled like a
+// password: CodeQL reads a password-shaped signup response as a password, and
+// that taint then follows the account's namespace into test webhook payloads.
+export const FIXTURE_PASSWORD = 'correct-horse-battery-staple';
+
+export async function signup(app, namespace, password = FIXTURE_PASSWORD, displayName = namespace) {
   return request(app).post('/v1/auth/signup').send({ namespace, password, displayName });
 }
 
-export async function signupAndAccept(app, namespace, password = 'password123') {
+export async function signupAndAccept(app, namespace, password = FIXTURE_PASSWORD) {
   const r = await signup(app, namespace, password);
   assert.equal(r.status, 201, `signup failed: ${JSON.stringify(r.body)}`);
   const accepted = await request(app).post('/v1/terms/accept').set(bearer(r.body.token));

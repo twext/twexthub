@@ -264,13 +264,12 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     CC0: '#777',
   };
 
+  const XML_ENTITIES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' };
+
+  // One pass over every metacharacter, so the ampersands introduced by the
+  // earlier entities are not escaped again.
   function xmlEscape(value) {
-    return String(value)
-      .replaceAll('&', '&amp;')
-      .replaceAll('<', '&lt;')
-      .replaceAll('>', '&gt;')
-      .replaceAll('"', '&quot;')
-      .replaceAll("'", '&apos;');
+    return String(value).replace(/[&<>"']/g, (ch) => XML_ENTITIES[ch]);
   }
 
   router.get('/badge/@:namespace/:id', async (req, res) => {

@@ -1,7 +1,7 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept } from './helpers.mjs';
+import { boot, resetDb, bearer, uniqNs, signupAndAccept, FIXTURE_PASSWORD } from './helpers.mjs';
 
 let app;
 before(async () => {
@@ -60,7 +60,7 @@ test('changing password revokes existing sessions and tokens', async () => {
   await request(app)
     .patch(`/v1/users/${ns}`)
     .set(bearer(token))
-    .send({ password: 'newpassword9', currentPassword: 'password123' })
+    .send({ password: 'newpassword9', currentPassword: FIXTURE_PASSWORD })
     .expect(200);
 
   await request(app).get('/v1/auth/me').set(bearer(token)).expect(401);
@@ -86,7 +86,7 @@ test('password rotation bypasses terms re-acceptance', async () => {
   const r = await request(app)
     .patch(`/v1/users/${user.namespace}`)
     .set(bearer(token))
-    .send({ password: 'newpassword9', currentPassword: 'password123' });
+    .send({ password: 'newpassword9', currentPassword: FIXTURE_PASSWORD });
   assert.equal(r.status, 200);
 
   const login = await request(app)

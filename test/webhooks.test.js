@@ -57,6 +57,10 @@ async function insertWebhook(ns, url, events) {
 // use a real, publicly-resolving name.
 const PUBLIC_URL = 'https://example.com/twext-hook';
 
+// The receiver below listens on loopback, which the delivery-time policy check
+// refuses; these attempts stand in for an operator with a routable address.
+const allowPrivateUrl = async () => {};
+
 test('creating a webhook returns the secret once; listing never does', async () => {
   const { owner, ns } = await makeOwner();
 
@@ -236,7 +240,7 @@ test('delivery posts the signed payload and records status', async () => {
       RETURNING *
     `;
 
-    const result = await attemptDelivery(sql, { ...delivery, url });
+    const result = await attemptDelivery(sql, { ...delivery, url }, Date.now(), allowPrivateUrl);
     assert.equal(result.ok, true);
     assert.equal(received.length, 1);
     assert.equal(received[0].event, 'version.published');
@@ -273,8 +277,8 @@ test('failed deliveries retry with backoff then mark failed', async () => {
     RETURNING *
   `;
 
-  // DNS for .test fails in the sandbox, so the fetch errors and the retry
-  // bookkeeping runs without a live receiver.
+  // This delivery carries no destination of its own, so the attempt fails on
+  // the check rather than reaching a receiver, and the retry bookkeeping runs.
   const first = await attemptDelivery(sql, delivery);
   assert.equal(first.ok, false);
   const [afterFirst] =
@@ -340,4 +344,25 @@ test('ssrf guard rejects loopback hosts and non-http schemes', async () => {
   await assert.rejects(() => assertPublicWebhookUrl('http://localhost:8080/'), /Localhost/);
   await assert.rejects(() => assertPublicWebhookUrl('http://127.0.0.1:8080/'), /public/);
   await assert.rejects(() => assertPublicWebhookUrl('ftp://hooks.example.test/'), /http or https/);
+});
+
+test('a delivery re-checks the destination and refuses a private address', async () => {
+  const { ns } = await makeOwner();
+  const webhookId = await insertWebhook(ns, 'https://172.31.255.7/hook', ['version.published']);
+  const [delivery] = await sql`
+    INSERT INTO webhook_deliveries (webhook_id, event, payload, body, signature)
+    VALUES (${webhookId}, 'version.published', ${sql.json({ hello: 'world' })}, '{}',
+            'test-signature')
+    RETURNING *
+  `;
+
+  // The row was written while the name resolved to a public address, so only a
+  // check at delivery time can catch the host flipping to a private one.
+  const result = await attemptDelivery(sql, { ...delivery, url: 'http://169.254.169.254/latest' });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /public|address/i);
+  const [after] =
+    await sql`SELECT status, attempt FROM webhook_deliveries WHERE id = ${delivery.id}`;
+  assert.equal(after.status, 'retrying');
+  assert.equal(after.attempt, 1);
 });

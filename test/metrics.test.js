@@ -50,7 +50,7 @@ test('downloads are counted, surfaced, and feed trending', async () => {
   await request(app).get(`/v1/@${ownerNs}/hello/versions/latest/download`).expect(200);
 
   await sql.unsafe(`
-    INSERT INTO download_events (namespace, extension_id, version, user_agent, remote_addr, created_at)
+    INSERT INTO download_events (namespace, extension_id, version, user_agent, ip_hash, created_at)
     SELECT e.namespace, e.extension_id, '1.0.0', 'x', '10.0.0.1',
            now() - INTERVAL '3 days'
     FROM versions e
@@ -129,4 +129,38 @@ test('trending selects a deprecated version when a newer version was yanked', as
   const trending = await request(app).get('/v1/extensions/trending').expect(200);
   assert.equal(trending.body.data.length, 1);
   assert.equal(trending.body.data[0].version, '1.0.0');
+});
+
+test('a download records a keyed hash of the address, never the address', async () => {
+  const { ownerNs } = await makePublished();
+  await request(app).get(`/v1/@${ownerNs}/hello/versions/1.0.0/download`).expect(200);
+  await request(app).get(`/v1/@${ownerNs}/hello/versions/1.0.0/download`).expect(200);
+
+  const readEvents = () => sql`
+    SELECT ip_hash FROM download_events
+    WHERE namespace = ${ownerNs} AND extension_id = 'hello'
+    ORDER BY id
+  `;
+  // The route records the event after it answers, so give the insert a moment.
+  let events = await readEvents();
+  for (let i = 0; i < 50 && events.length < 2; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    events = await readEvents();
+  }
+  assert.equal(events.length, 2);
+  for (const event of events) {
+    assert.ok(event.ip_hash, 'the event still identifies the client');
+    assert.ok(!event.ip_hash.includes('127.0.0.1'), 'the raw loopback address is not stored');
+    assert.equal(event.ip_hash.length, 22);
+  }
+  assert.equal(events[0].ip_hash, events[1].ip_hash, 'the same client hashes the same way');
+
+  // The hash still serves its purpose: one client, one distinct download.
+  await aggregateDay(new Date());
+  const [day] = await sql`
+    SELECT distinct_downloads, total_downloads FROM extension_daily_downloads
+    WHERE namespace = ${ownerNs} AND extension_id = 'hello' AND day = CURRENT_DATE
+  `;
+  assert.equal(Number(day.total_downloads), 2);
+  assert.equal(Number(day.distinct_downloads), 1);
 });

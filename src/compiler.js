@@ -14,6 +14,19 @@ export function compilerCommand(config) {
   return path.join(HERE, '..', 'node_modules', '@twext', 'twext', 'src', 'cli.js');
 }
 
+// Uploaded project code runs in this child, so it gets an allowlist rather than
+// the server's environment: the database URL and any other credential the host
+// passes in stay here. `twext build` needs nothing else to do its job.
+const ALLOWED_ENV = ['PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'TZ'];
+
+export function compilerEnv(env = process.env) {
+  const allowed = { NO_COLOR: '1' };
+  for (const name of ALLOWED_ENV) {
+    if (env[name] !== undefined) allowed[name] = env[name];
+  }
+  return allowed;
+}
+
 function capLog(text) {
   const truncated = text.length - 8;
   if (truncated <= MAX_LOG_BYTES) return text;
@@ -45,8 +58,7 @@ export function compileProject(config, projectDir, { outFile = null } = {}) {
       output,
     ];
 
-    const env = { ...process.env, NO_COLOR: '1' };
-    delete env.NODE_OPTIONS;
+    const env = compilerEnv();
 
     let stdout = '';
     let stderr = '';

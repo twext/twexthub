@@ -57,7 +57,7 @@ async function seedExtensions() {
 
 async function downloadNs(sqlClient, ns, id) {
   await sqlClient`
-    INSERT INTO download_events (namespace, extension_id, version, user_agent, remote_addr)
+    INSERT INTO download_events (namespace, extension_id, version, user_agent, ip_hash)
     VALUES (${ns}, ${id}, '1.0.0', 'test', '10.0.0.9')
   `;
 }

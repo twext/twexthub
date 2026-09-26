@@ -5,7 +5,8 @@ import path from 'node:path';
 import request from 'supertest';
 import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
 import { gcBlobs, scrubBlobs, getIntegrityErrors } from '../src/maintenance.js';
-import { blobPathFor } from '../src/blobs.js';
+import { reconcileOnBoot } from '../src/db.js';
+import { blobPathFor, hashFile } from '../src/blobs.js';
 
 let app;
 let sql;
@@ -98,4 +99,59 @@ test('scrub reports missing and corrupted blobs and updates the error gauge', as
     .get(`/v1/@${owner.user.namespace}/watched/versions/1.0.0/download`)
     .expect(404);
   assert.equal(dl.status, 404);
+});
+
+// A staging row is what a publish interrupted mid-write leaves behind: the
+// digest is already known, since the row commits before the file lands.
+async function insertStaging(namespace, publisherId, id, bytes, { keepBlob }) {
+  const rel = path.join('blobs', 'crash', `${id}.js`);
+  const abs = path.join(config.dataDir, rel);
+  let digest = null;
+  if (keepBlob) {
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, `// ${id}`);
+    digest = await hashFile(abs);
+  }
+  const [row] = await sql`
+    INSERT INTO versions
+      (owner_id, namespace, extension_id, version, status, name, license,
+       description, blob_path, blob_digest, blob_size, created_at)
+    VALUES (${publisherId}, ${namespace}, ${id}, '1.0.0', 'staging', ${id},
+            'MIT', '', ${rel}, ${digest}, ${bytes}, now() - interval '2 hours')
+    RETURNING id, status
+  `;
+  return { ...row, rel, abs };
+}
+
+test('boot reconciliation decides the status from the namespace account', async () => {
+  const owner = await signupAndAccept(app, uniqNs());
+  const helper = await signupAndAccept(app, uniqNs());
+  const ns = owner.user.namespace;
+  const [{ id: helperId }] =
+    await sql`SELECT id FROM users WHERE namespace = ${helper.user.namespace}`;
+  // The namespace account is past its first publish, so new work skips review.
+  await sql`UPDATE users SET has_published = true WHERE namespace = ${ns}`;
+
+  const staging = await insertStaging(ns, helperId, 'crashed', 0, { keepBlob: true });
+  await reconcileOnBoot(sql, config);
+
+  const [row] = await sql`SELECT status, published_at FROM versions WHERE id = ${staging.id}`;
+  assert.equal(row.status, 'published', 'the namespace account, not the publisher, owns the gate');
+  assert.ok(row.published_at, 'a promoted version gets a published_at');
+  fs.rmSync(staging.abs);
+});
+
+test('boot reconciliation refunds the charge when the staging row is dropped', async () => {
+  const owner = await signupAndAccept(app, uniqNs());
+  const ns = owner.user.namespace;
+  const [{ id: ownerId }] = await sql`SELECT id FROM users WHERE namespace = ${ns}`;
+  await sql`UPDATE users SET blob_bytes = 900 WHERE namespace = ${ns}`;
+
+  const staging = await insertStaging(ns, ownerId, 'lost', 900, { keepBlob: false });
+  await reconcileOnBoot(sql, config);
+
+  const rows = await sql`SELECT id FROM versions WHERE id = ${staging.id}`;
+  assert.equal(rows.length, 0, 'an unrecoverable staging row is removed');
+  const [after] = await sql`SELECT blob_bytes FROM users WHERE namespace = ${ns}`;
+  assert.equal(Number(after.blob_bytes), 0, 'the charged bytes come back');
 });

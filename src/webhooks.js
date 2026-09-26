@@ -219,11 +219,23 @@ export async function deliverDue(sql, now = Date.now()) {
   return results;
 }
 
-export async function attemptDelivery(sql, delivery, now = Date.now()) {
+// `checkUrl` is a seam for the test receiver, which listens on loopback; the
+// worker always passes the real check.
+export async function attemptDelivery(
+  sql,
+  delivery,
+  now = Date.now(),
+  checkUrl = assertPublicWebhookUrl,
+) {
   const attempt = delivery.attempt + 1;
   let error = null;
   let ok = false;
   try {
+    // The host passed the check at registration, but DNS answers change: the
+    // name is resolved again here so a delivery or a retry cannot reach an
+    // address the registry would have refused. The window between this check
+    // and the connect is the deployment's to close (see docs/hosting.md).
+    await checkUrl(delivery.url);
     const res = await fetch(delivery.url, {
       method: 'POST',
       headers: {

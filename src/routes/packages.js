@@ -37,7 +37,7 @@ import { sourcePathFor, removeSourceIfUnused, storeSource } from '../sources.js'
 import { manifestFromProject } from '../project-manifest.js';
 import { extractTarballBuffer } from '../tarball.js';
 import { compileProject } from '../compiler.js';
-import { totalDownloads } from '../metrics.js';
+import { totalDownloads, hashDownloadAddress } from '../metrics.js';
 import { makeWebhooks, WebhookInputError } from '../webhooks.js';
 import { audit, auditSoon } from '../audit.js';
 
@@ -609,11 +609,14 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     if (existsSync(abs)) {
       res.type('application/javascript');
       res.sendFile(abs);
+      // Metrics never get in the way of a download, so a failure here costs the
+      // event, not the blob.
+      const ipHash = await hashDownloadAddress(sql, req.ip).catch(() => null);
       void sql`
-        INSERT INTO download_events (namespace, extension_id, version, user_agent, remote_addr)
+        INSERT INTO download_events (namespace, extension_id, version, user_agent, ip_hash)
         VALUES (${row.namespace}, ${row.extension_id}, ${row.version},
                 ${String(req.headers['user-agent'] ?? '').slice(0, 250)},
-                ${req.ip})
+                ${ipHash})
       `.catch(() => {});
     } else {
       throw notFound('Compiled output is missing.');
@@ -881,12 +884,18 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         created_at DESC
     `;
     if (rows.length === 0) throw notFound();
-    if (!(await canSee(req.auth?.user, rows[0]))) throw notFound();
-    const sorted = [...rows].sort((a, b) => compareSemver(b.version, a.version));
-    const top = sorted.find((row) => row.status === 'published') ?? sorted[0];
+    // Visibility is per version, so one public version does not make a private
+    // sibling readable: the response lists only the versions this caller may
+    // see, and the headline is drawn from those.
+    const visible = [];
+    for (const row of [...rows].sort((a, b) => compareSemver(b.version, a.version))) {
+      if (await canSee(req.auth?.user, row)) visible.push(row);
+    }
+    if (visible.length === 0) throw notFound();
+    const top = visible.find((row) => row.status === 'published') ?? visible[0];
     const summary = extensionDetailFromRow(
       top,
-      sorted.map((row) => versionToObject(row, config)),
+      visible.map((row) => versionToObject(row, config)),
     );
     summary.downloads = await totalDownloads(sql, namespace, id);
     res.json(summary);

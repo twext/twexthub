@@ -66,8 +66,12 @@ export async function reconcileOnBoot(sql, config) {
       const sourceAbs = row.source_path ? path.join(dataDir, row.source_path) : null;
       const complete = existsSync(blobAbs) && (!sourceAbs || existsSync(sourceAbs));
       if (complete) {
-        const [owner] = await tx`SELECT has_published FROM users WHERE id = ${row.owner_id}`;
-        const status = owner?.has_published ? 'published' : 'pending';
+        // The namespace account decides the status, same as the live publish
+        // path: a delegated publisher's own history says nothing about whether
+        // this namespace still goes through review.
+        const [account] =
+          await tx`SELECT has_published FROM users WHERE namespace = ${row.namespace}`;
+        const status = account?.has_published ? 'published' : 'pending';
         await tx`
           UPDATE versions
           SET status = ${status}, published_at = ${status === 'published' ? new Date() : null}
@@ -77,6 +81,15 @@ export async function reconcileOnBoot(sql, config) {
           `reconciled staging version ${row.namespace}/${row.extension_id}@${row.version} -> ${status}`,
         );
       } else {
+        // The charge committed with the staging row, so dropping the row has to
+        // give the bytes back the delete path would refund.
+        const charge = Number(row.blob_size ?? 0) + Number(row.source_size ?? 0);
+        if (charge > 0) {
+          await tx`
+            UPDATE users SET blob_bytes = GREATEST(blob_bytes - ${charge}, 0)
+            WHERE namespace = ${row.namespace}
+          `;
+        }
         await tx`DELETE FROM versions WHERE id = ${row.id}`;
         console.log(
           `removed staging version ${row.namespace}/${row.extension_id}@${row.version} (blob or source missing)`,

@@ -10,6 +10,7 @@ import {
   publishProject,
   listTarballFiles,
 } from './helpers.mjs';
+import { compilerEnv } from '../src/compiler.js';
 
 let app;
 let sql;
@@ -234,4 +235,22 @@ test('identical sources produce identical compiled blobs and share a source file
   const secondDetail = await request(app).get(`/v1/@${ns}/echo/versions/2.0.0`).expect(200);
   assert.match(firstDetail.body.dist.digest, /^sha256:/);
   assert.equal(firstDetail.body.dist.digest, secondDetail.body.dist.digest);
+});
+
+test('the compiler child gets an allowlist, not the server environment', () => {
+  const env = compilerEnv({
+    PATH: '/usr/bin',
+    HOME: '/root',
+    TWEXTHUB_DATABASE_URL: 'postgres://user:hunter2@db:5432/twexthub',
+    AWS_SECRET_ACCESS_KEY: 'super-secret',
+    NODE_OPTIONS: '--inspect',
+  });
+  assert.equal(env.PATH, '/usr/bin');
+  assert.equal(env.HOME, '/root');
+  assert.equal(env.NO_COLOR, '1');
+  for (const name of ['TWEXTHUB_DATABASE_URL', 'AWS_SECRET_ACCESS_KEY', 'NODE_OPTIONS']) {
+    assert.equal(env[name], undefined, `${name} must not reach the compiler`);
+  }
+  // Nothing from the host leaks in implicitly either.
+  assert.deepEqual(Object.keys(env).sort(), ['HOME', 'NO_COLOR', 'PATH']);
 });

@@ -13,6 +13,7 @@ TwextHub is a registry for Twext-compiled extensions. Publishers submit compiled
 - [Configuration](#configuration)
 - [Behind a reverse proxy](#behind-a-reverse-proxy)
 - [The build sandbox](#the-build-sandbox)
+- [Webhooks](#webhooks)
 - [Blobs must live on persistent storage](#blobs-must-live-on-persistent-storage)
 - [Monitoring](#monitoring)
 - [Upgrades](#upgrades)
@@ -111,13 +112,19 @@ The hub compiles every publish itself: the uploaded tarball is expanded under `d
 - **Filesystem** — Node's permission model restricts the child to reads and writes inside the extracted project directory plus reads of the server's own `node_modules` (the compiler and its dependencies). A `twext.yml` cannot redirect the output elsewhere; the output path is forced inside the sandbox directory.
 - **Memory** — `compiler.memoryMb` (192 MB default) caps the child's V8 old-generation heap; the child is killed if it grows past that.
 - **Time** — `compiler.timeoutMs` (30 s default) SIGKILLs the child.
-- **No secrets** — the child gets a scrubbed `process.env` minus `NODE_OPTIONS`.
+- **No secrets** — the child receives an allowlist (`PATH`, `HOME`, `TMPDIR`, `TMP`, `TEMP`, `LANG`, `LC_ALL`, `TZ`) instead of the server's environment, so a build cannot read the database URL or any other credential the host passes in.
 
 Node's permission model does not gate outbound sockets, so an extension's build step could attempt network egress. Isolate that at the deployment boundary: run the container with no egress (Docker's `--network none` for a dedicated builder, or an egress firewall), or accept the risk if only moderated accounts can publish. The sandbox prevents code from escaping the box; it does not stop it from calling out.
 
-Operators can substitute their own compiler with `TWEXTHUB_COMPILER` (a binary or script invoked as `<command> build -o <out>`); see the [compiler configuration](configuration.md#compiler).
+Operators can substitute their own compiler with `TWEXTHUB_COMPILER` (a binary or script invoked as `<command> build -o <out>`); see the [compiler configuration](configuration.md#compiler). A substituted compiler gets the same environment allowlist, so a script that needs its own variables must read them from a file it controls.
 
 A failed build rejects the publish with `422` and reports the compiler's output as `buildLog`; nothing is staged. Moderation reviews the source tarball and build log — the queue's `sourceUrl` fetches the exact uploaded bytes — so what an admin approves is what compiles into the served blob.
+
+## Webhooks
+
+Webhook destinations are checked when a publisher registers one: the URL must be `https`, resolve to a public address, and carry no credentials in it. The name is resolved again on every delivery attempt, so a destination whose DNS answers have since turned private is refused before the request goes out.
+
+That re-check narrows the window but does not close it: the address is resolved before the connection, so a host that answers differently to the two lookups can still be reached. Closing it entirely means controlling resolution, which belongs at the deployment boundary — run the instance on a network where outbound requests cannot reach loopback, link-local or private ranges, or resolve through a proxy you operate.
 
 ## Blobs must live on persistent storage
 
@@ -161,7 +168,7 @@ Both trees are content-addressed by SHA-256 (`blobs/<xx>/<rest>`, `sources/<xx>/
 
 On every start the server reconciles leftover state:
 
-- Staging versions older than an hour are promoted to `pending` or `published` when their blob and source both exist, and removed when either is missing. That is crash recovery for publishes interrupted mid-write.
+- Staging versions older than an hour are promoted to `pending` or `published` when their blob and source both exist, and removed when either is missing. That is crash recovery for publishes interrupted mid-write. The namespace account decides between `pending` and `published`, exactly as it does during a live publish, and a removed staging row gets its charged bytes back.
 - Temp uploads and quarantined account data older than an hour are swept.
 - Expired sessions and stale rate-limit rows are deleted.
 

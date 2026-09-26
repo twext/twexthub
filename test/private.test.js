@@ -87,7 +87,7 @@ test('private extensions are hidden from public surfaces but visible to the owne
   // Trending is public, so a private extension with download activity has to
   // stay off it for anonymous callers and show up for the owner.
   await sql`
-    INSERT INTO download_events (namespace, extension_id, version, user_agent, remote_addr)
+    INSERT INTO download_events (namespace, extension_id, version, user_agent, ip_hash)
     VALUES (${ns}, 'secret', '1.0.0', 'test', '10.0.0.1')
   `;
   await aggregateDayLoader(sql)(new Date());
@@ -125,6 +125,38 @@ test('private extensions are hidden from public surfaces but visible to the owne
     .set(bearer(owner.token))
     .expect(200);
   assert.match(src.headers['content-type'], /gzip/);
+});
+
+test('a public version does not expose a private sibling in the detail list', async () => {
+  const admin = await signupAndAccept(app, uniqNs());
+  const owner = await signupAndAccept(app, uniqNs());
+  const ns = owner.user.namespace;
+
+  await publishPrivate({ owner, code: '// private@1.0.0' });
+  await request(app)
+    .patch(`/v1/@${ns}/secret/versions/1.0.0`)
+    .set(bearer(admin.token))
+    .send({ status: 'approved' })
+    .expect(200);
+  await publishProject(app, ns, 'secret', owner.token, { version: '2.0.0', code: '// public' });
+
+  // The extension is public now, but 1.0.0 is still private, so the detail
+  // response has to be built from what this caller may see rather than from
+  // whichever version happens to sort first.
+  const anon = await request(app).get(`/v1/@${ns}/secret`).expect(200);
+  assert.equal(anon.body.versions.length, 1);
+  assert.equal(anon.body.versions[0].version, '2.0.0');
+  assert.ok(
+    !JSON.stringify(anon.body).includes('1.0.0'),
+    'the private version must not appear anywhere in the response',
+  );
+
+  // The owner sees both, which is what makes the check per-version.
+  const asOwner = await request(app).get(`/v1/@${ns}/secret`).set(bearer(owner.token)).expect(200);
+  assert.deepEqual(
+    asOwner.body.versions.map((v) => v.version),
+    ['2.0.0', '1.0.0'],
+  );
 });
 
 test('private downloads do not consume anonymous trending slots', async () => {

@@ -6,6 +6,7 @@ import request from 'supertest';
 import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
 import {
   attemptDelivery,
+  claimDue,
   makeWebhooks,
   signWebhookPayload,
   WEBHOOK_EVENTS,
@@ -41,6 +42,14 @@ async function makeOwner() {
   const ns = owner.user.namespace;
   await publishApproved(ns, owner.token, admin.token, 'hooked', '1.0.0');
   return { admin, owner, ns };
+}
+
+// The worker claims a row before attempting it, and only the claim holder may
+// write the outcome, so a driven attempt has to go through the same claim.
+async function claimOne(id) {
+  const [claimed] = (await claimDue(sql, Date.now())).filter((row) => row.id === id);
+  assert.ok(claimed, `delivery ${id} was not claimable`);
+  return claimed;
 }
 
 // create() blocks loopback and unreachable URLs, so tests that exercise
@@ -289,7 +298,12 @@ test('delivery posts the signed payload and records status', async () => {
       RETURNING *
     `;
 
-    const result = await attemptDelivery(sql, { ...delivery, url }, Date.now(), toLoopbackReceiver);
+    const result = await attemptDelivery(
+      sql,
+      { ...(await claimOne(delivery.id)), url },
+      Date.now(),
+      toLoopbackReceiver,
+    );
     assert.equal(result.ok, true);
     assert.equal(received.length, 1);
     assert.equal(received[0].event, 'version.published');
@@ -334,7 +348,12 @@ test('a delivery connects to the address it validated, not the hostname', async 
       RETURNING *
     `;
 
-    const result = await attemptDelivery(sql, { ...delivery, url }, Date.now(), toLoopbackReceiver);
+    const result = await attemptDelivery(
+      sql,
+      { ...(await claimOne(delivery.id)), url },
+      Date.now(),
+      toLoopbackReceiver,
+    );
     assert.equal(result.ok, true);
     const [after] = await sql`SELECT status FROM webhook_deliveries WHERE id = ${delivery.id}`;
     assert.equal(after.status, 'delivered');
@@ -365,7 +384,7 @@ test('failed deliveries retry with backoff then mark failed', async () => {
 
   // This delivery carries no destination of its own, so the attempt fails on
   // the check rather than reaching a receiver, and the retry bookkeeping runs.
-  const first = await attemptDelivery(sql, delivery);
+  const first = await attemptDelivery(sql, await claimOne(delivery.id));
   assert.equal(first.ok, false);
   const [afterFirst] =
     await sql`SELECT status, attempt, next_attempt_at FROM webhook_deliveries WHERE id = ${delivery.id}`;
@@ -374,17 +393,17 @@ test('failed deliveries retry with backoff then mark failed', async () => {
   assert.ok(afterFirst.next_attempt_at, 'retrying rows must carry a next_attempt_at');
 
   await sql`UPDATE webhook_deliveries SET next_attempt_at = now() WHERE id = ${delivery.id}`;
-  await attemptDelivery(sql, { ...delivery, attempt: 1 });
+  await attemptDelivery(sql, await claimOne(delivery.id));
   const [afterSecond] =
     await sql`SELECT status, attempt FROM webhook_deliveries WHERE id = ${delivery.id}`;
   assert.equal(afterSecond.status, 'retrying');
   await sql`UPDATE webhook_deliveries SET next_attempt_at = now() WHERE id = ${delivery.id}`;
-  await attemptDelivery(sql, { ...delivery, attempt: 2 });
+  await attemptDelivery(sql, await claimOne(delivery.id));
   const [afterThird] =
     await sql`SELECT status, attempt FROM webhook_deliveries WHERE id = ${delivery.id}`;
   assert.equal(afterThird.status, 'retrying');
   await sql`UPDATE webhook_deliveries SET next_attempt_at = now() WHERE id = ${delivery.id}`;
-  await attemptDelivery(sql, { ...delivery, attempt: 3 });
+  await attemptDelivery(sql, await claimOne(delivery.id));
   const [afterFourth] =
     await sql`SELECT status, attempt, next_attempt_at FROM webhook_deliveries WHERE id = ${delivery.id}`;
   assert.equal(afterFourth.status, 'failed');
@@ -446,11 +465,102 @@ test('a delivery re-checks the destination and refuses a private address', async
 
   // The row was written while the name resolved to a public address, so only a
   // check at delivery time can catch the host flipping to a private one.
-  const result = await attemptDelivery(sql, { ...delivery, url: 'https://169.254.169.254/latest' });
+  const result = await attemptDelivery(sql, {
+    ...(await claimOne(delivery.id)),
+    url: 'https://169.254.169.254/latest',
+  });
   assert.equal(result.ok, false);
   assert.match(result.error, /public|address/i);
   const [after] =
     await sql`SELECT status, attempt FROM webhook_deliveries WHERE id = ${delivery.id}`;
   assert.equal(after.status, 'retrying');
   assert.equal(after.attempt, 1);
+});
+
+test('a claimed delivery is not handed to a second worker', async () => {
+  // The old poller selected due rows and only then marked them, so two workers
+  // could read the same pending row and both POST it. The claim has to exclude
+  // rows an in-flight attempt already owns.
+  const { ns } = await makeOwner();
+  const webhookId = await insertWebhook(ns, 'https://198.51.100.9/hook', ['version.published']);
+  const [delivery] = await sql`
+    INSERT INTO webhook_deliveries (webhook_id, event, payload, body, signature)
+    VALUES (${webhookId}, 'version.published', ${sql.json({ hello: 'world' })}, '{}', 'sig')
+    RETURNING id
+  `;
+
+  const first = await claimDue(sql, Date.now());
+  assert.deepEqual(
+    first.map((row) => row.id),
+    [delivery.id],
+  );
+  assert.equal(first[0].status, 'delivering');
+  assert.ok(first[0].next_attempt_at, 'a claimed row carries its lease deadline');
+
+  // A second poll at the same instant -- a peer process, or this worker's own
+  // next tick while the attempt is still open -- must come back empty.
+  assert.equal((await claimDue(sql, Date.now())).length, 0);
+});
+
+test('a delivery stranded as delivering is reclaimed once its lease expires', async () => {
+  // A worker that dies mid-attempt never writes an outcome, so its row would sit
+  // in 'delivering' forever. The lease in next_attempt_at is what releases it.
+  const { ns } = await makeOwner();
+  const webhookId = await insertWebhook(ns, 'https://198.51.100.9/hook', ['version.published']);
+  const [delivery] = await sql`
+    INSERT INTO webhook_deliveries (webhook_id, event, payload, body, signature)
+    VALUES (${webhookId}, 'version.published', ${sql.json({ hello: 'world' })}, '{}', 'sig')
+    RETURNING id
+  `;
+
+  const claimed = (await claimDue(sql, Date.now()))[0];
+  assert.equal(claimed.id, delivery.id);
+
+  // Not yet: the lease is still held.
+  assert.equal((await claimDue(sql, Date.now())).length, 0);
+
+  const [after] =
+    await sql`SELECT status, attempt FROM webhook_deliveries WHERE id = ${delivery.id}`;
+  assert.equal(after.status, 'delivering');
+  assert.equal(after.attempt, 0, 'a claim alone must not count as an attempt');
+
+  // Past the lease: reclaimed for another attempt.
+  await sql`UPDATE webhook_deliveries SET next_attempt_at = now() - interval '1 second'
+            WHERE id = ${delivery.id}`;
+  const reclaimed = await claimDue(sql, Date.now());
+  assert.deepEqual(
+    reclaimed.map((row) => row.id),
+    [delivery.id],
+  );
+});
+
+test('a stale attempt cannot overwrite a delivery another worker has taken', async () => {
+  // The guarded write is what stops the original holder from landing its result
+  // on a row that has since been reclaimed and possibly retried.
+  const { ns } = await makeOwner();
+  const webhookId = await insertWebhook(ns, 'https://172.31.255.7/hook', ['version.published']);
+  const [delivery] = await sql`
+    INSERT INTO webhook_deliveries (webhook_id, event, payload, body, signature)
+    VALUES (${webhookId}, 'version.published', ${sql.json({ hello: 'world' })}, '{}', 'sig')
+    RETURNING *
+  `;
+
+  const claimed = await claimOne(delivery.id);
+  // A peer's lease expired and its re-claim landed first, moving the deadline
+  // and starting that attempt's own bookkeeping.
+  await sql`UPDATE webhook_deliveries SET status = 'delivering', attempt = 2,
+              next_attempt_at = now() + interval '1 minute'
+            WHERE id = ${delivery.id}`;
+
+  // The stale holder now reports failure; it must not be recorded.
+  const result = await attemptDelivery(sql, claimed, Date.now(), async () => {
+    throw new Error('receiver is gone');
+  });
+  assert.equal(result.ok, false);
+
+  const [after] =
+    await sql`SELECT status, attempt, last_error FROM webhook_deliveries WHERE id = ${delivery.id}`;
+  assert.equal(after.status, 'delivering', 'a non-holder must not resolve the row');
+  assert.equal(after.attempt, 2, 'the claim holder attempt count is left alone');
+  assert.equal(after.last_error, null);
 });

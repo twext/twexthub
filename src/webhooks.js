@@ -16,6 +16,10 @@ const RETRY_DELAYS_MS = [0, 5_000, 30_000, 300_000];
 const POLL_INTERVAL_MS = 15_000;
 const DELIVERY_BATCH = 50;
 const DELIVERY_TIMEOUT_MS = 10_000;
+// How long a claimed row stays 'delivering' before another worker may take it.
+// Comfortably past the attempt timeout so a slow-but-live request is never
+// duplicated; it only covers a worker that died mid-attempt.
+const DELIVERY_LEASE_MS = 60_000;
 
 function isPrivateIp(ip) {
   const version = isIP(ip);
@@ -221,17 +225,41 @@ export function makeWebhooks({ sql }) {
   return { create, list, remove, scheduleFor, worker };
 }
 
-export async function deliverDue(sql, now = Date.now()) {
-  const due = await sql`
-    SELECT d.*, w.url, w.active
-    FROM webhook_deliveries d JOIN webhooks w ON w.id = d.webhook_id
-    WHERE d.status IN ('pending', 'retrying')
-      AND (d.next_attempt_at IS NULL OR d.next_attempt_at <= ${new Date(now).toISOString()})
-    ORDER BY d.next_attempt_at NULLS FIRST
-    LIMIT ${DELIVERY_BATCH}
+// Take ownership of the deliveries that are due, up to a batch. Returns them
+// with the webhook's url attached, already flipped to 'delivering'.
+//
+// Selecting due rows and only then updating them left two windows for a second
+// worker -- a second hub process, or the next poll of this one while an attempt
+// is still in flight -- to read the same row and POST the same body twice. The
+// claim takes the rows under FOR UPDATE SKIP LOCKED and parks them as
+// 'delivering' with the lease in next_attempt_at, so a concurrent claim skips
+// them and a worker that dies mid-attempt has its rows picked up once the lease
+// runs out.
+export async function claimDue(sql, now = Date.now(), limit = DELIVERY_BATCH) {
+  return await sql`
+    WITH claimable AS (
+      SELECT d.id
+      FROM webhook_deliveries d
+      WHERE (d.status IN ('pending', 'retrying')
+             AND (d.next_attempt_at IS NULL OR d.next_attempt_at <= ${new Date(now).toISOString()}))
+         OR (d.status = 'delivering' AND d.next_attempt_at <= ${new Date(now).toISOString()})
+      ORDER BY d.next_attempt_at NULLS FIRST
+      LIMIT ${limit}
+      FOR UPDATE SKIP LOCKED
+    )
+    UPDATE webhook_deliveries d
+    SET status = 'delivering',
+        next_attempt_at = ${new Date(now + DELIVERY_LEASE_MS).toISOString()},
+        updated_at = now()
+    FROM claimable, webhooks w
+    WHERE d.id = claimable.id AND w.id = d.webhook_id
+    RETURNING d.*, w.url, w.active
   `;
+}
+
+export async function deliverDue(sql, now = Date.now()) {
   const results = [];
-  for (const delivery of due) {
+  for (const delivery of await claimDue(sql, now)) {
     results.push(await attemptDelivery(sql, delivery, now));
   }
   return results;
@@ -299,6 +327,10 @@ export async function attemptDelivery(
 
   const retrying = !ok && attempt < delivery.max_attempts;
   const delay = ok ? 0 : (RETRY_DELAYS_MS[attempt] ?? RETRY_DELAYS_MS.at(-1));
+  // Only the claim holder writes the outcome. The lease deadline the claim
+  // stamped is the holder's proof: if the lease ran out and a peer re-claimed
+  // the row, its deadline has moved on, so a late result from the original
+  // attempt is dropped instead of overwriting the newer attempt's work.
   await sql`
     UPDATE webhook_deliveries
     SET status = ${ok ? 'delivered' : retrying ? 'retrying' : 'failed'},
@@ -307,6 +339,8 @@ export async function attemptDelivery(
         next_attempt_at = ${retrying ? new Date(now + delay).toISOString() : null},
         updated_at = now()
     WHERE id = ${delivery.id}
+      AND status = 'delivering'
+      AND next_attempt_at = ${delivery.next_attempt_at}
   `.catch(() => {});
   if (ok || retrying) {
     await sql`

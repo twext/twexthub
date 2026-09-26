@@ -357,16 +357,14 @@ paths:
                     type: ['string', 'null'],
                     maxLength: 400,
                     format: uri,
-                    description: Referenced,
-                    not proxied.,
+                    description: 'Referenced, not proxied.',
                   }
                 bannerUrl:
                   {
                     type: ['string', 'null'],
                     maxLength: 400,
                     format: uri,
-                    description: Referenced,
-                    not proxied.,
+                    description: 'Referenced, not proxied.',
                   }
       responses:
         '200':
@@ -1116,8 +1114,7 @@ paths:
                 message:
                   {
                     type: ['string', 'null'],
-                    description: A non-empty string to set,
-                    or null to clear.,
+                    description: 'A non-empty string to set, or null to clear.',
                   }
       responses:
         '200':
@@ -1427,7 +1424,7 @@ components:
       properties:
         id: { type: string, description: "The notification row's own id, not a hash of any token." }
         kind: { $ref: '#/components/schemas/NotificationKind' }
-        message: { type: string, description: Pre-rendered, human-readable text. }
+        message: { type: string, description: 'Pre-rendered, human-readable text.' }
         payload:
           type: object
           description: >-
@@ -1639,7 +1636,7 @@ components:
       required: [id, actor, action, target, detail, createdAt]
       properties:
         id: { type: string }
-        actor: { type: string, description: Actor namespace, or `system`.' }
+        actor: { type: string, description: 'Actor namespace, or `system`.' }
         action:
           type: string
           description: >-

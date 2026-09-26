@@ -572,7 +572,25 @@ paths:
       operationId: getExtensionBadge
       tags: [Open]
       security: []
-      description: Renders version, download count, and license for the latest published version.
+      description: >
+        Renders version, download count, and license for the latest published
+        version, in a pill sized to its own text.
+
+
+        The left pill's colour is derived from the extension's identity, so it
+        is stable per extension and does not vary with `label`.
+      parameters:
+        - name: label
+          in: query
+          required: false
+          schema: { type: string, default: '{id}' }
+          description: >
+            Text for the left pill, instead of the extension id. Long labels are
+            cut to 304px of measured width, so how many characters fit depends
+            on the glyphs: about 27 East Asian characters, around 30 wide Latin
+            capitals, or between 50 and 100 ordinary lowercase ones. East Asian
+            and emoji characters are measured a full em wide, everything else
+            at its own advance width.
       responses:
         '200':
           description: SVG badge, cacheable for 5 minutes

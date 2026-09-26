@@ -186,8 +186,17 @@ test('badge splits into one-fact endpoints that are each far narrower', async ()
     assert.match(r.headers['content-type'], /image\/svg\+xml/);
     return r.text ?? r.body.toString('utf8');
   };
+  const stripTagsFully = (input) => {
+    let out = input;
+    let previous;
+    do {
+      previous = out;
+      out = out.replace(/<[^>]*>/g, '');
+    } while (out !== previous);
+    return out;
+  };
   const texts = (markup) =>
-    markup.match(/<text[^>]*>([^<]*)<\/text>/g).map((t) => t.replace(/<[^>]*>/g, ''));
+    markup.match(/<text[^>]*>([^<]*)<\/text>/g).map((t) => stripTagsFully(t));
 
   // The left pill names the fact and the right pill is a bare value, so the unit
   // lives in the label and there is no pluralisation to get wrong.

@@ -27,10 +27,25 @@ export function compilerEnv(env = process.env) {
   return allowed;
 }
 
+function tailWithinBytes(text, limit) {
+  const bytes = Buffer.from(text);
+  let start = Math.max(0, bytes.length - limit);
+  while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start++;
+  return bytes.subarray(start).toString('utf8');
+}
+
 function capLog(text, dropped) {
-  const truncated = dropped + Math.max(0, text.length - MAX_LOG_BYTES);
-  if (truncated === 0) return text;
-  return `… (${truncated} characters cut) ${text.slice(-MAX_LOG_BYTES)}`;
+  const bytes = Buffer.byteLength(text);
+  if (dropped === 0 && bytes <= MAX_LOG_BYTES) return text;
+
+  let truncated = dropped;
+  while (true) {
+    const marker = `… (${truncated} bytes cut) `;
+    const tail = tailWithinBytes(text, MAX_LOG_BYTES - Buffer.byteLength(marker));
+    const cut = dropped + bytes - Buffer.byteLength(tail);
+    if (cut === truncated) return marker + tail;
+    truncated = cut;
+  }
 }
 
 // Compile an extracted project in place. Runs `twext build` in a child process
@@ -75,9 +90,11 @@ export function compileProject(config, projectDir, { outFile = null } = {}) {
     let dropped = 0;
     const append = (current, chunk) => {
       const next = current + chunk;
-      if (next.length <= MAX_LOG_BYTES) return next;
-      dropped += next.length - MAX_LOG_BYTES;
-      return next.slice(next.length - MAX_LOG_BYTES);
+      const bytes = Buffer.byteLength(next);
+      if (bytes <= MAX_LOG_BYTES) return next;
+      const tail = tailWithinBytes(next, MAX_LOG_BYTES);
+      dropped += bytes - Buffer.byteLength(tail);
+      return tail;
     };
     const log = () => capLog(`${stdout}${stderr ? `\n${stderr}` : ''}`.trim(), dropped);
     let started = Date.now();
@@ -91,6 +108,8 @@ export function compileProject(config, projectDir, { outFile = null } = {}) {
       windowsHide: true,
       resourceLimits: { maxOldGenerationSizeMb: memoryMb },
     });
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk) => {
       stdout = append(stdout, chunk);
     });

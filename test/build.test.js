@@ -273,10 +273,9 @@ test('a build that floods its output cannot grow the log without bound', async (
     projectDir,
   );
   assert.equal(result.ok, false);
-  assert.ok(result.log.length <= 64 * 1024, `log stayed bounded, got ${result.log.length}`);
-  assert.ok(result.log.startsWith(`… (${16 * 1024 * 1024 + 1 - 16384} characters cut) `));
-  // The tail survives, which is where a compiler puts the error.
-  assert.match(result.log.slice(-200), /y+$/);
+  const marker = '… (16760858 bytes cut) ';
+  assert.equal(result.log, marker + 'y'.repeat(16384 - Buffer.byteLength(marker)));
+  assert.equal(Buffer.byteLength(result.log), 16384);
 });
 
 test('a build that floods stdout reports truncation even when stderr is empty', async (t) => {
@@ -290,5 +289,25 @@ test('a build that floods stdout reports truncation even when stderr is empty', 
     projectDir,
   );
   assert.equal(result.ok, false);
-  assert.equal(result.log, `… (${8 * 1024 * 1024 - 16384} characters cut) ${'x'.repeat(16384)}`);
+  const marker = '… (8372248 bytes cut) ';
+  assert.equal(result.log, marker + 'x'.repeat(16384 - Buffer.byteLength(marker)));
+  assert.equal(Buffer.byteLength(result.log), 16384);
+});
+
+test('a multibyte build log keeps whole characters and includes stderr in the byte cap', async (t) => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'twext-flood-'));
+  t.after(() => fs.rmSync(projectDir, { recursive: true, force: true }));
+  const script = path.join(projectDir, 'flood.mjs');
+  fs.writeFileSync(
+    script,
+    "process.stdout.write('🙂'.repeat(4096));\nprocess.stderr.write('ERR');\n",
+  );
+
+  const result = await compileProject(
+    { compiler: { command: script, timeoutMs: 20_000 } },
+    projectDir,
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.log, `… (24 bytes cut) ${'🙂'.repeat(4090)}\nERR`);
+  assert.equal(Buffer.byteLength(result.log), 16383);
 });

@@ -272,30 +272,82 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
 
   const XML_ENTITIES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' };
 
+  // Badge text is laid out by hand, so the pills have to be as wide as the
+  // glyphs they hold. These are DejaVu Sans advance widths in font units, one
+  // per printable ASCII code point from 0x20, read out of the font's hmtx
+  // table; a flat per-character guess over-pads exactly the narrow glyphs that
+  // dominate the right pill (space, |, i, l).
+  //
+  // The stack below names this font first, and that ordering is load-bearing:
+  // the widths above are DejaVu's, so a viewer that substitutes a wider face
+  // first would render text wider than the pill holding it. Verdana and Geneva
+  // are the next most likely faces on a desktop and both run wider than DejaVu,
+  // so they are worth naming explicitly rather than letting each platform pick a
+  // default -- a little slack in the gutter absorbs the difference.
+  const ADVANCE_UNITS = `
+  651 821 942 1716 1303 1946 1597 563 799 799 1024 1716
+  651 739 651 690 1303 1303 1303 1303 1303 1303 1303 1303
+  1303 1303 690 690 1716 1716 1716 1087 2048 1401 1405 1430
+  1577 1294 1178 1587 1540 604 604 1343 1141 1767 1532 1612
+  1235 1612 1423 1300 1251 1499 1401 2025 1403 1251 1403 799
+  690 799 1716 1024 1024 1255 1300 1126 1300 1260 721 1300
+  1298 569 569 1186 569 1995 1298 1253 1300 1300 842 1067
+  803 1298 1212 1675 1212 1212 1075 1303 690 1303 1716
+  `
+    .trim()
+    .split(/\s+/)
+    .map(Number);
+  const UNITS_PER_EM = 2048;
+  const BADGE_FONT_SIZE = 11;
+  // A non-ASCII ?label= gets the mean ASCII advance; guessing the real glyph
+  // width would be worse than an average.
+  const MEAN_ADVANCE = Math.round(
+    ADVANCE_UNITS.reduce((sum, units) => sum + units, 0) / ADVANCE_UNITS.length,
+  );
+  // A fixed gutter either side of the text. It has to clear the ~4.5px the text
+  // already sits from the top and bottom: at 5px the long right-hand pill read
+  // as flush while the short label pill looked generously padded.
+  const BADGE_PADDING = 16;
+  // The label is caller-supplied, and the badge is sized to fit it, so an
+  // unbounded ?label= would let a short URL ask for an arbitrarily wide SVG.
+  // Long real names fit well inside this; the cap only bounds the pathological.
+  const MAX_LABEL_WIDTH = 320;
+
+  function textWidth(text) {
+    let units = 0;
+    for (const char of text) {
+      const index = char.codePointAt(0) - 0x20;
+      units += index >= 0 && index < ADVANCE_UNITS.length ? ADVANCE_UNITS[index] : MEAN_ADVANCE;
+    }
+    return (units * BADGE_FONT_SIZE) / UNITS_PER_EM;
+  }
+
+  // Widths are measured on the raw label and the escaped label is what gets
+  // written out, because the two render identically -- an entity is how the
+  // markup spells a glyph, not extra glyphs. Cutting is therefore a plain
+  // per-glyph budget on the raw text and cannot land inside an entity.
+  function fitLabel(value) {
+    let out = '';
+    let units = 0;
+    for (const char of String(value)) {
+      const index = char.codePointAt(0) - 0x20;
+      const advance =
+        index >= 0 && index < ADVANCE_UNITS.length ? ADVANCE_UNITS[index] : MEAN_ADVANCE;
+      if ((units + advance) * BADGE_FONT_SIZE > (MAX_LABEL_WIDTH - BADGE_PADDING) * UNITS_PER_EM) {
+        break;
+      }
+      units += advance;
+      out += char;
+    }
+    return out;
+  }
+
+  const round = (value) => Math.round(value * 100) / 100;
+
   // One pass over every metacharacter, so the ampersands introduced by the
   // earlier entities are not escaped again.
   function xmlEscape(value) {
     return String(value).replace(/[&<>"']/g, (ch) => XML_ENTITIES[ch]);
-  }
-
-  // The widest label the 190px badge can hold: the left pill is
-  // BADGE_CHAR_WIDTH per escaped character plus 12px of padding, and it has to
-  // leave the right pill a non-negative width.
-  const BADGE_WIDTH = 190;
-  const BADGE_CHAR_WIDTH = 7;
-  const BADGE_PILL_PADDING = 12;
-  const BADGE_LABEL_MAX_CHARS = Math.floor((BADGE_WIDTH - BADGE_PILL_PADDING) / BADGE_CHAR_WIDTH);
-
-  // Escapes one character at a time and stops at the budget, so a cut can never
-  // land in the middle of an entity and emit unparseable XML.
-  function xmlEscapeWithin(value, maxChars) {
-    let out = '';
-    for (const ch of String(value)) {
-      const piece = xmlEscape(ch);
-      if (out.length + piece.length > maxChars) break;
-      out += piece;
-    }
-    return out;
   }
 
   router.get('/badge/@:namespace/:id', async (req, res) => {
@@ -317,39 +369,37 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     `;
     if (rows.length === 0) throw notFound();
     const row = rows[0];
-    // The badge is a fixed 190px wide, so a long label has to be cut before the
-    // width heuristic runs or the second rect gets a negative width. The budget
-    // is in *escaped* characters, because escapes expand (& -> 5 chars) and the
-    // geometry has to match what is actually rendered. Truncating the raw label
-    // to 25 was not enough: 25 ampersands escaped to 125 and a negative width.
-    const rawLabel =
-      typeof req.query.label === 'string' && req.query.label.length > 0
-        ? req.query.label.slice(0, 25)
-        : id;
-    const label = xmlEscapeWithin(rawLabel, BADGE_LABEL_MAX_CHARS);
+    const label =
+      fitLabel(
+        typeof req.query.label === 'string' && req.query.label.length > 0 ? req.query.label : id,
+      ) || id;
     const downloads = Number((await totalDownloads(sql, namespace, id)) ?? 0);
     const license = row.license;
     const color = LICENSE_BADGE_COLORS[license] ?? '#0070F3';
-    const versionText = xmlEscape(`v${row.version}`);
-    const downloadsText = xmlEscape(downloads === 1 ? '1 download' : `${downloads} downloads`);
-    const licenseText = xmlEscape(license);
-    const labelEscaped = label;
-    const labelPillWidth = label.length * BADGE_CHAR_WIDTH + BADGE_PILL_PADDING;
-    // shields-style flat badge: two pills, 18px tall, DejaVu-ish width heuristic
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${BADGE_WIDTH}" height="20" role="img" aria-label="${labelEscaped}: ${versionText}">
+    const versionText = `v${row.version}`;
+    const downloadsText = downloads === 1 ? '1 download' : `${downloads} downloads`;
+    const rightText = `${versionText} | ${downloadsText} | ${license}`;
+    // shields-style flat badge: two pills, 20px tall, each sized to its own text
+    // plus the gutter. Sizing to the content is what makes the badge look right;
+    // a fixed total width either leaves a short label marooned in a huge blue
+    // pill or squeezes the right-hand text off the end.
+    const labelWidth = round(textWidth(label) + BADGE_PADDING);
+    const rightWidth = round(textWidth(rightText) + BADGE_PADDING);
+    const totalWidth = round(labelWidth + rightWidth);
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${totalWidth}" height="20" viewBox="0 0 ${totalWidth} 20" role="img" aria-label="${xmlEscape(`${label}: ${versionText}`)}">
   <linearGradient id="s" x2="0" y2="100%">
     <stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
     <stop offset="1" stop-opacity=".1"/>
   </linearGradient>
-  <clipPath id="r"><rect width="${BADGE_WIDTH}" height="20" rx="3"/></clipPath>
+  <clipPath id="r"><rect width="${totalWidth}" height="20" rx="3"/></clipPath>
   <g clip-path="url(#r)">
-    <rect width="${labelPillWidth}" height="20" fill="#555"/>
-    <rect x="${labelPillWidth}" width="${BADGE_WIDTH - labelPillWidth}" height="20" fill="#0070F3"/>
-    <rect width="${BADGE_WIDTH}" height="20" fill="url(#s)"/>
+    <rect width="${labelWidth}" height="20" fill="#555"/>
+    <rect x="${labelWidth}" width="${rightWidth}" height="20" fill="${color}"/>
+    <rect width="${totalWidth}" height="20" fill="url(#s)"/>
   </g>
-  <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11">
-    <text x="${labelPillWidth / 2}" y="14">${label}</text>
-    <text x="${labelPillWidth + (BADGE_WIDTH - labelPillWidth) / 2}" y="14">${versionText} | ${downloadsText} | ${licenseText} ${color === '#4c1' ? '' : ''}</text>
+  <g fill="#fff" text-anchor="middle" font-family="DejaVu Sans,Verdana,Geneva,sans-serif" font-size="11">
+    <text x="${labelWidth / 2}" y="14">${xmlEscape(label)}</text>
+    <text x="${labelWidth + rightWidth / 2}" y="14">${xmlEscape(rightText)}</text>
   </g>
 </svg>`;
     res.set('Cache-Control', 'public, max-age=300');

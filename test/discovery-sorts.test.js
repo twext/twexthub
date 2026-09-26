@@ -189,6 +189,65 @@ test('badge renders an SVG with version, downloads, and license', async () => {
   assert.match(svg, /1 download/);
   assert.match(svg, /MIT/);
 
+  const svgWidth = (markup) => Number(markup.match(/^<svg[^>]*\bwidth="([\d.]+)"/)[1]);
+  assert.ok(svg.includes('fill="#4c1"'), 'MIT badge uses the license color');
+
+  // A viewBox lets the badge scale by re-laying out rather than pixel-doubling,
+  // and the font stack leads with the face the widths were measured from.
+  assert.equal(svg.match(/viewBox="([^"]+)"/)[1], `0 0 ${svgWidth(svg)} 20`);
+  assert.match(svg, /font-family="DejaVu Sans,/);
+
+  // The badge widens to fit its text; a long label is not clipped, and nothing
+  // in the markup is given a negative width.
+  const longLabel = 'a-really-quite-long-extension-name';
+  const wide = await request(app)
+    .get(`/v1/badge/@${ns}/zoo?label=${encodeURIComponent(longLabel)}`)
+    .expect(200);
+  const wideSvg = wide.text ?? wide.body.toString('utf8');
+  assert.ok(
+    svgWidth(wideSvg) > svgWidth(svg),
+    `expected a wider badge, got ${svgWidth(wideSvg)} vs ${svgWidth(svg)}`,
+  );
+  assert.ok(wideSvg.includes(longLabel), 'the label is not truncated');
+  for (const [, value] of wideSvg.matchAll(/\bwidth="(-?[\d.]+)"/g)) {
+    assert.ok(Number(value) >= 0, `negative width in badge: ${value}`);
+  }
+
+  // Pills are sized from glyph advances, so eight wide letters take visibly
+  // more room than eight narrow ones and neither is padded to a flat estimate.
+  const pillWidth = (markup) =>
+    Number(markup.match(/<rect width="([\d.]+)" height="20" fill="#555"/)[1]);
+  const wideGlyphs = await request(app)
+    .get(`/v1/badge/@${ns}/zoo?label=${encodeURIComponent('WWWWMMMM')}`)
+    .expect(200);
+  const narrow = await request(app)
+    .get(`/v1/badge/@${ns}/zoo?label=${encodeURIComponent('iiii')}`)
+    .expect(200);
+  const widePill = pillWidth(wideGlyphs.text ?? wideGlyphs.body.toString('utf8'));
+  const narrowPill = pillWidth(narrow.text ?? narrow.body.toString('utf8'));
+  assert.ok(widePill > narrowPill * 3, `wide ${widePill} vs narrow ${narrowPill}`);
+
+  // A one-character label still has to sit inside a real gutter, so the
+  // padding cannot quietly decay to zero.
+  const tiny = await request(app)
+    .get(`/v1/badge/@${ns}/zoo?label=${encodeURIComponent('i')}`)
+    .expect(200);
+  assert.ok(
+    pillWidth(tiny.text ?? tiny.body.toString('utf8')) >= 16,
+    'the label pill keeps its padding',
+  );
+
+  // The label is caller-supplied and the badge is sized to fit it, so a long
+  // ?label= still has to stop somewhere rather than ask for a huge SVG. The cap
+  // is on the label pill; the right-hand pill holds the server's own text.
+  const huge = await request(app)
+    .get(`/v1/badge/@${ns}/zoo?label=${encodeURIComponent('W'.repeat(4000))}`)
+    .expect(200);
+  const hugeSvg = huge.text ?? huge.body.toString('utf8');
+  const hugePill = pillWidth(hugeSvg);
+  assert.ok(hugePill > 0 && hugePill <= 320, `runaway label pill is bounded, got ${hugePill}`);
+  assert.ok(hugeSvg.length < 4000, 'the response stays small');
+
   const missing = await request(app).get(`/v1/badge/@${ns}/nonexistent`);
   assert.equal(missing.status, 404);
 });

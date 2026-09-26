@@ -33,7 +33,7 @@ export function makeRequestTelemetry({ logRequests = false } = {}) {
             time: new Date().toISOString(),
             msg: 'request',
             method: req.method,
-            path: req.originalUrl,
+            path: `${req.baseUrl || ''}${req.path}`,
             route,
             status: res.statusCode,
             durationMs: Math.round(durationMs * 100) / 100,

@@ -52,6 +52,22 @@ async function claimOne(id) {
   return claimed;
 }
 
+// A moment the worker will consider due.
+//
+// Both sides of the production comparison run on the worker's clock:
+// attemptDelivery writes new Date(Date.now() + delay) and claimDue reads
+// Date.now(). Writing next_attempt_at with the *database's* now() instead made
+// claimDue compare a database timestamp against a worker timestamp, so the row
+// only counted as due while the worker happened to be at or ahead of the
+// database. A CI database whose clock runs 50ms ahead was enough to make every
+// re-claim report "delivery 1 was not claimable", on some runs and not others,
+// and never on a machine where the two share a clock.
+//
+// Deriving the timestamp from the worker clock is what removes the sensitivity:
+// the database offset is simply never consulted, so the margin below only has to
+// cover the gap between writing the row and claiming it.
+const dueNow = () => new Date(Date.now() - 1000).toISOString();
+
 // create() blocks loopback and unreachable URLs, so tests that exercise
 // delivery insert the webhook row directly.
 async function insertWebhook(ns, url, events) {
@@ -392,17 +408,17 @@ test('failed deliveries retry with backoff then mark failed', async () => {
   assert.equal(afterFirst.attempt, 1);
   assert.ok(afterFirst.next_attempt_at, 'retrying rows must carry a next_attempt_at');
 
-  await sql`UPDATE webhook_deliveries SET next_attempt_at = now() WHERE id = ${delivery.id}`;
+  await sql`UPDATE webhook_deliveries SET next_attempt_at = ${dueNow()} WHERE id = ${delivery.id}`;
   await attemptDelivery(sql, await claimOne(delivery.id));
   const [afterSecond] =
     await sql`SELECT status, attempt FROM webhook_deliveries WHERE id = ${delivery.id}`;
   assert.equal(afterSecond.status, 'retrying');
-  await sql`UPDATE webhook_deliveries SET next_attempt_at = now() WHERE id = ${delivery.id}`;
+  await sql`UPDATE webhook_deliveries SET next_attempt_at = ${dueNow()} WHERE id = ${delivery.id}`;
   await attemptDelivery(sql, await claimOne(delivery.id));
   const [afterThird] =
     await sql`SELECT status, attempt FROM webhook_deliveries WHERE id = ${delivery.id}`;
   assert.equal(afterThird.status, 'retrying');
-  await sql`UPDATE webhook_deliveries SET next_attempt_at = now() WHERE id = ${delivery.id}`;
+  await sql`UPDATE webhook_deliveries SET next_attempt_at = ${dueNow()} WHERE id = ${delivery.id}`;
   await attemptDelivery(sql, await claimOne(delivery.id));
   const [afterFourth] =
     await sql`SELECT status, attempt, next_attempt_at FROM webhook_deliveries WHERE id = ${delivery.id}`;
@@ -525,7 +541,7 @@ test('a delivery stranded as delivering is reclaimed once its lease expires', as
   assert.equal(after.attempt, 0, 'a claim alone must not count as an attempt');
 
   // Past the lease: reclaimed for another attempt.
-  await sql`UPDATE webhook_deliveries SET next_attempt_at = now() - interval '1 second'
+  await sql`UPDATE webhook_deliveries SET next_attempt_at = ${dueNow()}
             WHERE id = ${delivery.id}`;
   const reclaimed = await claimDue(sql, Date.now());
   assert.deepEqual(

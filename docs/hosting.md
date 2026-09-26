@@ -1,6 +1,6 @@
 # Hosting TwextHub
 
-TwextHub is a registry for Twext-compiled extensions. Publishers submit compiled extensions through the `twext` CLI; the registry stores them, applies a per-owner moderation gate, and serves downloads to TurboWarp. This guide is for people running an instance. Publisher-facing behavior is documented by the [twext](https://github.com/twext/twext) project.
+TwextHub is a registry for Twext extensions. Publishers submit source tarballs through the `twext` CLI; the registry compiles them itself, stores the result, applies a per-owner moderation gate, and serves downloads to TurboWarp. This guide is for people running an instance. Publisher-facing behavior is documented by the [twext](https://github.com/twext/twext) project.
 
 ## Table of Contents
 
@@ -110,7 +110,7 @@ Publish requests carry a gzipped source tarball (up to `limits.maxSourceBytes`, 
 The hub compiles every publish itself: the uploaded tarball is expanded under `dataDir/tmp/`, and `twext build` runs there in a child process. The sandbox is:
 
 - **Filesystem** — Node's permission model restricts the child to reads and writes inside the extracted project directory plus reads of the server's own `node_modules` (the compiler and its dependencies). A `twext.yml` cannot redirect the output elsewhere; the output path is forced inside the sandbox directory.
-- **Memory** — `compiler.memoryMb` (192 MB default) caps the child's V8 old-generation heap; the child is killed if it grows past that.
+- **Memory** — `compiler.memoryMb` (192 MB default) bounds the child twice: V8's old space gets `--max-old-space-size`, and OS rlimits cap the process, so buffers outside the heap count too. The child is killed if it grows past that.
 - **Time** — `compiler.timeoutMs` (30 s default) SIGKILLs the child.
 - **No secrets** — the child receives an allowlist (`PATH`, `HOME`, `TMPDIR`, `TMP`, `TEMP`, `LANG`, `LC_ALL`, `TZ`) instead of the server's environment, so a build cannot read the database URL or any other credential the host passes in.
 
@@ -158,9 +158,11 @@ Releases are tagged with semver, and `latest` tracks `main`. To upgrade, pull th
 Two things hold state: the Postgres database and the data directory.
 
 - Database: a standard `pg_dump`, restored onto a fresh database with `psql`.
-- Data directory: compiled blobs (`blobs/`) **and** uploaded source tarballs (`sources/`). Both are written once at publish time and cannot be regenerated — losing either while keeping the database leaves versions listed but their download or source endpoints 404ing. Back up both directories (or the whole `dataDir`) together with the database.
+- Data directory: compiled blobs (`blobs/`), uploaded source tarballs (`sources/`), and the download address key (`secrets/download-address.key`). The first two are written once at publish time and cannot be regenerated — losing either while keeping the database leaves versions listed but their download or source endpoints 404ing. The key is generated on the first download; losing it makes new hashes incomparable with the old ones, and the rows that used it are cleared on the next start. Back up the whole `dataDir` together with the database.
 
 Both trees are content-addressed by SHA-256 (`blobs/<xx>/<rest>`, `sources/<xx>/<rest>`), so a restore is a plain file copy — no paths to rewrite. If a restore leaves a file missing, the daily scrub surfaces it through `twexthub_storage_integrity_errors` and the affected download returns 404.
+
+`secrets/download-address.key` keys the hash that stands in for a download's client address, and the key deliberately lives outside the database: a dump of the database on its own reveals no addresses. Set `TWEXTHUB_DOWNLOAD_HASH_KEY` to hold it yourself (Kubernetes secret, config management); the file is then not written. Changing the key has the same effect as losing it — the hashes made with the old one are cleared the next time the file is created.
 
 `tmp/` and `quarantine/` inside the data directory are scratch space; they matter for no restore.
 

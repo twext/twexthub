@@ -153,7 +153,11 @@ export async function reconcileOnBoot(sql, config) {
       continue;
     }
     const codeBuffer = readFileSync(legacyPath);
-    await copyFile(legacyPath, blobPathFor(dataDir, digest));
+    const digestAbs = blobPathFor(dataDir, digest);
+    // The shard for a digest that has never been stored is not there yet, and
+    // nothing else in the data directory creates it.
+    mkdirSync(path.dirname(digestAbs), { recursive: true });
+    await copyFile(legacyPath, digestAbs);
     await sql`
       UPDATE versions
       SET blob_digest = ${digest},
@@ -162,7 +166,7 @@ export async function reconcileOnBoot(sql, config) {
           blob_path = ${path.join('blobs', digest.slice(0, 2), digest.slice(2))}
       WHERE id = ${row.id}
     `;
-    if (legacyPath !== blobPathFor(dataDir, digest)) {
+    if (legacyPath !== digestAbs) {
       await rm(legacyPath, { force: true });
     }
   }

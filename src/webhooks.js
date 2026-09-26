@@ -45,8 +45,10 @@ export async function assertPublicWebhookUrl(rawUrl) {
   } catch {
     throw new Error('Invalid webhook URL.');
   }
-  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-    throw new Error('Webhook URL must use http or https.');
+  // Private destinations are already refused, so there is no local receiver for
+  // plain http to serve: the scheme can be https and nothing else.
+  if (url.protocol !== 'https:') {
+    throw new Error('Webhook URL must use https.');
   }
   const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
   if (host === 'localhost' || host === '0.0.0.0') {

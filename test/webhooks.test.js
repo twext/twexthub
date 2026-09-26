@@ -109,9 +109,16 @@ test('webhook validation rejects bad events, bad urls, and non-owners', async ()
   const localhost = await request(app)
     .post(`/v1/@${ns}/hooked/webhooks`)
     .set(bearer(owner.token))
-    .send({ url: 'http://localhost:9911/hook', events: ['version.published'] });
+    .send({ url: 'https://localhost:9911/hook', events: ['version.published'] });
   assert.equal(localhost.status, 422);
   assert.match(localhost.body.errors[0].message, /Localhost|public/);
+
+  const plaintext = await request(app)
+    .post(`/v1/@${ns}/hooked/webhooks`)
+    .set(bearer(owner.token))
+    .send({ url: 'http://hooks.example.com/hook', events: ['version.published'] });
+  assert.equal(plaintext.status, 422, 'only https destinations are accepted');
+  assert.match(plaintext.body.errors[0].message, /https/);
 });
 
 test('registry events schedule deliveries for subscribed hooks', async () => {
@@ -338,12 +345,14 @@ test('deleting a webhook removes its pending deliveries', async () => {
   assert.equal(after[0].n, 0);
 });
 
-test('ssrf guard rejects loopback hosts and non-http schemes', async () => {
+test('ssrf guard rejects loopback hosts and non-https schemes', async () => {
   const { assertPublicWebhookUrl } = await import('../src/webhooks.js');
 
-  await assert.rejects(() => assertPublicWebhookUrl('http://localhost:8080/'), /Localhost/);
-  await assert.rejects(() => assertPublicWebhookUrl('http://127.0.0.1:8080/'), /public/);
-  await assert.rejects(() => assertPublicWebhookUrl('ftp://hooks.example.test/'), /http or https/);
+  await assert.rejects(() => assertPublicWebhookUrl('https://localhost:8080/'), /Localhost/);
+  await assert.rejects(() => assertPublicWebhookUrl('https://127.0.0.1:8080/'), /public/);
+  await assert.rejects(() => assertPublicWebhookUrl('ftp://hooks.example.test/'), /https/);
+  // A private destination is refused, so no receiver gains from plaintext.
+  await assert.rejects(() => assertPublicWebhookUrl('http://hooks.example.com/'), /https/);
 });
 
 test('a delivery re-checks the destination and refuses a private address', async () => {
@@ -358,7 +367,7 @@ test('a delivery re-checks the destination and refuses a private address', async
 
   // The row was written while the name resolved to a public address, so only a
   // check at delivery time can catch the host flipping to a private one.
-  const result = await attemptDelivery(sql, { ...delivery, url: 'http://169.254.169.254/latest' });
+  const result = await attemptDelivery(sql, { ...delivery, url: 'https://169.254.169.254/latest' });
   assert.equal(result.ok, false);
   assert.match(result.error, /public|address/i);
   const [after] =

@@ -136,8 +136,15 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         (entry) =>
           entry.coerced && semver.satisfies(entry.coerced, range, { includePrerelease: true }),
       );
-    const best = maxVersionBySemver(candidates.map((entry) => entry.coerced));
-    const match = candidates.find((entry) => entry.coerced === best);
+    // The range may land on a version the caller cannot see, so the choice is
+    // made among the versions they can: a private one is skipped rather than
+    // handed over, and an older public one in range still answers.
+    const readable = [];
+    for (const entry of candidates) {
+      if (await canSee(req.auth?.user, entry.row)) readable.push(entry);
+    }
+    const best = maxVersionBySemver(readable.map((entry) => entry.coerced));
+    const match = readable.find((entry) => entry.coerced === best);
     if (!match) throw notFound('No published version satisfies that range.');
     res.json(versionToObject(match.row, config));
   });
@@ -611,7 +618,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
       res.sendFile(abs);
       // Metrics never get in the way of a download, so a failure here costs the
       // event, not the blob.
-      const ipHash = await hashDownloadAddress(sql, req.ip).catch(() => null);
+      const ipHash = await hashDownloadAddress(sql, config, req.ip).catch(() => null);
       void sql`
         INSERT INTO download_events (namespace, extension_id, version, user_agent, ip_hash)
         VALUES (${row.namespace}, ${row.extension_id}, ${row.version},

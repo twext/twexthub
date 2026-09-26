@@ -6,7 +6,7 @@ import request from 'supertest';
 import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
 import { gcBlobs, scrubBlobs, getIntegrityErrors } from '../src/maintenance.js';
 import { reconcileOnBoot } from '../src/db.js';
-import { blobPathFor, hashFile } from '../src/blobs.js';
+import { blobPathFor, sha256Hex } from '../src/blobs.js';
 
 let app;
 let sql;
@@ -102,15 +102,16 @@ test('scrub reports missing and corrupted blobs and updates the error gauge', as
 });
 
 // A staging row is what a publish interrupted mid-write leaves behind: the
-// digest is already known, since the row commits before the file lands.
+// digest is already known and the blob already sits where it belongs, because
+// the row commits before the file is written.
 async function insertStaging(namespace, publisherId, id, bytes, { keepBlob }) {
-  const rel = path.join('blobs', 'crash', `${id}.js`);
+  const content = `// ${id}`;
+  const digest = sha256Hex(content);
+  const rel = path.join('blobs', digest.slice(0, 2), digest.slice(2));
   const abs = path.join(config.dataDir, rel);
-  let digest = null;
   if (keepBlob) {
     fs.mkdirSync(path.dirname(abs), { recursive: true });
-    fs.writeFileSync(abs, `// ${id}`);
-    digest = await hashFile(abs);
+    fs.writeFileSync(abs, content);
   }
   const [row] = await sql`
     INSERT INTO versions
@@ -120,7 +121,7 @@ async function insertStaging(namespace, publisherId, id, bytes, { keepBlob }) {
             'MIT', '', ${rel}, ${digest}, ${bytes}, now() - interval '2 hours')
     RETURNING id, status
   `;
-  return { ...row, rel, abs };
+  return { ...row, rel, abs, content, digest };
 }
 
 test('boot reconciliation decides the status from the namespace account', async () => {
@@ -138,6 +139,10 @@ test('boot reconciliation decides the status from the namespace account', async 
   const [row] = await sql`SELECT status, published_at FROM versions WHERE id = ${staging.id}`;
   assert.equal(row.status, 'published', 'the namespace account, not the publisher, owns the gate');
   assert.ok(row.published_at, 'a promoted version gets a published_at');
+
+  // The promotion is only real if the row is serviceable afterwards.
+  const download = await request(app).get(`/v1/@${ns}/crashed/versions/1.0.0/download`).expect(200);
+  assert.equal(download.text, staging.content);
   fs.rmSync(staging.abs);
 });
 
@@ -154,4 +159,38 @@ test('boot reconciliation refunds the charge when the staging row is dropped', a
   assert.equal(rows.length, 0, 'an unrecoverable staging row is removed');
   const [after] = await sql`SELECT blob_bytes FROM users WHERE namespace = ${ns}`;
   assert.equal(Number(after.blob_bytes), 0, 'the charged bytes come back');
+});
+
+test('boot reconciliation re-keys a legacy blob that has no digest yet', async () => {
+  const owner = await signupAndAccept(app, uniqNs());
+  const ns = owner.user.namespace;
+  const content = '// legacy bytes';
+  const digest = sha256Hex(content);
+  const legacyRel = path.join('blobs', 'legacy', 'ancient.js');
+  const legacyAbs = path.join(config.dataDir, legacyRel);
+  fs.mkdirSync(path.dirname(legacyAbs), { recursive: true });
+  fs.writeFileSync(legacyAbs, content);
+
+  const [{ id: ownerId }] = await sql`SELECT id FROM users WHERE namespace = ${ns}`;
+  const [row] = await sql`
+    INSERT INTO versions
+      (owner_id, namespace, extension_id, version, status, name, license,
+       description, blob_path, created_at, published_at)
+    VALUES (${ownerId}, ${ns}, 'ancient', '1.0.0', 'published', 'ancient', 'MIT',
+            '', ${legacyRel}, now() - interval '2 days', now() - interval '2 days')
+    RETURNING id
+  `;
+
+  await reconcileOnBoot(sql, config);
+
+  const [after] = await sql`
+    SELECT blob_digest, blob_path, blob_size FROM versions WHERE id = ${row.id}
+  `;
+  assert.equal(after.blob_digest, digest);
+  assert.equal(after.blob_path, path.join('blobs', digest.slice(0, 2), digest.slice(2)));
+  assert.equal(Number(after.blob_size), content.length);
+  assert.ok(!fs.existsSync(legacyAbs), 'the legacy file is removed once it is copied');
+  // The digest is only useful if the copy landed where the download looks.
+  const download = await request(app).get(`/v1/@${ns}/ancient/versions/1.0.0/download`).expect(200);
+  assert.equal(download.text, content);
 });

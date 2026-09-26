@@ -1,7 +1,7 @@
-import { createHmac, randomBytes } from 'node:crypto';
+import { createHmac } from 'node:crypto';
+import { downloadAddressKey } from './download-address.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const ADDRESS_HASH_KEY = 'download_address';
 
 // Buckets are keyed on the UTC date the event falls in, so day boundaries are
 // UTC midnight too. Local midnight would split a day into two buckets on any
@@ -36,21 +36,13 @@ export function aggregateDayLoader(sql) {
   };
 }
 
-// The download address is never stored. A hash keyed on a secret generated on
-// first use is enough to count distinct clients per day, and the raw value
-// would otherwise sit in the table indefinitely with nothing reading it.
-export async function hashDownloadAddress(sql, ip) {
+// The download address is never stored. A keyed hash is enough to count
+// distinct clients per day, and the raw value would otherwise sit in the table
+// indefinitely with nothing reading it.
+export async function hashDownloadAddress(sql, config, ip) {
   if (typeof ip !== 'string' || ip.length === 0) return null;
-  let [row] = await sql`SELECT secret FROM registry_secrets WHERE name = ${ADDRESS_HASH_KEY}`;
-  if (!row) {
-    await sql`
-      INSERT INTO registry_secrets (name, secret)
-      VALUES (${ADDRESS_HASH_KEY}, ${randomBytes(32).toString('base64url')})
-      ON CONFLICT (name) DO NOTHING
-    `;
-    [row] = await sql`SELECT secret FROM registry_secrets WHERE name = ${ADDRESS_HASH_KEY}`;
-  }
-  return createHmac('sha256', row.secret).update(ip).digest('base64url').slice(0, 22);
+  const key = await downloadAddressKey(sql, config);
+  return createHmac('sha256', key).update(ip).digest('base64url').slice(0, 22);
 }
 
 export function dailyAggregationJob(sql) {

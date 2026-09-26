@@ -48,6 +48,12 @@ export function compileProject(config, projectDir, { outFile = null } = {}) {
     // own dependencies. Node's model does not gate outbound sockets, so egress
     // isolation is left to the deployment boundary (see docs/hosting.md).
     const args = [
+      // resourceLimits sets OS rlimits, which cap the process rather than
+      // V8's heap, so the heap flag carries the same number: a build that
+      // grows past it is reported as an out-of-memory failure instead of
+      // being killed mid-write, and buffers outside the heap still hit the
+      // rlimit.
+      `--max-old-space-size=${memoryMb}`,
       '--permission',
       `--allow-fs-read=${projectDir}`,
       `--allow-fs-read=${path.join(HERE, '..', 'node_modules')}`,

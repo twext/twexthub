@@ -159,6 +159,40 @@ test('a public version does not expose a private sibling in the detail list', as
   );
 });
 
+test('a semver range never resolves to a version the caller cannot see', async () => {
+  const admin = await signupAndAccept(app, uniqNs());
+  const owner = await signupAndAccept(app, uniqNs());
+  const ns = owner.user.namespace;
+
+  await publishPrivate({ owner, code: '// private@1.0.0' });
+  await request(app)
+    .patch(`/v1/@${ns}/secret/versions/1.0.0`)
+    .set(bearer(admin.token))
+    .send({ status: 'approved' })
+    .expect(200);
+  await publishProject(app, ns, 'secret', owner.token, { version: '2.0.0', code: '// public' });
+
+  // The extension-level check passes on the public 2.0.0, so the range has to be
+  // narrowed to what the caller may read before the best match is chosen.
+  const anon = await request(app).get(`/v1/@${ns}/secret/versions/resolve?range=1.0.0`);
+  assert.equal(anon.status, 404);
+  const wide = await request(app).get(`/v1/@${ns}/secret/versions/resolve?range=^1.0.0`);
+  assert.equal(wide.status, 404, 'no readable version satisfies the range');
+
+  // A range covering the public version still answers, and the owner, who may
+  // read 1.0.0, gets it when they ask for it.
+  const publicRange = await request(app)
+    .get(`/v1/@${ns}/secret/versions/resolve?range=2.0.0`)
+    .expect(200);
+  assert.equal(publicRange.body.version, '2.0.0');
+  const asOwner = await request(app)
+    .get(`/v1/@${ns}/secret/versions/resolve?range=1.0.0`)
+    .set(bearer(owner.token))
+    .expect(200);
+  assert.equal(asOwner.body.version, '1.0.0');
+  assert.equal(asOwner.body.visibility, 'private');
+});
+
 test('private downloads do not consume anonymous trending slots', async () => {
   const admin = await signupAndAccept(app, uniqNs());
   const owner = await signupAndAccept(app, uniqNs());

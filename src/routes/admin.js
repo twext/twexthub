@@ -1,16 +1,25 @@
 import { Router } from 'express';
 import { requireAdmin } from '../auth.js';
-import { fieldErrors } from '../errors.js';
+import { renderRegistryMetrics } from '../observability.js';
+import { fieldErrors, notFound } from '../errors.js';
 import { legalDocumentToObject } from '../serialize.js';
 import { notifyUsersMatching, termsBumpedMessage } from '../notify.js';
+import { audit, auditRowToObject } from '../audit.js';
+import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
 
 // trim() is applied to the broadcast message before insert, so this limit
 // applies to the trimmed length.
 const BROADCAST_MAX_LENGTH = 280;
 import { requireObjectBody } from './shared.js';
 
-export function makeAdminRouter({ sql, termsGate }) {
+export function makeAdminRouter({ sql, config, termsGate }) {
   const router = Router();
+
+  router.get('/admin/metrics', requireAdmin, async (req, res) => {
+    res
+      .type('text/plain; version=0.0.4; charset=utf-8')
+      .send(await renderRegistryMetrics(sql, req.app.locals.telemetry));
+  });
 
   function makeLegalDocumentHandler(kind, bodyError) {
     return async (req, res) => {
@@ -80,6 +89,73 @@ export function makeAdminRouter({ sql, termsGate }) {
       notifyUsersMatching(tx, tx``, 'broadcast', message.trim()),
     );
     res.status(201).json({ created });
+  });
+
+  router.patch('/admin/users/:namespace/quota', requireAdmin, termsGate, async (req, res) => {
+    requireObjectBody(req);
+    const [user] = await sql`SELECT * FROM users WHERE namespace = ${req.params.namespace}`;
+    if (!user) throw notFound('No such account.');
+    const { maxBlobBytes } = req.body;
+    if (maxBlobBytes !== null && (!Number.isInteger(maxBlobBytes) || maxBlobBytes <= 0)) {
+      throw fieldErrors([
+        { field: 'maxBlobBytes', message: 'Must be a positive integer, or null for the default.' },
+      ]);
+    }
+    const updated = await sql.begin(async (tx) => {
+      const [row] = await tx`
+        UPDATE users SET max_blob_bytes = ${maxBlobBytes}
+        WHERE id = ${user.id}
+        RETURNING id, namespace, blob_bytes, max_blob_bytes
+      `;
+      await audit(
+        tx,
+        req.auth.user,
+        'quota.set',
+        { namespace: user.namespace },
+        {
+          maxBlobBytes,
+          previousMaxBlobBytes: user.max_blob_bytes,
+        },
+      );
+      return row;
+    });
+    res.json({
+      namespace: updated.namespace,
+      blobBytes: Number(updated.blob_bytes),
+      maxBlobBytes: updated.max_blob_bytes === null ? null : Number(updated.max_blob_bytes),
+    });
+  });
+
+  router.get('/admin/users/:namespace/quota', requireAdmin, async (req, res) => {
+    const [user] = await sql`
+      SELECT namespace, blob_bytes, max_blob_bytes FROM users
+      WHERE namespace = ${req.params.namespace}
+    `;
+    if (!user) throw notFound('No such account.');
+    res.json({
+      namespace: user.namespace,
+      blobBytes: Number(user.blob_bytes),
+      maxBlobBytes: user.max_blob_bytes === null ? null : Number(user.max_blob_bytes),
+    });
+  });
+
+  router.get('/admin/audit', requireAdmin, async (req, res) => {
+    const limit = parseLimit(config, req.query.limit);
+    const cursor = decodeCursor(req.query.cursor, { i: 'int' });
+    const rows = await sql`
+      SELECT * FROM audit_log
+      ${cursor ? sql`WHERE id < ${cursor.i}` : sql``}
+      ORDER BY id DESC
+      LIMIT ${limit + 1}
+    `;
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const last = page[page.length - 1];
+    const nextCursor = hasMore && last ? encodeCursor({ i: Number(last.id) }) : null;
+    res.json({
+      data: page.map(auditRowToObject),
+      pagination: { nextCursor, hasMore },
+    });
   });
 
   return router;

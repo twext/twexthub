@@ -1,7 +1,15 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signup, signupAndAccept } from './helpers.mjs';
+import {
+  boot,
+  resetDb,
+  bearer,
+  uniqNs,
+  signup,
+  signupAndAccept,
+  publishProject,
+} from './helpers.mjs';
 
 let app, sql;
 before(async () => {
@@ -23,7 +31,7 @@ async function seedNotification(namespace, kind, message, payload = {}, readAt =
 }
 
 test('notifications list requires auth', async () => {
-  const r = await request(app).get('/v0/notifications').expect(401);
+  const r = await request(app).get('/v1/notifications').expect(401);
   assert.match(r.body.detail, /Missing or invalid bearer token/);
 });
 
@@ -44,7 +52,7 @@ test('lists notifications newest first, unreadCount included', async () => {
     { namespace: user.namespace, id: 'myext', version: '1.0.0', reason: 'bad blocks.' },
   );
 
-  const r = await request(app).get('/v0/notifications').set(bearer(token)).expect(200);
+  const r = await request(app).get('/v1/notifications').set(bearer(token)).expect(200);
   const ids = r.body.data.map((n) => n.id);
   assert.deepEqual(ids, [String(newest.id), String(oldest.id), String(maintenance.id)]);
   assert.equal(r.body.unreadCount, 2);
@@ -65,7 +73,7 @@ test('one user never sees another user’s notifications', async () => {
   const theirs = await signupAndAccept(app, uniqNs());
   await seedNotification(theirs.user.namespace, 'broadcast', 'not yours');
 
-  const r = await request(app).get('/v0/notifications').set(bearer(mine.token)).expect(200);
+  const r = await request(app).get('/v1/notifications').set(bearer(mine.token)).expect(200);
   assert.equal(r.body.data.length, 0);
   assert.equal(r.body.unreadCount, 0);
 });
@@ -76,7 +84,7 @@ test('unread=true filters, and unreadCount reflects all rows not the page', asyn
   await seedNotification(user.namespace, 'broadcast', 'unread one');
   await seedNotification(user.namespace, 'broadcast', 'unread two');
 
-  const r = await request(app).get('/v0/notifications?unread=true').set(bearer(token)).expect(200);
+  const r = await request(app).get('/v1/notifications?unread=true').set(bearer(token)).expect(200);
   assert.equal(r.body.data.length, 2);
   assert.ok(r.body.data.every((n) => n.read === false));
   assert.equal(r.body.unreadCount, 2);
@@ -84,7 +92,7 @@ test('unread=true filters, and unreadCount reflects all rows not the page', asyn
 
 test('unread=true rejects values other than true', async () => {
   const { token } = await signupAndAccept(app, uniqNs());
-  await request(app).get('/v0/notifications?unread=1').set(bearer(token)).expect(400);
+  await request(app).get('/v1/notifications?unread=1').set(bearer(token)).expect(400);
 });
 
 test('pagination walks newest to oldest', async () => {
@@ -93,20 +101,20 @@ test('pagination walks newest to oldest', async () => {
     await seedNotification(user.namespace, 'broadcast', `note ${i}`);
   }
 
-  const page1 = await request(app).get('/v0/notifications?limit=2').set(bearer(token)).expect(200);
+  const page1 = await request(app).get('/v1/notifications?limit=2').set(bearer(token)).expect(200);
   assert.equal(page1.body.data.length, 2);
   assert.equal(page1.body.pagination.hasMore, true);
   assert.ok(page1.body.pagination.nextCursor);
 
   const page2 = await request(app)
-    .get(`/v0/notifications?limit=2&cursor=${page1.body.pagination.nextCursor}`)
+    .get(`/v1/notifications?limit=2&cursor=${page1.body.pagination.nextCursor}`)
     .set(bearer(token))
     .expect(200);
   assert.equal(page2.body.data.length, 2);
   assert.equal(page2.body.pagination.hasMore, true);
 
   const page3 = await request(app)
-    .get(`/v0/notifications?limit=2&cursor=${page2.body.pagination.nextCursor}`)
+    .get(`/v1/notifications?limit=2&cursor=${page2.body.pagination.nextCursor}`)
     .set(bearer(token))
     .expect(200);
   assert.equal(page3.body.data.length, 1);
@@ -122,12 +130,12 @@ test('pagination walks newest to oldest', async () => {
 test('automation tokens can list notifications', async () => {
   const { token } = await signupAndAccept(app, uniqNs());
   const created = await request(app)
-    .post('/v0/tokens')
+    .post('/v1/tokens')
     .set(bearer(token))
     .send({ name: 'ci', scopes: ['publish'] })
     .expect(201);
 
-  const r = await request(app).get('/v0/notifications').set(bearer(created.body.token)).expect(200);
+  const r = await request(app).get('/v1/notifications').set(bearer(created.body.token)).expect(200);
   assert.equal(r.body.data.length, 0);
 });
 
@@ -139,17 +147,17 @@ test('mark-read with ids only touches the caller’s rows', async () => {
   await seedNotification(theirs.user.namespace, 'broadcast', 'theirs');
 
   const r = await request(app)
-    .post('/v0/notifications/read')
+    .post('/v1/notifications/read')
     .set(bearer(mine.token))
     .send({ ids: [a.id, b.id] })
     .expect(200);
   assert.equal(r.body.updated, 2);
 
-  const list = await request(app).get('/v0/notifications').set(bearer(mine.token)).expect(200);
+  const list = await request(app).get('/v1/notifications').set(bearer(mine.token)).expect(200);
   assert.equal(list.body.unreadCount, 0);
   assert.ok(list.body.data.every((n) => n.read === true));
 
-  const other = await request(app).get('/v0/notifications').set(bearer(theirs.token)).expect(200);
+  const other = await request(app).get('/v1/notifications').set(bearer(theirs.token)).expect(200);
   assert.equal(other.body.unreadCount, 1);
   assert.equal(other.body.data[0].read, false);
 });
@@ -160,21 +168,21 @@ test('mark-read is idempotent and reports only newly read rows', async () => {
   const b = await seedNotification(user.namespace, 'broadcast', 'b');
 
   const first = await request(app)
-    .post('/v0/notifications/read')
+    .post('/v1/notifications/read')
     .set(bearer(token))
     .send({ ids: [a.id] })
     .expect(200);
   assert.equal(first.body.updated, 1);
 
   const again = await request(app)
-    .post('/v0/notifications/read')
+    .post('/v1/notifications/read')
     .set(bearer(token))
     .send({ ids: [a.id] })
     .expect(200);
   assert.equal(again.body.updated, 0);
 
   const rest = await request(app)
-    .post('/v0/notifications/read')
+    .post('/v1/notifications/read')
     .set(bearer(token))
     .send({ ids: [String(a.id), b.id] })
     .expect(200);
@@ -187,13 +195,13 @@ test('mark-read with all clears the mailbox', async () => {
   await seedNotification(user.namespace, 'broadcast', 'b');
 
   const r = await request(app)
-    .post('/v0/notifications/read')
+    .post('/v1/notifications/read')
     .set(bearer(token))
     .send({ all: true })
     .expect(200);
   assert.equal(r.body.updated, 2);
 
-  const list = await request(app).get('/v0/notifications').set(bearer(token)).expect(200);
+  const list = await request(app).get('/v1/notifications').set(bearer(token)).expect(200);
   assert.equal(list.body.unreadCount, 0);
   assert.equal(list.body.data.length, 2);
 });
@@ -203,32 +211,32 @@ test('mark-read rejects unknown fields and invalid ids', async () => {
   const n = await seedNotification(user.namespace, 'broadcast', 'a');
 
   const both = await request(app)
-    .post('/v0/notifications/read')
+    .post('/v1/notifications/read')
     .set(bearer(token))
     .send({ ids: [n.id], all: true })
     .expect(422);
   assert.ok(both.body.errors.some((e) => e.field === 'ids'));
 
   const neither = await request(app)
-    .post('/v0/notifications/read')
+    .post('/v1/notifications/read')
     .set(bearer(token))
     .send({})
     .expect(422);
 
   const notArray = await request(app)
-    .post('/v0/notifications/read')
+    .post('/v1/notifications/read')
     .set(bearer(token))
     .send({ ids: n.id })
     .expect(422);
 
   const zero = await request(app)
-    .post('/v0/notifications/read')
+    .post('/v1/notifications/read')
     .set(bearer(token))
     .send({ ids: [0, -3, 1.5] })
     .expect(422);
 
   const allFalse = await request(app)
-    .post('/v0/notifications/read')
+    .post('/v1/notifications/read')
     .set(bearer(token))
     .send({ all: false })
     .expect(422);
@@ -243,7 +251,7 @@ test('mark-read caps ids at 100', async () => {
   const { token } = await signupAndAccept(app, uniqNs());
   const ids = Array.from({ length: 101 }, (_, i) => i + 1);
   const r = await request(app)
-    .post('/v0/notifications/read')
+    .post('/v1/notifications/read')
     .set(bearer(token))
     .send({ ids })
     .expect(422);
@@ -256,7 +264,7 @@ test('the 200-row prune keeps the newest per-user rows', async () => {
     await seedNotification(user.namespace, 'broadcast', `note ${i}`);
   }
 
-  const r = await request(app).get('/v0/notifications?limit=50').set(bearer(token)).expect(200);
+  const r = await request(app).get('/v1/notifications?limit=50').set(bearer(token)).expect(200);
   assert.equal(r.body.data.length, 50);
   assert.equal(r.body.pagination.hasMore, true);
 
@@ -269,7 +277,7 @@ test('the 200-row prune keeps the newest per-user rows', async () => {
 });
 
 test('mark-read requires auth', async () => {
-  await request(app).post('/v0/notifications/read').send({ all: true }).expect(401);
+  await request(app).post('/v1/notifications/read').send({ all: true }).expect(401);
 });
 
 // ---- emit points
@@ -279,17 +287,11 @@ async function promoteToAdmin(namespace) {
 }
 
 async function publishPending(app, { token, namespace, id, version }) {
-  return request(app)
-    .post(`/v0/@${namespace}/${id}/versions`)
-    .set(bearer(token))
-    .send({
-      manifest: { id, version, license: 'MIT', description: 'test extension' },
-      code: 'console.log(1);',
-    });
+  return publishProject(app, namespace, id, token, { version, code: 'console.log(1);' });
 }
 
 async function notificationsFor(token, query = '') {
-  const r = await request(app).get(`/v0/notifications${query}`).set(bearer(token)).expect(200);
+  const r = await request(app).get(`/v1/notifications${query}`).set(bearer(token)).expect(200);
   return r.body;
 }
 
@@ -308,7 +310,7 @@ test('approving a pending version notifies the owner', async () => {
   assert.equal(published.body.status, 'pending');
 
   const approve = await request(app)
-    .patch(`/v0/@${owner.user.namespace}/myext/versions/1.0.0`)
+    .patch(`/v1/@${owner.user.namespace}/myext/versions/1.0.0`)
     .set(bearer(admin.token))
     .send({ status: 'approved' })
     .expect(200);
@@ -340,7 +342,7 @@ test('rejecting a pending version notifies the owner with the reason', async () 
 
   const reason = 'The block ID collides with an existing extension.';
   const reject = await request(app)
-    .patch(`/v0/@${owner.user.namespace}/myext/versions/1.0.0`)
+    .patch(`/v1/@${owner.user.namespace}/myext/versions/1.0.0`)
     .set(bearer(admin.token))
     .send({ status: 'rejected', reason })
     .expect(200);
@@ -379,7 +381,7 @@ test('a terms bump notifies only accounts that had accepted the previous version
   await promoteToAdmin(admin.user.namespace);
 
   const bump = await request(app)
-    .patch('/v0/admin/terms')
+    .patch('/v1/admin/terms')
     .set(bearer(admin.token))
     .send({ body: 'Updated terms body.' })
     .expect(200);
@@ -394,7 +396,7 @@ test('a terms bump notifies only accounts that had accepted the previous version
   assert.equal(adminList.unreadCount, 1);
 
   const neverList = await request(app)
-    .get('/v0/notifications')
+    .get('/v1/notifications')
     .set(bearer(neverAccepted.body.token))
     .expect(200);
   assert.equal(neverList.body.data.length, 0);
@@ -409,7 +411,7 @@ test('the first terms document is not a bump', async () => {
   await sql`UPDATE users SET terms_accepted_version = NULL`;
 
   const created = await request(app)
-    .patch('/v0/admin/terms')
+    .patch('/v1/admin/terms')
     .set(bearer(admin.token))
     .send({ body: 'First terms.' })
     .expect(200);
@@ -425,7 +427,7 @@ test('an admin password reset notifies the target, self-service does not', async
   await promoteToAdmin(admin.user.namespace);
 
   await request(app)
-    .patch(`/v0/users/${target.user.namespace}`)
+    .patch(`/v1/users/${target.user.namespace}`)
     .set(bearer(admin.token))
     .send({ password: 'newpassword1' })
     .expect(200);
@@ -440,11 +442,11 @@ test('an admin password reset notifies the target, self-service does not', async
   assert.match(rows[0].message, new RegExp(`@${admin.user.namespace}`));
 
   const relogin = await request(app)
-    .post('/v0/auth/login')
+    .post('/v1/auth/login')
     .send({ namespace: target.user.namespace, password: 'newpassword1' })
     .expect(200);
   await request(app)
-    .patch(`/v0/users/${target.user.namespace}`)
+    .patch(`/v1/users/${target.user.namespace}`)
     .set(bearer(relogin.body.token))
     .send({ password: 'newpassword2', currentPassword: 'newpassword1' })
     .expect(200);
@@ -462,7 +464,7 @@ test('a role change notifies the target', async () => {
   await promoteToAdmin(admin.user.namespace);
 
   await request(app)
-    .patch(`/v0/users/${target.user.namespace}`)
+    .patch(`/v1/users/${target.user.namespace}`)
     .set(bearer(admin.token))
     .send({ role: 'admin' })
     .expect(200);
@@ -482,7 +484,7 @@ test('only an admin can broadcast, and it reaches every account', async () => {
   await promoteToAdmin(admin.user.namespace);
 
   const asAdmin = await request(app)
-    .post('/v0/admin/notifications')
+    .post('/v1/admin/notifications')
     .set(bearer(admin.token))
     .send({ message: 'Scheduled maintenance tonight at 02:00 UTC.' })
     .expect(201);
@@ -504,28 +506,28 @@ test('broadcast requires a session and a non-empty message', async () => {
   const admin = await signupAndAccept(app, uniqNs());
   await promoteToAdmin(admin.user.namespace);
 
-  await request(app).post('/v0/admin/notifications').send({ message: 'x' }).expect(401);
+  await request(app).post('/v1/admin/notifications').send({ message: 'x' }).expect(401);
 
   const created = await request(app)
-    .post('/v0/tokens')
+    .post('/v1/tokens')
     .set(bearer(admin.token))
     .send({ name: 'ci', scopes: ['publish'] })
     .expect(201);
   await request(app)
-    .post('/v0/admin/notifications')
+    .post('/v1/admin/notifications')
     .set(bearer(created.body.token))
     .send({ message: 'x' })
     .expect(403);
 
   await request(app)
-    .post('/v0/admin/notifications')
+    .post('/v1/admin/notifications')
     .set(bearer(admin.token))
     .send({ message: '' })
     .expect(422);
-  await request(app).post('/v0/admin/notifications').set(bearer(admin.token)).send({}).expect(422);
+  await request(app).post('/v1/admin/notifications').set(bearer(admin.token)).send({}).expect(422);
 
   const long = await request(app)
-    .post('/v0/admin/notifications')
+    .post('/v1/admin/notifications')
     .set(bearer(admin.token))
     .send({ message: 'x'.repeat(281) })
     .expect(422);

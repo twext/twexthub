@@ -3,6 +3,8 @@ import { loadConfig } from './config.js';
 import { createDb } from './db.js';
 import { makeAuthenticate, makeRequireTerms } from './auth.js';
 import { makeRateLimiter } from './rate-limit.js';
+import { makeHttpRateLimiter } from './http-rate-limit.js';
+import { makeRequestTelemetry } from './observability.js';
 import { makeCors } from './cors.js';
 import { HttpError, notFound, errorHandler } from './errors.js';
 import { normalizeApiRoot } from './util.js';
@@ -12,6 +14,7 @@ import { makeTokensRouter } from './routes/tokens.js';
 import { makeUsersRouter } from './routes/users.js';
 import { makeNotificationsRouter } from './routes/notifications.js';
 import { makePackagesRouter } from './routes/packages.js';
+import { makeBlobsRouter } from './routes/blobs.js';
 import { makeDiscoveryRouter } from './routes/discovery.js';
 import { makeAdminRouter } from './routes/admin.js';
 
@@ -31,6 +34,18 @@ export function createApp(opts = {}) {
   }
 
   app.use(makeCors(config.cors));
+
+  // Counts and timings for /admin/metrics; also the structured request log
+  // when `logging.requests` is on. Mounted before the rate limiter and the
+  // routers so rate-limited responses and unmatched paths still count.
+  const telemetry = makeRequestTelemetry({ logRequests: config.logging?.requests === true });
+  app.locals.telemetry = telemetry;
+  app.use(telemetry.middleware);
+
+  // Coarse per-IP DoS backstop for every route, including the file-serving
+  // and ownership-checked endpoints. The DB-backed buckets in rate-limit.js
+  // layer their precise login/signup/publish/download windows on top.
+  app.use(makeHttpRateLimiter(config));
 
   const jsonBody = express.json({ limit: '100kb' });
   app.use((req, res, next) => {
@@ -52,6 +67,7 @@ export function createApp(opts = {}) {
   app.use(mount('/tokens'), makeTokensRouter(shared));
   app.use(mount('/users'), makeUsersRouter(shared));
   app.use(mount('/notifications'), makeNotificationsRouter(shared));
+  app.use(root || '/', makeBlobsRouter(shared));
   app.use(root || '/', makePackagesRouter(shared));
   app.use(root || '/', makeDiscoveryRouter(shared));
   app.use(root || '/', makeAdminRouter(shared));
@@ -59,5 +75,5 @@ export function createApp(opts = {}) {
   app.use((req, res, next) => next(notFound()));
   app.use(errorHandler);
 
-  return { app, sql, config, rateLimiter };
+  return { app, sql, config, rateLimiter, telemetry };
 }

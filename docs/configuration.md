@@ -13,6 +13,9 @@ Every TwextHub instance is configured by defaults, a `config.yaml` file, and env
 - [Auth](#auth)
 - [Rate limits](#rate-limits)
 - [Pagination](#pagination)
+- [Limits](#limits)
+- [Compiler](#compiler)
+- [Logging](#logging)
 - [CORS](#cors)
 - [Behavior notes](#behavior-notes)
 - [Data directory layout](#data-directory-layout)
@@ -29,7 +32,7 @@ The only required value is `database.url`, either in the file or as `TWEXTHUB_DA
 
 `config.yaml` is overridable: `node src/server.js /path/to/config.yaml`, and `node src/migrate.js /path/to/config.yaml` or `node src/migrate.js --config file.yaml`.
 
-Boolean environment variables must be exactly `true` or `false`; numeric ones must be positive integers. Anything else fails startup with a message naming the offending variable. `TWEXTHUB_CORS_ALLOWED_ORIGINS` is the exception: it takes a comma-separated list of origins, or `*`.
+Boolean environment variables must be exactly `true` or `false`; numeric ones must be positive integers. Anything else fails startup with a message naming the offending variable. The two bucket counts that can be turned off — `rateLimits.publishPerWindow` and `rateLimits.downloadsPerIpPerWindow` — also accept `off` (or `null`) as their `null`. `TWEXTHUB_CORS_ALLOWED_ORIGINS` is the exception: it takes a comma-separated list of origins, or `*`.
 
 `dataDir` is resolved relative to the process working directory.
 
@@ -39,7 +42,7 @@ Boolean environment variables must be exactly `true` or `false`; numeric ones mu
 | --------------- | ----------------------- | -------------------------- | ------------------------------------------------------------------------ |
 | `port`          | `3000`                  | `TWEXTHUB_PORT`            | TCP port to listen on                                                    |
 | `dataDir`       | `./data`                | `TWEXTHUB_DATA_DIR`        | Directory holding published blobs and scratch space                      |
-| `apiRoot`       | `/v0`                   | `TWEXTHUB_API_ROOT`        | Prefix for all routes; `/v0`, `v0`, and `/v0/` are the same              |
+| `apiRoot`       | `/v1`                   | `TWEXTHUB_API_ROOT`        | Prefix for all routes; `/v1`, `v1`, and `/v1/` are the same              |
 | `publicBaseUrl` | `http://localhost:3000` | `TWEXTHUB_PUBLIC_BASE_URL` | Client-facing base URL; used to build download links                     |
 | `requireHttps`  | `false`                 | `TWEXTHUB_REQUIRE_HTTPS`   | Reject non-`https` requests with 403                                     |
 | `trustProxy`    | `false`                 | `TWEXTHUB_TRUST_PROXY`     | Express trust proxy: `true`, `false`, a hop count, or an address pattern |
@@ -64,12 +67,22 @@ Boolean environment variables must be exactly `true` or `false`; numeric ones mu
 
 ## Rate limits
 
-| Key                                 | Default | Environment                          | Purpose                          |
-| ----------------------------------- | ------- | ------------------------------------ | -------------------------------- |
-| `rateLimits.loginAttemptsPerWindow` | `5`     | `TWEXTHUB_LOGIN_ATTEMPTS_PER_WINDOW` | Failed logins allowed per window |
-| `rateLimits.loginWindowMinutes`     | `15`    | `TWEXTHUB_LOGIN_WINDOW_MINUTES`      | Window length for login attempts |
-| `rateLimits.signupsPerIpPerWindow`  | `5`     | `TWEXTHUB_SIGNUPS_PER_IP_PER_WINDOW` | Accounts per IP per window       |
-| `rateLimits.signupWindowMinutes`    | `15`    | `TWEXTHUB_SIGNUP_WINDOW_MINUTES`     | Window length for signups        |
+| Key                                  | Default | Environment                            | Purpose                                                              |
+| ------------------------------------ | ------- | -------------------------------------- | -------------------------------------------------------------------- |
+| `rateLimits.loginAttemptsPerWindow`  | `5`     | `TWEXTHUB_LOGIN_ATTEMPTS_PER_WINDOW`   | Failed logins allowed per window                                     |
+| `rateLimits.loginWindowMinutes`      | `15`    | `TWEXTHUB_LOGIN_WINDOW_MINUTES`        | Window length for login attempts                                     |
+| `rateLimits.signupsPerIpPerWindow`   | `5`     | `TWEXTHUB_SIGNUPS_PER_IP_PER_WINDOW`   | Accounts per IP per window                                           |
+| `rateLimits.signupWindowMinutes`     | `15`    | `TWEXTHUB_SIGNUP_WINDOW_MINUTES`       | Window length for signups                                            |
+| `rateLimits.publishPerWindow`        | `30`    | `TWEXTHUB_PUBLISH_PER_WINDOW`          | Publishes per account per window; `null` disables                    |
+| `rateLimits.publishWindowMinutes`    | `60`    | `TWEXTHUB_PUBLISH_WINDOW_MINUTES`      | Window length for publishes                                          |
+| `rateLimits.downloadsPerIpPerWindow` | `240`   | `TWEXTHUB_DOWNLOADS_PER_IP_PER_WINDOW` | Download endpoint hits per IP per window; `null` disables            |
+| `rateLimits.downloadWindowMinutes`   | `5`     | `TWEXTHUB_DOWNLOAD_WINDOW_MINUTES`     | Window length for download hits                                      |
+| `rateLimits.routesPerIpPerWindow`    | `600`   | `TWEXTHUB_ROUTES_PER_IP_PER_WINDOW`    | Global per-IP cap applied to every route; loopback traffic is exempt |
+| `rateLimits.routeWindowMinutes`      | `15`    | `TWEXTHUB_ROUTE_WINDOW_MINUTES`        | Window length for the global per-IP cap                              |
+
+Publishes are limited per account rather than per IP — CI runners commonly share an egress address — while downloads are limited per IP. The download bucket counts every hit on the download route, including ones that end in 404, so a scraper cannot probe it for free. Set either `...PerWindow` value to `null` to turn that bucket off.
+
+On top of those buckets, a coarse per-IP middleware (`express-rate-limit`) caps every route at `routesPerIpPerWindow` per `routeWindowMinutes` as a denial-of-service backstop. Requests from loopback addresses are exempt so local health probes cannot lock the service out; keep `trustProxy` set correctly or an attacker could spoof loopback via `X-Forwarded-For`.
 
 ## Pagination
 
@@ -77,6 +90,32 @@ Boolean environment variables must be exactly `true` or `false`; numeric ones mu
 | ------------------------- | ------- | ----------------------------------- | -------------------------------------------- |
 | `pagination.defaultLimit` | `20`    | `TWEXTHUB_PAGINATION_DEFAULT_LIMIT` | Page size when none is given                 |
 | `pagination.maxLimit`     | `50`    | `TWEXTHUB_PAGINATION_MAX_LIMIT`     | Upper bound on `limit` for any list endpoint |
+
+## Limits
+
+| Key                          | Default    | Environment                       | Purpose                                                     |
+| ---------------------------- | ---------- | --------------------------------- | ----------------------------------------------------------- |
+| `limits.maxBlobBytes`        | `2097152`  | `TWEXTHUB_MAX_BLOB_BYTES`         | Upper bound on a single published blob                      |
+| `limits.maxAccountBlobBytes` | `67108864` | `TWEXTHUB_MAX_ACCOUNT_BLOB_BYTES` | Per-account storage quota, applied at publish time          |
+| `limits.maxSourceBytes`      | `1048576`  | `TWEXTHUB_MAX_SOURCE_BYTES`       | Upper bound on the gzipped source tarball a publish carries |
+
+Publishing a version charges its blob bytes **and** the retained source tarball to the namespace account's running total. Deleting the extension refunds every byte it charged. An admin can override an account's cumulative quota with `PATCH /v1/admin/users/:namespace/quota`; a `null` `maxBlobBytes` resets it to the configured default.
+
+## Compiler
+
+| Key                  | Default | Environment                    | Purpose                                                         |
+| -------------------- | ------- | ------------------------------ | --------------------------------------------------------------- |
+| `compiler.command`   | —       | `TWEXTHUB_COMPILER`            | Node.js script to run instead of the bundled `@twext/twext` CLI |
+| `compiler.timeoutMs` | `30000` | `TWEXTHUB_COMPILER_TIMEOUT_MS` | Wall-clock limit for one build; the child is SIGKILLed past it  |
+| `compiler.memoryMb`  | `192`   | `TWEXTHUB_COMPILER_MEMORY_MB`  | V8 old-generation heap cap for the build child process          |
+
+## Logging
+
+| Key                | Default | Environment             | Purpose                                   |
+| ------------------ | ------- | ----------------------- | ----------------------------------------- |
+| `logging.requests` | `false` | `TWEXTHUB_LOG_REQUESTS` | Write one JSON line per request to stdout |
+
+The per-request line carries `time`, `method`, `path`, `route` (the matched Express route pattern), `status`, `durationMs`, and `ip`. Route patterns keep parameterized URLs (`/v1/@:namespace/:id/versions/:version/download`) from exploding log volume; raw paths only appear in the `path` field, and never in `/admin/metrics`.
 
 ## CORS
 
@@ -90,7 +129,7 @@ Requests without an `Origin` header (the `twext` CLI, curl) are never affected. 
 
 ## Behavior notes
 
-- Login is limited per namespace-and-IP and per IP, both at once. Signups are limited per IP. Exceeding a limit returns 429 with a `Retry-After` header. Rate-limit rows are pruned by a background job and again on boot.
+- Login is limited per namespace-and-IP and per IP, both at once. Signups are limited per IP. Publishes are limited per account; download-endpoint hits per IP. Exceeding a limit returns 429 with a `Retry-After` header. Rate-limit rows are pruned by a background job and again on boot.
 - `requireHttps` only distinguishes real clients behind a TLS-terminating proxy when `trustProxy` is set.
 - `publicBaseUrl` appears in API responses as the start of download URLs. Keep it the client-facing address, not an internal one.
 - `apiRoot` moves every route at once, including the moderation queue and download links. Decide on it before going public; changing it later moves the registry's URLs.
@@ -100,18 +139,22 @@ Requests without an `Origin` header (the `twext` CLI, curl) are never affected. 
 ```text
 data/
 ├── blobs/
-│   └── <namespace>/
-│       └── <extension-id>/
-│           └── <version>.js     # published blobs (durable)
-├── tmp/                         # in-flight publish uploads
+│   └── <xx>/
+│       └── <rest-of-digest>     # compiled blobs, keyed by SHA-256 (durable)
+├── sources/
+│   └── <xx>/
+│       └── <rest-of-digest>     # uploaded source tarballs, keyed by SHA-256 (durable)
+├── tmp/                         # build sandboxes and in-flight uploads
 └── quarantine/                  # deleted accounts awaiting final purge
 ```
 
-`blobs/` holds durable content. `tmp/` and `quarantine/` are swept of anything older than an hour on boot.
+`blobs/` and `sources/` hold durable, content-addressed content; both must be preserved. `tmp/` and `quarantine/` are swept of anything older than an hour on boot.
+
+A background maintenance job runs every six hours: it deletes files under `blobs/` that no `versions` row references and are at least an hour old (a blob is written to disk before its `versions` row exists, so anything younger is left for the next pass), and once a day re-hashes every stored blob, logging and exporting (`twexthub_storage_integrity_errors`) any file that is missing or no longer matches its recorded digest. The scrub never deletes; an operator decides what to do about a mismatch.
 
 ## Request size limits
 
-Ordinary JSON bodies are capped at 100 KB. The publish endpoint accepts up to 25 MB. A proxy in front must permit the larger body size or publishes will fail there.
+Ordinary JSON bodies are capped at 100 KB. The publish endpoint instead takes a gzipped source tarball, capped at `limits.maxSourceBytes` (1 MB by default). A proxy in front must permit a body at least that large or publishes will fail there.
 
 ## Not runtime configuration
 

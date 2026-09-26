@@ -7,9 +7,11 @@ import {
   existsSync,
   rmSync,
 } from 'node:fs';
+import { copyFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
+import { BLOB_GC_LOCK_KEY, blobPathFor, hashFile, sha512Base64 } from './blobs.js';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 export const MIGRATIONS_DIR = path.join(moduleDir, '..', 'migrations');
@@ -61,9 +63,15 @@ export async function reconcileOnBoot(sql, config) {
     `;
     for (const row of staging) {
       const blobAbs = path.join(dataDir, row.blob_path);
-      if (existsSync(blobAbs)) {
-        const [owner] = await tx`SELECT has_published FROM users WHERE id = ${row.owner_id}`;
-        const status = owner?.has_published ? 'published' : 'pending';
+      const sourceAbs = row.source_path ? path.join(dataDir, row.source_path) : null;
+      const complete = existsSync(blobAbs) && (!sourceAbs || existsSync(sourceAbs));
+      if (complete) {
+        // The namespace account decides the status, same as the live publish
+        // path: a delegated publisher's own history says nothing about whether
+        // this namespace still goes through review.
+        const [account] =
+          await tx`SELECT has_published FROM users WHERE namespace = ${row.namespace}`;
+        const status = account?.has_published ? 'published' : 'pending';
         await tx`
           UPDATE versions
           SET status = ${status}, published_at = ${status === 'published' ? new Date() : null}
@@ -73,9 +81,18 @@ export async function reconcileOnBoot(sql, config) {
           `reconciled staging version ${row.namespace}/${row.extension_id}@${row.version} -> ${status}`,
         );
       } else {
+        // The charge committed with the staging row, so dropping the row has to
+        // give the bytes back the delete path would refund.
+        const charge = Number(row.blob_size ?? 0) + Number(row.source_size ?? 0);
+        if (charge > 0) {
+          await tx`
+            UPDATE users SET blob_bytes = GREATEST(blob_bytes - ${charge}, 0)
+            WHERE namespace = ${row.namespace}
+          `;
+        }
         await tx`DELETE FROM versions WHERE id = ${row.id}`;
         console.log(
-          `removed staging version ${row.namespace}/${row.extension_id}@${row.version} (blob missing)`,
+          `removed staging version ${row.namespace}/${row.extension_id}@${row.version} (blob or source missing)`,
         );
       }
     }
@@ -116,6 +133,55 @@ export async function reconcileOnBoot(sql, config) {
   await sql`DELETE FROM rate_limit_entries WHERE window_start < ${rateCutoff}`;
 
   await sql`DELETE FROM sessions WHERE expires_at < now()`;
+
+  // Pre-digest rows (published before the blob_digest migration) point at
+  // legacy namespace/blob paths. Re-key them to content-addressed digests so
+  // the whole table can be served from /blobs/:digest and evicted by GC.
+  //
+  // Two instances starting at once would select the same rows and then race on
+  // the same files, so the pass runs under the blob GC lock and picks its rows
+  // only once it holds it: by then a peer has finished and written their
+  // digests, and those rows no longer match.
+  const legacyPaths = [];
+  await sql.begin(async (tx) => {
+    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
+    const legacy = await tx`
+      SELECT * FROM versions
+      WHERE blob_digest IS NULL AND status IN ('published', 'yanked', 'deprecated')
+    `;
+    for (const row of legacy) {
+      const legacyPath = path.join(dataDir, row.blob_path);
+      let digest;
+      try {
+        digest = await hashFile(legacyPath);
+      } catch {
+        console.warn(
+          `indexing skipped for ${row.namespace}/${row.extension_id}@${row.version}: missing blob`,
+        );
+        continue;
+      }
+      const codeBuffer = readFileSync(legacyPath);
+      const digestAbs = blobPathFor(dataDir, digest);
+      // The shard for a digest that has never been stored is not there yet, and
+      // nothing else in the data directory creates it.
+      mkdirSync(path.dirname(digestAbs), { recursive: true });
+      await copyFile(legacyPath, digestAbs);
+      await tx`
+        UPDATE versions
+        SET blob_digest = ${digest},
+            blob_size = ${codeBuffer.length},
+            blob_sha512 = ${sha512Base64(codeBuffer)},
+            blob_path = ${path.join('blobs', digest.slice(0, 2), digest.slice(2))}
+      WHERE id = ${row.id}
+      `;
+      if (legacyPath !== digestAbs) {
+        legacyPaths.push(legacyPath);
+      }
+    }
+  });
+  for (const legacyPath of legacyPaths) {
+    await rm(legacyPath, { force: true });
+  }
 }
 
 export function ensureDataDirs(dataDir) {

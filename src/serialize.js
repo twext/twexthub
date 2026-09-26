@@ -6,6 +6,11 @@ export function userToObject(row) {
     displayName: row.display_name,
     role: row.role,
     hasPublished: row.has_published,
+    bio: row.bio ?? '',
+    website: row.website ?? null,
+    github: row.github ?? null,
+    avatarUrl: row.avatar_url ?? null,
+    bannerUrl: row.banner_url ?? null,
     createdAt: row.created_at.toISOString(),
     termsAcceptedVersion: row.terms_accepted_version ?? null,
   };
@@ -59,14 +64,23 @@ export function versionToObject(row, config) {
     name: row.name,
     license: row.license,
     description: row.description,
+    visibility: row.visibility ?? 'public',
     createdAt: row.created_at.toISOString(),
   };
   if (row.author) out.author = row.author;
   if (row.published_at) out.publishedAt = row.published_at.toISOString();
-  if (row.status === 'published' || row.status === 'yanked') {
-    out.dist = {
+  if (row.status === 'deprecated') {
+    out.deprecation = row.deprecation_message ?? null;
+  }
+  if (row.status === 'published' || row.status === 'yanked' || row.status === 'deprecated') {
+    const dist = {
       downloadUrl: downloadUrl(config, row.namespace, row.extension_id, row.version),
     };
+    if (row.blob_digest) {
+      dist.digest = `sha256:${row.blob_digest}`;
+      if (row.blob_sha512) dist.integrity = `sha512-${row.blob_sha512}`;
+    }
+    out.dist = dist;
   }
   return out;
 }
@@ -75,6 +89,12 @@ export function downloadUrl(config, namespace, id, version) {
   const apiRoot = normalizeApiRoot(config.apiRoot);
   const root = apiRoot ? `/${apiRoot}` : '';
   return `${config.publicBaseUrl.replace(/\/$/, '')}${root}/@${namespace}/${id}/versions/${version}/download`;
+}
+
+export function sourceUrl(config, namespace, id, version) {
+  const apiRoot = normalizeApiRoot(config.apiRoot);
+  const root = apiRoot ? `/${apiRoot}` : '';
+  return `${config.publicBaseUrl.replace(/\/$/, '')}${root}/@${namespace}/${id}/versions/${version}/source`;
 }
 
 export function extensionSummaryFromRow(row) {
@@ -101,8 +121,13 @@ export function extensionDetailFromRow(row, versions) {
 }
 
 export function pendingVersionToObject(row, config) {
-  return {
+  const out = {
     ...versionToObject(row, config),
     ownerNamespace: row.namespace,
   };
+  if (row.build_log) out.buildLog = row.build_log;
+  if (row.build_error) out.buildError = row.build_error;
+  if (row.source_path)
+    out.sourceUrl = sourceUrl(config, row.namespace, row.extension_id, row.version);
+  return out;
 }

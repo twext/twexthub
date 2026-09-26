@@ -26,10 +26,29 @@ export const DEFAULTS = {
     loginWindowMinutes: 15,
     signupsPerIpPerWindow: 5,
     signupWindowMinutes: 15,
+    publishPerWindow: 30,
+    publishWindowMinutes: 60,
+    downloadsPerIpPerWindow: 240,
+    downloadWindowMinutes: 5,
+    routesPerIpPerWindow: 600,
+    routeWindowMinutes: 15,
   },
   pagination: {
     defaultLimit: 20,
     maxLimit: 50,
+  },
+  limits: {
+    maxBlobBytes: 2 * 1024 * 1024,
+    maxAccountBlobBytes: 64 * 1024 * 1024,
+    maxSourceBytes: 1024 * 1024,
+  },
+  compiler: {
+    command: null,
+    timeoutMs: 30_000,
+    memoryMb: 192,
+  },
+  logging: {
+    requests: false,
   },
   cors: {
     allowedOrigins: '*',
@@ -63,18 +82,43 @@ const ENV_OVERRIDES = [
   ['rateLimits.loginWindowMinutes', 'TWEXTHUB_LOGIN_WINDOW_MINUTES'],
   ['rateLimits.signupsPerIpPerWindow', 'TWEXTHUB_SIGNUPS_PER_IP_PER_WINDOW'],
   ['rateLimits.signupWindowMinutes', 'TWEXTHUB_SIGNUP_WINDOW_MINUTES'],
+  ['rateLimits.publishPerWindow', 'TWEXTHUB_PUBLISH_PER_WINDOW'],
+  ['rateLimits.publishWindowMinutes', 'TWEXTHUB_PUBLISH_WINDOW_MINUTES'],
+  ['rateLimits.downloadsPerIpPerWindow', 'TWEXTHUB_DOWNLOADS_PER_IP_PER_WINDOW'],
+  ['rateLimits.downloadWindowMinutes', 'TWEXTHUB_DOWNLOAD_WINDOW_MINUTES'],
+  ['rateLimits.routesPerIpPerWindow', 'TWEXTHUB_ROUTES_PER_IP_PER_WINDOW'],
+  ['rateLimits.routeWindowMinutes', 'TWEXTHUB_ROUTE_WINDOW_MINUTES'],
   ['pagination.defaultLimit', 'TWEXTHUB_PAGINATION_DEFAULT_LIMIT'],
   ['pagination.maxLimit', 'TWEXTHUB_PAGINATION_MAX_LIMIT'],
+  ['limits.maxBlobBytes', 'TWEXTHUB_MAX_BLOB_BYTES'],
+  ['limits.maxAccountBlobBytes', 'TWEXTHUB_MAX_ACCOUNT_BLOB_BYTES'],
+  ['limits.maxSourceBytes', 'TWEXTHUB_MAX_SOURCE_BYTES'],
+  ['compiler.command', 'TWEXTHUB_COMPILER'],
+  ['compiler.timeoutMs', 'TWEXTHUB_COMPILER_TIMEOUT_MS'],
+  ['compiler.memoryMb', 'TWEXTHUB_COMPILER_MEMORY_MB'],
+  ['logging.requests', 'TWEXTHUB_LOG_REQUESTS'],
   ['cors.allowedOrigins', 'TWEXTHUB_CORS_ALLOWED_ORIGINS'],
 ];
 
-function coerceEnvValue(raw, current, envName) {
-  if (typeof current === 'boolean') {
+// The buckets that a null switches off entirely. An environment variable is a
+// string, so "off" (or "null") is how an operator spells it there; no other key
+// may use those spellings, or a mistyped port or quota would become null
+// instead of failing startup.
+const NULLABLE_ENV_KEYS = new Set([
+  'rateLimits.publishPerWindow',
+  'rateLimits.downloadsPerIpPerWindow',
+]);
+
+// `fallback` is the DEFAULTS value for the key, not whatever YAML merged in: the
+// coercion each value goes through is the one its default type calls for.
+function coerceEnvValue(raw, fallback, envName, key) {
+  if (NULLABLE_ENV_KEYS.has(key) && (raw === 'off' || raw === 'null')) return null;
+  if (typeof fallback === 'boolean') {
     if (raw === 'true' || raw === '1') return true;
     if (raw === 'false' || raw === '0') return false;
     throw new Error(`${envName} must be "true" or "false" (got "${raw}")`);
   }
-  if (typeof current === 'number') {
+  if (typeof fallback === 'number') {
     const n = Number(raw);
     if (!Number.isInteger(n) || n <= 0) {
       throw new Error(`${envName} must be a positive integer (got "${raw}")`);
@@ -114,7 +158,12 @@ function applyEnvOverrides(config) {
       target[last] = coerceAllowedOrigins(raw);
       continue;
     }
-    target[last] = coerceEnvValue(raw, target[last], envName);
+    target[last] = coerceEnvValue(
+      raw,
+      parts.reduce((acc, part) => acc[part], DEFAULTS),
+      envName,
+      key,
+    );
   }
 }
 

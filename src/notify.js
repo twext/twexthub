@@ -38,3 +38,11 @@ export function tokensRevokedMessage(actorNamespace) {
 export function roleChangedMessage(role) {
   return `Your account role changed to "${role}".`;
 }
+
+export function addedAsOwnerMessage(actorNamespace, namespace, id) {
+  return `You can now manage @${namespace}/${id} (added by @${actorNamespace}).`;
+}
+
+export function removedAsOwnerMessage(actorNamespace, namespace, id) {
+  return `You were removed as an owner of @${namespace}/${id} by @${actorNamespace}.`;
+}

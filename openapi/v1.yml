@@ -1,7 +1,7 @@
 openapi: '3.1.0'
 info:
   title: TwextHub API
-  version: '0.1.0'
+  version: '1.0.0'
   license:
     name: Apache-2.0
     identifier: Apache-2.0
@@ -9,11 +9,14 @@ info:
     TwextHub is a lightweight registry for publishing and discovering
     Twext-compiled TurboWarp extensions ("Twexts"). Packages are namespaced
     to their publishing account (`@namespace/id`) and versioned with SemVer.
-    Because the Twext compiler does not embed manifest metadata into its
-    compiled output (unlike the old Warp/Fluorite `Warp.meta` convention),
-    every publish call must submit its manifest fields explicitly as JSON
-    alongside the compiled code — TwextHub never parses the JS blob to
-    recover metadata.
+    Publishing sends a gzipped tarball of the Twext project (`twext.yml` plus
+    sources); the hub validates the manifest and compiles the extension
+    itself in a sandboxed build, so the reviewed source is exactly what
+    produces the served blob.
+
+    The `/v1` surface documented here is stable as of 1.0.0. Breaking changes
+    require a new major version; additive changes bump the minor (see
+    CHANGELOG.md).
 
     Every authenticated (`Userspace`/`Adminspace`) endpoint requires the
     caller to have accepted the current Terms of Service; a caller who
@@ -31,7 +34,7 @@ info:
     tokens, act on `/admin/*` endpoints, or change account settings —
     an automation token calling any of those gets a `403`.
 servers:
-  - url: https://{host}/v0
+  - url: https://{host}/v1
     variables:
       host:
         default: hub.twext.dev
@@ -330,7 +333,9 @@ paths:
       tags: [Userspace]
       description: >
         Self or admin. Only an admin may set `role`. Changing `password`
-        revokes all of that account's existing tokens.
+        revokes all of that account's existing tokens. Profile fields
+        (`bio`, `website`, `github`, `avatarUrl`, `bannerUrl`) are
+        self-service and do not require re-accepting the Terms.
       requestBody:
         required: true
         content:
@@ -342,6 +347,25 @@ paths:
                 displayName: { type: string, maxLength: 80 }
                 password: { type: string, minLength: 8, writeOnly: true }
                 role: { $ref: '#/components/schemas/Role' }
+                bio: { type: ['string', 'null'], maxLength: 280 }
+                website: { type: ['string', 'null'], maxLength: 400, format: uri }
+                github:
+                  type: ['string', 'null']
+                  description: GitHub username, shown as a profile link.
+                avatarUrl:
+                  {
+                    type: ['string', 'null'],
+                    maxLength: 400,
+                    format: uri,
+                    description: 'Referenced, not proxied.',
+                  }
+                bannerUrl:
+                  {
+                    type: ['string', 'null'],
+                    maxLength: 400,
+                    format: uri,
+                    description: 'Referenced, not proxied.',
+                  }
       responses:
         '200':
           description: Updated
@@ -361,6 +385,28 @@ paths:
         '204': { description: Deleted }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /users/{namespace}/avatar:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+    get:
+      summary: Get an account's avatar
+      operationId: getUserAvatar
+      tags: [Open]
+      security: []
+      description: >
+        Redirects to the account's external avatar URL when one is set;
+        otherwise serves a deterministic SVG identicon derived from the
+        namespace (no email, no tracking dependency).
+      responses:
+        '200':
+          description: Identicon SVG (no avatar configured)
+          content:
+            image/svg+xml:
+              schema: { type: string }
+        '302':
+          description: Redirect to the configured external avatar URL
         '404': { $ref: '#/components/responses/NotFound' }
 
   # ---------------------------------------------------------- Notifications
@@ -446,8 +492,10 @@ paths:
       operationId: listExtensions
       tags: [Open]
       security: []
-      description: Latest published version per `(namespace, id)`, newest first.
+      description: Latest published version per `(namespace, id)`. Defaults to newest-first; `sort` changes the ranking.
       parameters:
+        - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/LicenseFilter'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Limit'
       responses:
@@ -476,6 +524,8 @@ paths:
         - name: query
           in: query
           schema: { type: string }
+        - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/LicenseFilter'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Limit'
       responses:
@@ -492,6 +542,101 @@ paths:
                     items: { $ref: '#/components/schemas/ExtensionSummary' }
                   pagination: { $ref: '#/components/schemas/CursorPage' }
         '400': { $ref: '#/components/responses/BadRequest' }
+
+  /extensions/trending:
+    get:
+      summary: Extensions with the most downloads in the last week
+      operationId: getTrendingExtensions
+      tags: [Open]
+      security: []
+      responses:
+        '200':
+          description: Up to 50 extensions ordered by 7-day downloads
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/ExtensionSummary' }
+                  pagination: { $ref: '#/components/schemas/CursorPage' }
+
+  /badge/@{namespace}/{id}:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+    get:
+      summary: Shields-style SVG badge
+      operationId: getExtensionBadge
+      tags: [Open]
+      security: []
+      description: >
+        All three facts in one pill: version, download count, and license for
+        the latest published version.
+
+
+        Roughly 250px wide, which is wide to embed. Prefer the
+        `/version`, `/downloads`, and `/license` variants, which are each
+        90-140px and can be embedded independently.
+
+
+        The right pill's colour is derived from the extension's identity, so it
+        is stable per extension and does not vary with `label`.
+      parameters:
+        - $ref: '#/components/parameters/BadgeLabel'
+      responses:
+        '200':
+          description: SVG badge, cacheable for 5 minutes
+          content:
+            image/svg+xml:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /badge/@{namespace}/{id}/{field}:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+      - name: field
+        in: path
+        required: true
+        schema: { type: string, enum: [version, downloads, license] }
+        description: Which single fact to report.
+    get:
+      summary: One-fact SVG badge
+      operationId: getExtensionFieldBadge
+      tags: [Open]
+      security: []
+      description: >
+        A badge for one fact about the latest published version. The left pill
+        names the fact, so the right pill is a bare value and the unit lives in
+        the label. The right pill's colour is derived from the extension's
+        identity and is the same across all of an extension's badges, so a set
+        of them reads as one row.
+      parameters:
+        - $ref: '#/components/parameters/BadgeLabel'
+      responses:
+        '200':
+          description: SVG badge, cacheable for 5 minutes
+          content:
+            image/svg+xml:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /feed.atom:
+    get:
+      summary: Atom feed of the latest publishes
+      operationId: getAtomFeed
+      tags: [Open]
+      security: []
+      description: RFC 4287 feed of the newest published version per public extension, up to 50 entries.
+      responses:
+        '200':
+          description: Atom feed
+          content:
+            application/atom+xml:
+              schema: { type: string }
 
   /terms:
     get:
@@ -640,34 +785,41 @@ paths:
       - $ref: '#/components/parameters/NamespacePath'
       - $ref: '#/components/parameters/ExtensionIdPath'
     post:
-      summary: Publish a new version
+      summary: Publish a new version from source
       operationId: publishVersion
       tags: [Userspace]
       description: >
-        `namespace` in the path must match the authenticated caller (admins
-        may publish on behalf of any namespace). A caller's first-ever
-        publish is held as `pending`; once an admin approves it, all of
-        that caller's later publishes go straight to `published`. Only one
-        `pending` version per owner may exist at a time. `manifest.id` must
-        equal the `id` path segment, and `manifest.version` must be valid
-        SemVer strictly greater than the current highest published version
-        for this package (yanked versions still count toward that check).
-        Requires the `publish` scope (sessions satisfy this implicitly).
+        Uploads a gzipped tarball of the Twext project (`twext.yml`, sources,
+        `package.json` with `"type": "module"`). The server validates the
+        manifest against the path, compiles the project in a sandboxed child
+        process (no network, bounded filesystem/memory/time), and stages the
+        result for moderation; the build log rides along in the queue entry.
+        A caller's first-ever publish is held as `pending`; once an admin
+        approves it, later publishes go straight to `published`. Only one
+        `pending`/`staging` version per owner may exist at a time. The
+        version in `twext.yml` must be valid SemVer strictly greater than
+        the current highest version for this package. Requires the `publish`
+        scope (sessions satisfy this implicitly). A legacy JSON body gets
+        `415`.
+      parameters:
+        - name: visibility
+          in: query
+          schema: { type: string, enum: [public, private], default: public }
       requestBody:
         required: true
         content:
-          application/json:
+          application/gzip:
             schema:
-              type: object
-              required: [manifest, code]
-              properties:
-                manifest: { $ref: '#/components/schemas/Manifest' }
-                code:
-                  type: string
-                  description: The compiled Twext output (a single IIFE JavaScript file), as text.
+              type: string
+              format: binary
+              description: Tarball of the project directory.
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
       responses:
         '201':
-          description: Version created (status reflects moderation state)
+          description: Version created (status reflects moderation state); includes the build log and a source URL
           content:
             application/json:
               schema: { $ref: '#/components/schemas/VersionInfo' }
@@ -677,8 +829,248 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
+        '413':
+          description: Tarball or compiled output over the configured size caps, or the account is over quota
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '415':
+          description: Body was not a gzip tarball (e.g. the retired JSON publish format)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: Invalid tarball, invalid manifest, or a failed build (the response carries `buildLog` and `buildError`)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /@{namespace}/{id}/versions/resolve:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+    get:
+      summary: Resolve a SemVer range to a concrete version
+      operationId: resolveVersionRange
+      tags: [Open]
+      security: []
+      description: Returns the newest published (or deprecated) version satisfying the range; yanked versions are excluded.
+      parameters:
+        - name: range
+          in: query
+          required: true
+          schema: { type: string }
+          description: A SemVer range such as `^1.2` or `>=2.0.0 <3`.
+      responses:
+        '200':
+          description: The matching version
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VersionInfo' }
+        '404':
+          description: No published version satisfies the range
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: The range is not valid SemVer
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /@{namespace}/{id}/tags:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+    get:
+      summary: List dist-tags
+      operationId: listDistTags
+      tags: [Open]
+      security: []
+      responses:
+        '200':
+          description: Tag name to version
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  { $ref: '#/components/schemas/VersionInfo/properties/version' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /@{namespace}/{id}/tags/{tag}:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+      - name: tag
+        in: path
+        required: true
+        schema: { type: string, pattern: '^[a-zA-Z0-9-]{1,30}$' }
+        description: '`latest` is reserved and implicit.'
+    put:
+      summary: Point a dist-tag at a published version
+      operationId: setDistTag
+      tags: [Userspace]
+      description: Owner or admin; requires the `publish` scope.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: { type: string, description: Must already be published. }
+      responses:
+        '204': { description: Tag set }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
+    delete:
+      summary: Remove a dist-tag
+      operationId: deleteDistTag
+      tags: [Userspace]
+      description: Owner or admin.
+      responses:
+        '204': { description: Tag removed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /@{namespace}/{id}/owners:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+    get:
+      summary: List an extension's owners
+      operationId: listExtensionOwners
+      tags: [Open]
+      security: []
+      responses:
+        '200':
+          description: Owners in join order
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required: [namespace, displayName]
+                      properties:
+                        namespace: { $ref: '#/components/schemas/Namespace' }
+                        displayName: { type: string }
+                        role: { $ref: '#/components/schemas/Role' }
+                        addedAt: { type: string, format: date-time }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /@{namespace}/{id}/owners/{ownerNamespace}:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+      - name: ownerNamespace
+        in: path
+        required: true
+        schema: { $ref: '#/components/schemas/Namespace' }
+    put:
+      summary: Add an owner
+      operationId: addExtensionOwner
+      tags: [Userspace]
+      description: Existing owner or admin. The new owner is notified; removing the namespace account itself is refused.
+      responses:
+        '204': { description: Owner added (idempotent) }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      summary: Remove an owner
+      operationId: removeExtensionOwner
+      tags: [Userspace]
+      description: Existing owner or admin. Transfer is grant-then-remove.
+      responses:
+        '204': { description: Owner removed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /@{namespace}/{id}/webhooks:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+    get:
+      summary: List an extension's webhooks
+      operationId: listWebhooks
+      tags: [Userspace]
+      description: Owner or admin. Never returns secrets.
+      responses:
+        '200':
+          description: Registered webhooks
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Webhook' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      summary: Create a webhook
+      operationId: createWebhook
+      tags: [Userspace]
+      description: >
+        Owner or admin. The `secret` is returned exactly once; deliveries are
+        signed with `X-TwextHub-Signature` (HMAC-SHA256 over the raw body).
+        URLs resolving to private or loopback addresses are rejected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url, events]
+              properties:
+                url: { type: string, format: uri }
+                events:
+                  type: array
+                  items: { $ref: '#/components/schemas/WebhookEvent' }
+                  minItems: 1
+                active: { type: boolean, default: true }
+      responses:
+        '201':
+          description: Created, with the one-time secret
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookCreated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /@{namespace}/{id}/webhooks/{webhookId}:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+      - name: webhookId
+        in: path
+        required: true
+        schema: { type: integer }
+    delete:
+      summary: Delete a webhook
+      operationId: deleteWebhook
+      tags: [Userspace]
+      description: Owner or admin. Pending deliveries are dropped.
+      responses:
+        '204': { description: Deleted }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /@{namespace}/{id}/versions/{version}:
     parameters:
@@ -691,9 +1083,9 @@ paths:
       tags: [Open]
       security: []
       description: >
-        `version` may be a literal SemVer string or the literal `latest`
-        (highest published SemVer, not most-recently-published). Non-owners
-        never see `pending`, `rejected`, or `staging` versions.
+        `version` may be a literal SemVer string, a dist-tag, or the literal
+        `latest` (highest published SemVer, not most-recently-published).
+        Non-owners never see `pending`, `rejected`, or `staging` versions.
       responses:
         '200':
           description: Version found
@@ -740,6 +1132,65 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /@{namespace}/{id}/versions/{version}/deprecate:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+      - $ref: '#/components/parameters/VersionPath'
+    patch:
+      summary: Deprecate or undeprecate a version
+      operationId: deprecateVersion
+      tags: [Userspace]
+      description: >
+        Owner or admin; requires the `publish` scope. A non-null `message`
+        marks the version `deprecated` (still listable and downloadable, but
+        flagged); `null` clears the deprecation. Yanked versions cannot be
+        deprecated.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message:
+                  {
+                    type: ['string', 'null'],
+                    description: 'A non-empty string to set, or null to clear.',
+                  }
+      responses:
+        '200':
+          description: Updated version
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VersionInfo' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /@{namespace}/{id}/versions/{version}/source:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+      - $ref: '#/components/parameters/VersionPath'
+    get:
+      summary: Download the source tarball of a version
+      operationId: downloadVersionSource
+      tags: [Userspace]
+      description: >
+        Session-authenticated owners and admins only. Returns the exact
+        gzipped tarball that was published, for local rebuilds and review.
+      responses:
+        '200':
+          description: Gzipped project tarball
+          content:
+            application/gzip:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /@{namespace}/{id}/versions/{version}/download:
     parameters:
       - $ref: '#/components/parameters/NamespacePath'
@@ -753,11 +1204,12 @@ paths:
         - {}
         - BearerAuth: []
       description: >
-        Serves the raw compiled JS, including yanked versions, so existing
-        consumers keep working. Authentication is optional: published and
-        yanked versions are public, while a session-authenticated admin may
-        send a bearer token to also fetch a `pending` version's source for
-        review before approving. 404 for any other status or a missing blob.
+        Serves the raw compiled JS, including yanked and deprecated versions,
+        so existing consumers keep working. Authentication is optional:
+        published, yanked, and deprecated versions are public, while a
+        session-authenticated admin may fetch a `pending` version for review.
+        Private versions require an authorized bearer token. 404 for any
+        other status or a missing blob.
       responses:
         '200':
           description: Compiled extension
@@ -767,6 +1219,96 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
 
   # --------------------------------------------------------------- Admin
+  /admin/audit:
+    get:
+      summary: Append-only audit trail of privileged actions
+      operationId: listAuditLog
+      tags: [Adminspace]
+      description: >
+        Records publishes, review decisions, yanks, deprecations, tag and
+        owner changes, quota changes, role changes, and access grants,
+        newest first.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Paginated audit entries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/AuditEntry' }
+                  pagination: { $ref: '#/components/schemas/CursorPage' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/users/{namespace}/quota:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+    get:
+      summary: Read an account's storage usage and quota
+      operationId: getUserQuota
+      tags: [Adminspace]
+      responses:
+        '200':
+          description: Current usage
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Quota' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      summary: Set an account's storage quota override
+      operationId: setUserQuota
+      tags: [Adminspace]
+      description: '`null` resets the account to the instance default.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [maxBlobBytes]
+              properties:
+                maxBlobBytes: { type: ['integer', 'null'], minimum: 1 }
+      responses:
+        '200':
+          description: Updated quota
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Quota' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /admin/metrics:
+    get:
+      summary: Prometheus metrics
+      operationId: getAdminMetrics
+      tags: [Adminspace]
+      description: >
+        Registry gauges (accounts, published extensions, versions by status,
+        downloads, storage, integrity failures, uptime) plus per-route HTTP
+        counters and durations. Never includes raw request paths.
+      responses:
+        '200':
+          description: Prometheus text exposition
+          content:
+            text/plain:
+              schema: { type: string }
+              examples:
+                registry:
+                  value: |
+                    # HELP twexthub_versions_total Versions by review status.
+                    # TYPE twexthub_versions_total gauge
+                    twexthub_versions_total{status="published"} 42
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
   /admin/notifications:
     post:
       summary: Broadcast a notification to every account
@@ -809,6 +1351,7 @@ paths:
       summary: Cross-owner moderation queue
       operationId: listVersionsForReview
       tags: [Adminspace]
+      description: Queue entries carry the build log and a source URL for reviewing the uploaded project.
       parameters:
         - name: status
           in: query
@@ -855,13 +1398,35 @@ components:
       in: path
       required: true
       schema: { $ref: '#/components/schemas/ExtensionId' }
+    BadgeLabel:
+      name: label
+      in: query
+      required: false
+      schema: { type: string }
+      description: >
+        Text for the left pill, instead of the extension id or the fact's name.
+        Long labels are cut to 304px of measured width, so how many characters
+        fit depends on the glyphs: about 27 East Asian characters, around 30
+        wide Latin capitals, or between 50 and 100 ordinary lowercase ones. East
+        Asian and emoji characters are measured a full em wide, everything else
+        at its own advance width.
     VersionPath:
       name: version
       in: path
       required: true
       schema:
         type: string
-        description: SemVer string, or the literal `latest`.
+        description: SemVer string, a dist-tag name, or the literal `latest`.
+    Sort:
+      name: sort
+      in: query
+      schema: { type: string, enum: [recent, downloads, updated, name], default: recent }
+      description: Ranking for list responses. Cursors are sort-specific.
+    LicenseFilter:
+      name: license
+      in: query
+      schema: { type: string }
+      description: Exact SPDX match (case-sensitive), e.g. `MIT` or `Apache-2.0`.
 
   schemas:
     Namespace:
@@ -889,14 +1454,24 @@ components:
     NotificationKind:
       type: string
       enum:
-        [review.approved, review.rejected, terms.bumped, tokens.revoked, role.changed, broadcast]
+        [
+          review.approved,
+          review.rejected,
+          terms.bumped,
+          tokens.revoked,
+          role.changed,
+          broadcast,
+          extension.owner.added,
+          extension.owner.removed,
+        ]
       description: |
         What produced the notification. Emit points: `review.*` on an admin's
         approve/reject of a pending version, `terms.bumped` when a terms
         update lands (only sent to accounts that had accepted a previous
         version), `tokens.revoked` when an admin resets another account's
         password, `role.changed` on a role change, `broadcast` from
-        instance-wide admin announcements.
+        instance-wide admin announcements, `extension.owner.*` when an
+        account is added to or removed from an extension's owner list.
 
     Notification:
       type: object
@@ -904,7 +1479,7 @@ components:
       properties:
         id: { type: string, description: "The notification row's own id, not a hash of any token." }
         kind: { $ref: '#/components/schemas/NotificationKind' }
-        message: { type: string, description: Pre-rendered, human-readable text. }
+        message: { type: string, description: 'Pre-rendered, human-readable text.' }
         payload:
           type: object
           description: >-
@@ -955,16 +1530,21 @@ components:
 
     User:
       type: object
-      required: [namespace, displayName, role, hasPublished, createdAt, termsAcceptedVersion]
+      required: [namespace, displayName, role, hasPublished, createdAt]
       properties:
         namespace: { $ref: '#/components/schemas/Namespace' }
         displayName: { type: string }
         role: { $ref: '#/components/schemas/Role' }
         hasPublished: { type: boolean }
+        bio: { type: string }
+        website: { type: ['string', 'null'], format: uri }
+        github: { type: ['string', 'null'] }
+        avatarUrl: { type: ['string', 'null'], format: uri }
+        bannerUrl: { type: ['string', 'null'], format: uri }
         createdAt: { type: string, format: date-time, readOnly: true }
         termsAcceptedVersion:
           type: ['integer', 'null']
-          description: Terms of Service `version` this account last accepted, or `null` if never accepted.
+          description: Terms of Service `version` this account last accepted, or `null` if never accepted. Present only for self or admin viewers.
 
     LegalDocument:
       type: object
@@ -1022,19 +1602,33 @@ components:
         namespace: { $ref: '#/components/schemas/Namespace' }
         id: { $ref: '#/components/schemas/ExtensionId' }
         version: { type: string }
-        status: { type: string, enum: [staging, pending, published, rejected, yanked] }
+        status: { type: string, enum: [staging, pending, published, rejected, yanked, deprecated] }
         name: { type: string }
         license: { type: string }
         description: { type: string }
         author: { type: ['string', 'null'] }
+        visibility: { type: string, enum: [public, private] }
         createdAt: { type: string, format: date-time }
         publishedAt:
           { type: string, format: date-time, description: Absent while pending or rejected. }
+        deprecation:
+          type: ['string', 'null']
+          description: Deprecation message; present only while status is `deprecated`.
         dist:
           type: object
           description: Absent while pending or rejected.
           properties:
             downloadUrl: { type: string, format: uri }
+            digest: { type: string, description: '`sha256:<hex>` of the compiled blob.' }
+            integrity:
+              { type: string, description: 'Subresource-integrity form, `sha512-<base64>`.' }
+        buildLog:
+          type: string
+          description: Compiler output; returned on publish responses and queue entries.
+        sourceUrl:
+          type: string
+          format: uri
+          description: Where to fetch the source tarball (owner/admin only).
 
     PendingVersion:
       allOf:
@@ -1046,13 +1640,14 @@ components:
 
     Stats:
       type: object
-      required: [published, pending, authors]
+      required: [published, pending, authors, downloads]
       properties:
         published:
           { type: integer, description: 'Distinct (namespace, id) pairs with a published version.' }
         pending: { type: integer }
         authors:
           { type: integer, description: Distinct namespaces with at least one published extension. }
+        downloads: { type: integer, description: Total recorded downloads across the registry. }
 
     Meta:
       type: object
@@ -1062,6 +1657,72 @@ components:
         version: { type: string, description: Product version from product.yml. }
         tagline: { type: string }
         homepage: { type: string }
+
+    WebhookEvent:
+      type: string
+      enum:
+        [version.published, version.yanked, version.deprecated, version.rejected, owners.changed]
+
+    Webhook:
+      type: object
+      required: [id, url, events, active, createdAt]
+      properties:
+        id: { type: integer }
+        url: { type: string, format: uri }
+        events:
+          type: array
+          items: { $ref: '#/components/schemas/WebhookEvent' }
+        active: { type: boolean }
+        lastDeliveryStatus: { type: ['string', 'null'] }
+        lastDeliveryAt: { type: ['string', 'null'], format: date-time }
+        createdAt: { type: string, format: date-time }
+
+    WebhookCreated:
+      allOf:
+        - $ref: '#/components/schemas/Webhook'
+        - type: object
+          required: [secret]
+          properties:
+            secret:
+              { type: string, description: Signs deliveries; shown only in this one response. }
+
+    AuditEntry:
+      type: object
+      required: [id, actor, action, target, detail, createdAt]
+      properties:
+        id: { type: string }
+        actor: { type: string, description: 'Actor namespace, or `system`.' }
+        action:
+          type: string
+          description: >-
+            e.g. version.publish, version.approve, version.reject,
+            version.yank, version.deprecate, tag.set, tag.remove, owner.add,
+            owner.remove, access.grant, access.revoke, quota.set,
+            role.change, extension.delete
+        target:
+          type: object
+          properties:
+            namespace: { type: ['string', 'null'] }
+            id: { type: ['string', 'null'] }
+            version: { type: ['string', 'null'] }
+        detail: { type: object }
+        createdAt: { type: string, format: date-time }
+
+    Quota:
+      type: object
+      required: [namespace, blobBytes, maxBlobBytes]
+      properties:
+        namespace: { $ref: '#/components/schemas/Namespace' }
+        blobBytes:
+          {
+            type: integer,
+            description: Bytes currently charged to the account (blobs plus retained sources).,
+          }
+        maxBlobBytes:
+          {
+            type: ['integer', 'null'],
+            description: Per-account override; `null` means the instance default.,
+          }
 
     CursorPage:
       type: object

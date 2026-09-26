@@ -32,8 +32,8 @@ test('config DEFAULTS.apiRoot is sourced from product.yml', () => {
   assert.equal(DEFAULTS.apiRoot, product.defaults.apiRoot);
 });
 
-test('GET /v0/meta returns product metadata', async () => {
-  const r = await request(app).get('/v0/meta');
+test('GET /v1/meta returns product metadata', async () => {
+  const r = await request(app).get('/v1/meta');
   assert.equal(r.status, 200);
   assert.equal(r.body.name, product.name);
   assert.equal(r.body.version, product.version);

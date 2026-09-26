@@ -1,6 +1,6 @@
 port: 3000
 dataDir: ./data
-apiRoot: /v0
+apiRoot: /v1
 publicBaseUrl: http://localhost:3000
 requireHttps: false
 database:
@@ -17,3 +17,10 @@ rateLimits:
 pagination:
   defaultLimit: 20
   maxLimit: 50
+limits:
+  maxBlobBytes: 2097152
+  maxAccountBlobBytes: 67108864
+  maxSourceBytes: 1048576
+compiler:
+  timeoutMs: 30000
+  memoryMb: 192

@@ -24,6 +24,8 @@ export class HttpError extends Error {
     };
     if (this.detail) body.detail = this.detail;
     if (this.errors) body.errors = this.errors;
+    if (this.buildLog) body.buildLog = this.buildLog;
+    if (this.buildError) body.buildError = this.buildError;
     return body;
   }
 }

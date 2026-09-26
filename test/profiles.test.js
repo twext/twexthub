@@ -1,7 +1,15 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept, signup } from './helpers.mjs';
+import {
+  boot,
+  resetDb,
+  bearer,
+  uniqNs,
+  signupAndAccept,
+  signup,
+  FIXTURE_PASSWORD,
+} from './helpers.mjs';
 
 let app;
 let sql;
@@ -113,12 +121,71 @@ test('avatar serves a deterministic identicon and honors avatar_url', async () =
 });
 
 test('password-only change still skips the terms gate', async () => {
-  // A user who has not accepted terms can still rotate their password.
+  // A user who has not accepted terms can still rotate their password. The
+  // currentPassword is the fixture password: without it the very first signup
+  // (the bootstrap admin) is what answers here, and admins are exempt from the
+  // check, so the test would not exercise the ordinary path.
   const r = await signup(app, uniqNs());
   assert.equal(r.status, 201);
   const patched = await request(app)
     .patch(`/v1/users/${r.body.user.namespace}`)
     .set(bearer(r.body.token))
-    .send({ password: 'newpassword1' });
+    .send({ password: 'newpassword1', currentPassword: FIXTURE_PASSWORD });
   assert.equal(patched.status, 200);
+});
+
+test('a password change does not carry a profile or role edit past the terms gate', async () => {
+  // The exemption is for the password alone. Attaching any other field used to
+  // waive the gate for the whole request.
+  const admin = await signup(app, uniqNs());
+  assert.equal(admin.status, 201);
+  const r = await signup(app, uniqNs());
+  assert.equal(r.status, 201);
+  const ns = r.body.user.namespace;
+
+  const gated = [
+    {
+      field: 'bio',
+      body: { password: 'newpassword1', currentPassword: FIXTURE_PASSWORD, bio: 'sneaky' },
+    },
+    {
+      field: 'displayName',
+      body: {
+        password: 'newpassword1',
+        currentPassword: FIXTURE_PASSWORD,
+        displayName: 'new name',
+      },
+    },
+    {
+      field: 'role',
+      body: { password: 'newpassword1', currentPassword: FIXTURE_PASSWORD, role: 'admin' },
+    },
+  ];
+  for (const { field, body } of gated) {
+    // A fresh token each time: a successful password change revokes the session.
+    const fresh = await signup(app, uniqNs());
+    assert.equal(fresh.status, 201);
+    const patched = await request(app)
+      .patch(`/v1/users/${fresh.body.user.namespace}`)
+      .set(bearer(fresh.body.token))
+      .send(body);
+    assert.equal(patched.status, 403, `${field} should stay behind the terms gate`);
+  }
+
+  // The control: bio on its own is refused too, so the 403s above are the gate
+  // and not a validation error.
+  const bioOnly = await request(app)
+    .patch(`/v1/users/${ns}`)
+    .set(bearer(r.body.token))
+    .send({ bio: 'sneaky' });
+  assert.equal(bioOnly.status, 403);
+
+  // Once the terms are accepted, the same combined update goes through.
+  await request(app).post('/v1/terms/accept').set(bearer(r.body.token)).expect(204);
+  const allowed = await request(app)
+    .patch(`/v1/users/${ns}`)
+    .set(bearer(r.body.token))
+    .send({ password: 'newpassword1', currentPassword: FIXTURE_PASSWORD, bio: 'fine now' });
+  assert.equal(allowed.status, 200);
+  assert.equal(allowed.body.bio, 'fine now');
 });

@@ -80,13 +80,16 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     res.type('image/svg+xml').send(identiconSvg(user.namespace));
   });
 
+  // A pure password change stays reachable when the terms have moved on, so an
+  // account can still be secured. The old check read "any profile field is
+  // present" and so was always false next to a password, which meant a password
+  // field alone waved the whole request through: attaching one smuggled a
+  // profile or role edit past the gate too. Only the password fields are exempt.
   function skipTermsForPasswordOnly(req, res, next) {
-    const { displayName, password, bio, website, github, avatarUrl, bannerUrl } = req.body ?? {};
-    const profileOnly =
-      password === undefined &&
-      [displayName, bio, website, github, avatarUrl, bannerUrl].some((v) => v !== undefined);
-    if (password !== undefined && !profileOnly) return next();
-    return termsGate(req, res, next);
+    const { password, currentPassword: _currentPassword, ...rest } = req.body ?? {};
+    const onlyPassword =
+      password !== undefined && Object.values(rest).every((value) => value === undefined);
+    return onlyPassword ? next() : termsGate(req, res, next);
   }
 
   router.patch('/:namespace', requireSession, skipTermsForPasswordOnly, async (req, res) => {

@@ -40,7 +40,7 @@ export async function gcBlobs(sql, dataDir) {
     if (!prefix.isDirectory()) continue;
     const prefixDir = path.join(blobsDir, prefix.name);
     for (const rest of await readdir(prefixDir)) {
-      const digest = prefix + rest;
+      const digest = prefix.name + rest;
       if (referenced.has(digest)) continue;
       const abs = path.join(prefixDir, rest);
       const info = await stat(abs).catch(() => null);

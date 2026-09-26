@@ -201,7 +201,7 @@ export function makeWebhooks({ sql }) {
       if (running) return;
       running = true;
       try {
-        await deliverDue(sql, Date.now());
+        await deliverDue(sql);
       } catch (error) {
         console.error('webhook delivery worker failed:', error);
       } finally {
@@ -257,10 +257,25 @@ export async function claimDue(sql, now = Date.now(), limit = DELIVERY_BATCH) {
   `;
 }
 
-export async function deliverDue(sql, now = Date.now()) {
+// Deliver what is due, up to a batch, claiming each row immediately before its
+// attempt rather than claiming the batch up front.
+//
+// One claim for the whole batch starts every lease in it at the same instant,
+// and the attempts then run one at a time at up to DELIVERY_TIMEOUT_MS each. A
+// full batch therefore outlives DELIVERY_LEASE_MS several times over, and the
+// rows at the tail of it become re-claimable by a peer -- or by this worker's own
+// next poll -- while this pass is still working towards them, so the same body
+// would be POSTed twice. Claiming one row at a time keeps every lease fresh for
+// the whole of its own attempt.
+export async function deliverDue(sql) {
   const results = [];
-  for (const delivery of await claimDue(sql, now)) {
-    results.push(await attemptDelivery(sql, delivery, now));
+  for (let sent = 0; sent < DELIVERY_BATCH; sent += 1) {
+    const claimedAt = Date.now();
+    const [delivery] = await claimDue(sql, claimedAt, 1);
+    if (!delivery) break;
+    // The claim's clock, so the retry delay is measured from the moment this
+    // attempt started being owed.
+    results.push(await attemptDelivery(sql, delivery, claimedAt));
   }
   return results;
 }

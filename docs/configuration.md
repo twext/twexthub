@@ -32,7 +32,7 @@ The only required value is `database.url`, either in the file or as `TWEXTHUB_DA
 
 `config.yaml` is overridable: `node src/server.js /path/to/config.yaml`, and `node src/migrate.js /path/to/config.yaml` or `node src/migrate.js --config file.yaml`.
 
-Boolean environment variables must be exactly `true` or `false`; numeric ones must be positive integers. Anything else fails startup with a message naming the offending variable. `TWEXTHUB_CORS_ALLOWED_ORIGINS` is the exception: it takes a comma-separated list of origins, or `*`.
+Boolean environment variables must be exactly `true` or `false`; numeric ones must be positive integers. Anything else fails startup with a message naming the offending variable. The two bucket counts that can be turned off — `rateLimits.publishPerWindow` and `rateLimits.downloadsPerIpPerWindow` — also accept `off` (or `null`) as their `null`. `TWEXTHUB_CORS_ALLOWED_ORIGINS` is the exception: it takes a comma-separated list of origins, or `*`.
 
 `dataDir` is resolved relative to the process working directory.
 
@@ -93,10 +93,11 @@ On top of those buckets, a coarse per-IP middleware (`express-rate-limit`) caps 
 
 ## Limits
 
-| Key                          | Default    | Environment                       | Purpose                                            |
-| ---------------------------- | ---------- | --------------------------------- | -------------------------------------------------- |
-| `limits.maxBlobBytes`        | `2097152`  | `TWEXTHUB_MAX_BLOB_BYTES`         | Upper bound on a single published blob             |
-| `limits.maxAccountBlobBytes` | `67108864` | `TWEXTHUB_MAX_ACCOUNT_BLOB_BYTES` | Per-account storage quota, applied at publish time |
+| Key                          | Default    | Environment                       | Purpose                                                     |
+| ---------------------------- | ---------- | --------------------------------- | ----------------------------------------------------------- |
+| `limits.maxBlobBytes`        | `2097152`  | `TWEXTHUB_MAX_BLOB_BYTES`         | Upper bound on a single published blob                      |
+| `limits.maxAccountBlobBytes` | `67108864` | `TWEXTHUB_MAX_ACCOUNT_BLOB_BYTES` | Per-account storage quota, applied at publish time          |
+| `limits.maxSourceBytes`      | `1048576`  | `TWEXTHUB_MAX_SOURCE_BYTES`       | Upper bound on the gzipped source tarball a publish carries |
 
 Publishing a version charges its blob bytes **and** the retained source tarball to the namespace account's running total. Deleting the extension refunds every byte it charged. An admin can override an account's cumulative quota with `PATCH /v1/admin/users/:namespace/quota`; a `null` `maxBlobBytes` resets it to the configured default.
 
@@ -153,7 +154,7 @@ A background maintenance job runs every six hours: it deletes files under `blobs
 
 ## Request size limits
 
-Ordinary JSON bodies are capped at 100 KB. The publish endpoint accepts up to 25 MB. A proxy in front must permit the larger body size or publishes will fail there.
+Ordinary JSON bodies are capped at 100 KB. The publish endpoint instead takes a gzipped source tarball, capped at `limits.maxSourceBytes` (1 MB by default). A proxy in front must permit a body at least that large or publishes will fail there.
 
 ## Not runtime configuration
 

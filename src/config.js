@@ -100,11 +100,19 @@ const ENV_OVERRIDES = [
   ['cors.allowedOrigins', 'TWEXTHUB_CORS_ALLOWED_ORIGINS'],
 ];
 
-// `fallback` is the DEFAULTS value for the key, not whatever YAML merged in: an
-// operator writes limits as strings through the environment, and "off" is the
-// only way to spell the null that switches a windowed bucket off entirely.
-function coerceEnvValue(raw, fallback, envName) {
-  if (raw === 'off' || raw === 'null') return null;
+// The buckets that a null switches off entirely. An environment variable is a
+// string, so "off" (or "null") is how an operator spells it there; no other key
+// may use those spellings, or a mistyped port or quota would become null
+// instead of failing startup.
+const NULLABLE_ENV_KEYS = new Set([
+  'rateLimits.publishPerWindow',
+  'rateLimits.downloadsPerIpPerWindow',
+]);
+
+// `fallback` is the DEFAULTS value for the key, not whatever YAML merged in: the
+// coercion each value goes through is the one its default type calls for.
+function coerceEnvValue(raw, fallback, envName, key) {
+  if (NULLABLE_ENV_KEYS.has(key) && (raw === 'off' || raw === 'null')) return null;
   if (typeof fallback === 'boolean') {
     if (raw === 'true' || raw === '1') return true;
     if (raw === 'false' || raw === '0') return false;
@@ -154,6 +162,7 @@ function applyEnvOverrides(config) {
       raw,
       parts.reduce((acc, part) => acc[part], DEFAULTS),
       envName,
+      key,
     );
   }
 }

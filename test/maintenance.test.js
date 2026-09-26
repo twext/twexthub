@@ -65,6 +65,31 @@ test('gc removes blobs no version references and keeps live ones', async () => {
   assert.ok(fs.existsSync(freshAbs), 'fresh orphan is left for the next pass');
 });
 
+test('gc keeps a referenced blob however old the file is', async () => {
+  // A live blob is matched against the referenced set by the digest rebuilt
+  // from its path under blobs/, so this is the case that says whether the sweep
+  // reconstructs that path correctly. A freshly published blob cannot: the age
+  // guard spares it an hour-old file either way, so the only version of this
+  // check that can fail is one where the file is old enough to be a candidate
+  // and the reference is what stops it.
+  const admin = await signupAndAccept(app, uniqNs());
+  const owner = await signupAndAccept(app, uniqNs());
+  await publishAndApprove(admin.token, owner, 'aged', '// aged bytes');
+
+  const [row] = await sql`
+    SELECT blob_digest FROM versions
+    WHERE extension_id = 'aged' AND blob_digest IS NOT NULL
+  `;
+  const abs = blobPathFor(config.dataDir, row.blob_digest);
+  assert.ok(fs.existsSync(abs));
+  const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  fs.utimesSync(abs, old, old);
+
+  const removed = await gcBlobs(sql, config.dataDir);
+  assert.equal(removed, 0);
+  assert.ok(fs.existsSync(abs), 'a referenced blob is kept however old it is');
+});
+
 test('scrub reports missing and corrupted blobs and updates the error gauge', async () => {
   const admin = await signupAndAccept(app, uniqNs());
   const owner = await signupAndAccept(app, uniqNs());

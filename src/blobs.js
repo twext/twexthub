@@ -81,9 +81,13 @@ export async function removeBlobIfUnused(sql, config, digest, exceptId) {
   if (!digest) return;
   await sql.begin(async (tx) => {
     await tx`SELECT pg_advisory_xact_lock(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
+    // `id != NULL` is never true in SQL, so a null exceptId has to drop the
+    // clause entirely rather than filter on it.
+    const exclude =
+      exceptId === null || exceptId === undefined ? sql`` : sql`AND id != ${exceptId}`;
     const [keeper] = await tx`
       SELECT 1 FROM versions
-      WHERE blob_digest = ${digest} AND id != ${exceptId}
+      WHERE blob_digest = ${digest} ${exclude}
       LIMIT 1
     `;
     if (keeper) return;

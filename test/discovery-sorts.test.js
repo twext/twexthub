@@ -174,6 +174,72 @@ test('paginating a tied sort key keeps every row', async () => {
   assert.deepEqual(seen, ['alpaca', 'minterm', 'zoo']);
 });
 
+test('badge splits into one-fact endpoints that are each far narrower', async () => {
+  const { ns } = await seedExtensions();
+  await downloadNs(sql, ns, 'zoo');
+  const { aggregateDayLoader } = await import('../src/metrics.js');
+  await aggregateDayLoader(sql)(new Date());
+
+  const svgWidth = (markup) => Number(markup.match(/^<svg[^>]*\bwidth="([\d.]+)"/)[1]);
+  const get = async (path) => {
+    const r = await request(app).get(path).expect(200);
+    assert.match(r.headers['content-type'], /image\/svg\+xml/);
+    return r.text ?? r.body.toString('utf8');
+  };
+  const texts = (markup) =>
+    markup.match(/<text[^>]*>([^<]*)<\/text>/g).map((t) => t.replace(/<[^>]*>/g, ''));
+
+  // The left pill names the fact and the right pill is a bare value, so the unit
+  // lives in the label and there is no pluralisation to get wrong.
+  const version = await get(`/v1/badge/@${ns}/zoo/version`);
+  assert.deepEqual(texts(version), ['version', 'v1.0.0']);
+
+  const downloads = await get(`/v1/badge/@${ns}/zoo/downloads`);
+  assert.deepEqual(texts(downloads), ['downloads', '1']);
+
+  const license = await get(`/v1/badge/@${ns}/zoo/license`);
+  assert.deepEqual(texts(license), ['license', 'MIT']);
+
+  // This is the point of the split: the combined badge is the sum of the three
+  // and is much too wide to sit in a README, while each fact alone is not. The
+  // download count is set to a realistic figure first, because a badge whose
+  // message reads "1 download" flatters the combined width -- the digits and the
+  // word "downloads" are most of what makes it long.
+  await sql`UPDATE extension_daily_downloads SET total_downloads = 48213
+            WHERE namespace = ${ns} AND extension_id = 'zoo'`;
+  const combined = await get(`/v1/badge/@${ns}/zoo`);
+  const combinedWidth = svgWidth(combined);
+  for (const [name, markup] of [
+    ['version', version],
+    ['downloads', downloads],
+    ['license', license],
+  ]) {
+    assert.ok(
+      svgWidth(markup) < combinedWidth / 2,
+      `${name} badge is ${svgWidth(markup)}px, not meaningfully narrower than the combined ${combinedWidth}px`,
+    );
+  }
+
+  // The per-package colour is shared across the set, so three badges for one
+  // extension read as a row rather than as three unrelated colours.
+  const fillOf = (markup) => markup.match(/<rect x="[\d.]+"[^>]*fill="(#[0-9a-f]{6})"/)[1];
+  const fill = fillOf(version);
+  assert.equal(fillOf(downloads), fill, 'downloads badge is a different colour');
+  assert.equal(fillOf(license), fill, 'license badge is a different colour');
+  assert.equal(fillOf(combined), fill, 'combined badge is a different colour');
+
+  // The label is still overridable, and defaults to the fact rather than the id.
+  const relabelled = await get(`/v1/badge/@${ns}/zoo/license?label=${encodeURIComponent('terms')}`);
+  assert.deepEqual(texts(relabelled), ['terms', 'MIT']);
+
+  // An unknown trailing segment is a 404, not a silent fallback to the combined
+  // badge: answering a different question than the one asked is worse than 404.
+  const unknown = await request(app).get(`/v1/badge/@${ns}/zoo/maintainer`);
+  assert.equal(unknown.status, 404);
+  const unknownPkg = await request(app).get(`/v1/badge/@${ns}/nonexistent/version`);
+  assert.equal(unknownPkg.status, 404);
+});
+
 test('badge renders an SVG with version, downloads, and license', async () => {
   const { ns } = await seedExtensions();
   await downloadNs(sql, ns, 'zoo');

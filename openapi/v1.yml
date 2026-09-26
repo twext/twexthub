@@ -573,24 +573,49 @@ paths:
       tags: [Open]
       security: []
       description: >
-        Renders version, download count, and license for the latest published
-        version, in a pill sized to its own text.
+        All three facts in one pill: version, download count, and license for
+        the latest published version.
 
 
-        The left pill's colour is derived from the extension's identity, so it
+        Roughly 250px wide, which is wide to embed. Prefer the
+        `/version`, `/downloads`, and `/license` variants, which are each
+        90-140px and can be embedded independently.
+
+
+        The right pill's colour is derived from the extension's identity, so it
         is stable per extension and does not vary with `label`.
       parameters:
-        - name: label
-          in: query
-          required: false
-          schema: { type: string, default: '{id}' }
-          description: >
-            Text for the left pill, instead of the extension id. Long labels are
-            cut to 304px of measured width, so how many characters fit depends
-            on the glyphs: about 27 East Asian characters, around 30 wide Latin
-            capitals, or between 50 and 100 ordinary lowercase ones. East Asian
-            and emoji characters are measured a full em wide, everything else
-            at its own advance width.
+        - $ref: '#/components/parameters/BadgeLabel'
+      responses:
+        '200':
+          description: SVG badge, cacheable for 5 minutes
+          content:
+            image/svg+xml:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /badge/@{namespace}/{id}/{field}:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+      - name: field
+        in: path
+        required: true
+        schema: { type: string, enum: [version, downloads, license] }
+        description: Which single fact to report.
+    get:
+      summary: One-fact SVG badge
+      operationId: getExtensionFieldBadge
+      tags: [Open]
+      security: []
+      description: >
+        A badge for one fact about the latest published version. The left pill
+        names the fact, so the right pill is a bare value and the unit lives in
+        the label. The right pill's colour is derived from the extension's
+        identity and is the same across all of an extension's badges, so a set
+        of them reads as one row.
+      parameters:
+        - $ref: '#/components/parameters/BadgeLabel'
       responses:
         '200':
           description: SVG badge, cacheable for 5 minutes
@@ -1373,6 +1398,18 @@ components:
       in: path
       required: true
       schema: { $ref: '#/components/schemas/ExtensionId' }
+    BadgeLabel:
+      name: label
+      in: query
+      required: false
+      schema: { type: string }
+      description: >
+        Text for the left pill, instead of the extension id or the fact's name.
+        Long labels are cut to 304px of measured width, so how many characters
+        fit depends on the glyphs: about 27 East Asian characters, around 30
+        wide Latin capitals, or between 50 and 100 ordinary lowercase ones. East
+        Asian and emoji characters are measured a full em wide, everything else
+        at its own advance width.
     VersionPath:
       name: version
       in: path

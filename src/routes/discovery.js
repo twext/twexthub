@@ -468,9 +468,39 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     return String(value).replace(/[&<>"']/g, (ch) => XML_ENTITIES[ch]);
   }
 
-  router.get('/badge/@:namespace/:id', async (req, res) => {
-    const { namespace, id } = req.params;
-    if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+  // shields-style flat badge: two pills, 20px tall, each sized to its own text
+  // plus the gutter. Sizing to the content is what makes the badge look right; a
+  // fixed total width either leaves a short label marooned in a huge blue pill
+  // or squeezes the right-hand text off the end.
+  //
+  // The markup is the same for one fact or three. shields.io does the same
+  // thing: with no label it sets leftWidth to 0 and the label colour to the
+  // message colour, so the left rect is simply zero-width.
+  function renderBadgeSvg({ label, message, color, textColor, ariaLabel }) {
+    const labelWidth = round(textWidth(label) + BADGE_PADDING);
+    const rightWidth = round(textWidth(message) + BADGE_PADDING);
+    const totalWidth = round(labelWidth + rightWidth);
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${totalWidth}" height="20" viewBox="0 0 ${totalWidth} 20" role="img" aria-label="${xmlEscape(ariaLabel ?? `${label}: ${message}`)}">
+  <linearGradient id="s" x2="0" y2="100%">
+    <stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
+    <stop offset="1" stop-opacity=".1"/>
+  </linearGradient>
+  <clipPath id="r"><rect width="${totalWidth}" height="20" rx="3"/></clipPath>
+  <g clip-path="url(#r)">
+    <rect width="${labelWidth}" height="20" fill="#555"/>
+    <rect x="${labelWidth}" width="${rightWidth}" height="20" fill="${color}"/>
+    <rect width="${totalWidth}" height="20" fill="url(#s)"/>
+  </g>
+  <g text-anchor="middle" font-family="DejaVu Sans,Verdana,Geneva,sans-serif" font-size="11">
+    <text x="${labelWidth / 2}" y="14" fill="#ffffff">${xmlEscape(label)}</text>
+    <text x="${labelWidth + rightWidth / 2}" y="14" fill="${textColor}">${xmlEscape(message)}</text>
+  </g>
+</svg>`;
+  }
+
+  // The latest published or deprecated public version, which is what every
+  // badge variant reports on.
+  async function latestBadgeRow(namespace, id) {
     const rows = await sql`
       SELECT * FROM (
         SELECT v.*, row_number() OVER (
@@ -486,42 +516,79 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
       WHERE rn = 1
     `;
     if (rows.length === 0) throw notFound();
-    const row = rows[0];
-    const label =
+    return rows[0];
+  }
+
+  function requestedLabel(req, fallback) {
+    return (
       fitLabel(
-        typeof req.query.label === 'string' && req.query.label.length > 0 ? req.query.label : id,
-      ) || id;
+        typeof req.query.label === 'string' && req.query.label.length > 0
+          ? req.query.label
+          : fallback,
+      ) || fallback
+    );
+  }
+
+  function sendBadge(res, { label, message, namespace, id, ariaLabel }) {
+    const { background, text } = badgeColors(`${namespace}/${id}`);
+    res.set('Cache-Control', 'public, max-age=300');
+    res
+      .type('image/svg+xml')
+      .send(renderBadgeSvg({ label, message, color: background, textColor: text, ariaLabel }));
+  }
+
+  // One fact per badge: version, downloads, or license.
+  //
+  // A combined "v1.2.3 | 48k downloads | MIT" pill is the sum of these three and
+  // runs about 250px, which is too wide to sit comfortably in a README next to
+  // anything else. Each fact alone is 90-140px, and a README can embed just the
+  // ones it cares about -- usually version and license, with downloads as an
+  // opt-in. That is the same split npm-style badges have always used.
+  //
+  // The left pill names the fact, so the right pill can be a bare value: the
+  // unit lives in the label, which also means no pluralisation to get wrong.
+  const BADGE_FIELDS = new Set(['version', 'downloads', 'license']);
+
+  router.get('/badge/@:namespace/:id/:field', async (req, res) => {
+    const { namespace, id, field } = req.params;
+    // An unrecognised trailing segment is a 404, not a fallback to the combined
+    // badge: silently answering a different question than the one asked is worse
+    // than not answering.
+    if (!BADGE_FIELDS.has(field)) throw notFound();
+    if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    const row = await latestBadgeRow(namespace, id);
+    let message;
+    if (field === 'version') {
+      message = `v${row.version}`;
+    } else if (field === 'license') {
+      message = row.license;
+    } else {
+      message = String(Number((await totalDownloads(sql, namespace, id)) ?? 0));
+    }
+    sendBadge(res, {
+      label: requestedLabel(req, field),
+      message,
+      namespace,
+      id,
+      ariaLabel: `${field}: ${message}`,
+    });
+  });
+
+  // All three facts in one pill, for anyone who wants a single badge.
+  router.get('/badge/@:namespace/:id', async (req, res) => {
+    const { namespace, id } = req.params;
+    if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    const row = await latestBadgeRow(namespace, id);
     const downloads = Number((await totalDownloads(sql, namespace, id)) ?? 0);
-    const license = row.license;
-    const { background: color, text: textColor } = badgeColors(`${namespace}/${id}`);
     const versionText = `v${row.version}`;
     const downloadsText = downloads === 1 ? '1 download' : `${downloads} downloads`;
-    const rightText = `${versionText} | ${downloadsText} | ${license}`;
-    // shields-style flat badge: two pills, 20px tall, each sized to its own text
-    // plus the gutter. Sizing to the content is what makes the badge look right;
-    // a fixed total width either leaves a short label marooned in a huge blue
-    // pill or squeezes the right-hand text off the end.
-    const labelWidth = round(textWidth(label) + BADGE_PADDING);
-    const rightWidth = round(textWidth(rightText) + BADGE_PADDING);
-    const totalWidth = round(labelWidth + rightWidth);
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${totalWidth}" height="20" viewBox="0 0 ${totalWidth} 20" role="img" aria-label="${xmlEscape(`${label}: ${versionText}`)}">
-  <linearGradient id="s" x2="0" y2="100%">
-    <stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
-    <stop offset="1" stop-opacity=".1"/>
-  </linearGradient>
-  <clipPath id="r"><rect width="${totalWidth}" height="20" rx="3"/></clipPath>
-  <g clip-path="url(#r)">
-    <rect width="${labelWidth}" height="20" fill="#555"/>
-    <rect x="${labelWidth}" width="${rightWidth}" height="20" fill="${color}"/>
-    <rect width="${totalWidth}" height="20" fill="url(#s)"/>
-  </g>
-  <g text-anchor="middle" font-family="DejaVu Sans,Verdana,Geneva,sans-serif" font-size="11">
-    <text x="${labelWidth / 2}" y="14" fill="#ffffff">${xmlEscape(label)}</text>
-    <text x="${labelWidth + rightWidth / 2}" y="14" fill="${textColor}">${xmlEscape(rightText)}</text>
-  </g>
-</svg>`;
-    res.set('Cache-Control', 'public, max-age=300');
-    res.type('image/svg+xml').send(svg);
+    sendBadge(res, {
+      label: requestedLabel(req, id),
+      message: `${versionText} | ${downloadsText} | ${row.license}`,
+      namespace,
+      id,
+      ariaLabel: `${requestedLabel(req, id)}: ${versionText}`,
+    });
   });
 
   router.get('/feed.atom', async (req, res) => {

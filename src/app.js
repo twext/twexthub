@@ -35,17 +35,17 @@ export function createApp(opts = {}) {
 
   app.use(makeCors(config.cors));
 
+  // Counts and timings for /admin/metrics; also the structured request log
+  // when `logging.requests` is on. Mounted before the rate limiter and the
+  // routers so rate-limited responses and unmatched paths still count.
+  const telemetry = makeRequestTelemetry({ logRequests: config.logging?.requests === true });
+  app.locals.telemetry = telemetry;
+  app.use(telemetry.middleware);
+
   // Coarse per-IP DoS backstop for every route, including the file-serving
   // and ownership-checked endpoints. The DB-backed buckets in rate-limit.js
   // layer their precise login/signup/publish/download windows on top.
   app.use(makeHttpRateLimiter(config));
-
-  // Counts and timings for /admin/metrics; also the structured request log
-  // when `logging.requests` is on. Mounted before the routers so unmatched
-  // paths still count.
-  const telemetry = makeRequestTelemetry({ logRequests: config.logging?.requests === true });
-  app.locals.telemetry = telemetry;
-  app.use(telemetry.middleware);
 
   const jsonBody = express.json({ limit: '100kb' });
   app.use((req, res, next) => {

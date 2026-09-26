@@ -254,7 +254,9 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
 
         // Size caps: per-blob, then the account's cumulative quota (their own
         // override when set, otherwise the configured default). Both the served
-        // blob and the retained source count toward the quota.
+        // blob and the retained source count toward the quota. The quota is
+        // checked again under a row lock where the charge commits; this one
+        // spares the caller a build it cannot afford.
         // The compiler resolves to a Buffer in every branch (see compileProject);
         // the guard also gives the length computations below a type-narrowed value.
         if (!(compiled instanceof Buffer)) {
@@ -988,6 +990,7 @@ async function publishVersion(
   const version = normalizeSemver(manifest.version);
   const name = typeof manifest.name === 'string' && manifest.name.length > 0 ? manifest.name : id;
   const codeBuffer = code;
+  const charge = codeBuffer.length + sourceBuffer.length;
   const digest = sha256Hex(codeBuffer);
   const sha512 = sha512Base64(codeBuffer);
   const blobRelative = path.join('blobs', digest.slice(0, 2), digest.slice(2));
@@ -1059,8 +1062,25 @@ async function publishVersion(
       `;
       // Charge the blob and source bytes to the namespace account. Identical
       // content is re-charged per version row; deleting a version refunds it.
+      // The route's quota check read the balance before the build, and the
+      // advisory lock above only covers this extension, so the balance is
+      // re-read under a row lock: publishes to sibling extensions queue here
+      // instead of both charging against the same ceiling.
+      const [account] = await tx`
+        SELECT blob_bytes, max_blob_bytes FROM users WHERE id = ${owner.id} FOR UPDATE
+      `;
+      if (account) {
+        const accountQuota =
+          account.max_blob_bytes ?? config.limits?.maxAccountBlobBytes ?? 64 * 1024 * 1024;
+        if (Number(account.blob_bytes ?? 0) + charge > accountQuota) {
+          throw new HttpError(413, {
+            title: 'Payload Too Large',
+            detail: `Publishing ${charge} bytes would exceed the ${accountQuota}-byte storage quota for @${owner.namespace}.`,
+          });
+        }
+      }
       await tx`
-        UPDATE users SET blob_bytes = blob_bytes + ${codeBuffer.length + sourceBuffer.length}
+        UPDATE users SET blob_bytes = blob_bytes + ${charge}
         WHERE id = ${owner.id}
       `;
       staged = recorded;

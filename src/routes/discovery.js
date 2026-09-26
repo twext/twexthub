@@ -39,20 +39,22 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     name: 'text',
   };
 
+  // The sort key moves descending for every sort but name, while the
+  // (namespace, id) tiebreaker always moves ascending. A row-wise comparison
+  // against the tuple would drag the sort key's direction onto the
+  // tiebreaker, skipping or repeating rows whenever the sort key ties, so the
+  // two are compared separately.
   function cursorCondition(cursor, sort) {
     if (!cursor) return sql``;
     // downloads is a joined aggregate, not a column of the versions subquery.
     const col =
       sort === 'downloads' ? sql`COALESCE(d.total, 0)::bigint` : sql('s.' + SORT_COLUMNS[sort]);
-    if (sort === 'name') {
-      return sql`
-        AND (${col}, s.namespace, s.extension_id) > (${cursor.k}::text, ${cursor.ns}, ${cursor.id})
-      `;
-    }
+    const key = sql`${cursor.k}::${sql(SORT_TYPES[sort])}`;
+    const after = sort === 'name' ? sql`${col} > ${key}` : sql`${col} < ${key}`;
     return sql`
-      AND (${col}, s.namespace, s.extension_id) < (${cursor.k}::${sql(
-        SORT_TYPES[sort],
-      )}, ${cursor.ns}, ${cursor.id})
+      AND (${after}
+        OR (${col} = ${key}
+          AND (s.namespace, s.extension_id) > (${cursor.ns}, ${cursor.id})))
     `;
   }
 

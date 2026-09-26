@@ -10,6 +10,8 @@ import { createDb, ensureDataDirs } from '../src/db.js';
 let sql;
 let looseApp;
 let tightApp;
+let coarseApp;
+let coarseTelemetry;
 
 function makeRateConfig(overrides = {}) {
   return makeConfig({
@@ -34,11 +36,22 @@ before(async () => {
     publishPerWindow: 2,
     downloadsPerIpPerWindow: 1,
   });
+  // The coarse limiter keys on req.ip and skips loopback, so this one counts a
+  // forwarded address.
+  const coarse = makeRateConfig({
+    routeWindowMinutes: 60,
+    routesPerIpPerWindow: 2,
+  });
+  coarse.trustProxy = true;
   tight.dataDir = loose.dataDir;
+  coarse.dataDir = loose.dataDir;
   sql = createDb(loose);
   ensureDataDirs(loose.dataDir);
   looseApp = createApp({ config: loose, sql }).app;
   tightApp = createApp({ config: tight, sql }).app;
+  const built = createApp({ config: coarse, sql });
+  coarseApp = built.app;
+  coarseTelemetry = built.telemetry;
 });
 
 beforeEach(async () => {
@@ -124,4 +137,14 @@ test('signup and login limits still work alongside the new buckets', async () =>
     .post('/v1/auth/login')
     .send({ namespace: ns, password: 'wrong-pass' });
   assert.equal(sixth.status, 429);
+});
+
+test('the coarse limiter is mounted behind the request telemetry', async () => {
+  const forwarded = { 'X-Forwarded-For': '203.0.113.7' };
+  await request(coarseApp).get('/v1/meta').set(forwarded).expect(200);
+  await request(coarseApp).get('/v1/meta').set(forwarded).expect(200);
+  await request(coarseApp).get('/v1/meta').set(forwarded).expect(429);
+
+  const counters = coarseTelemetry.render().join('\n');
+  assert.ok(counters.includes('status="429"'), 'the 429 is missing from the counters');
 });

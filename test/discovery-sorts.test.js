@@ -153,6 +153,27 @@ test('paginating with sort=downloads walks every page', async () => {
   assert.deepEqual(seen, ['zoo', 'minterm', 'alpaca']);
 });
 
+test('paginating a tied sort key keeps every row', async () => {
+  // Nothing has been downloaded, so all three extensions tie on the sort key
+  // and the (namespace, id) tiebreaker alone orders the result.
+  const { ns } = await seedExtensions();
+
+  const seen = [];
+  let cursor = null;
+  let guard = 0;
+  do {
+    const url =
+      '/v1/extensions?sort=downloads&limit=1' +
+      (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
+    const r = await request(app).get(url).expect(200);
+    for (const e of r.body.data.filter((e) => e.namespace === ns)) seen.push(e.id);
+    cursor = r.body.pagination.nextCursor;
+    guard += 1;
+    assert.ok(guard < 10, 'pagination did not terminate');
+  } while (cursor);
+  assert.deepEqual(seen, ['alpaca', 'minterm', 'zoo']);
+});
+
 test('badge renders an SVG with version, downloads, and license', async () => {
   const { ns } = await seedExtensions();
   await downloadNs(sql, ns, 'zoo');

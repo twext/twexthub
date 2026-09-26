@@ -1,7 +1,15 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
+import {
+  boot,
+  resetDb,
+  bearer,
+  uniqNs,
+  signupAndAccept,
+  publishProject,
+  projectTarball,
+} from './helpers.mjs';
 import { aggregateDayLoader } from '../src/metrics.js';
 
 let app;
@@ -264,6 +272,48 @@ test('blob size caps and the account quota are enforced on publish', async () =>
     413,
   );
   assert.match(overflowing.body.detail, /quota/);
+});
+
+test('concurrent publishes to sibling extensions cannot both pass the quota', async () => {
+  const admin = await signupAndAccept(app, uniqNs());
+  const owner = await signupAndAccept(app, uniqNs());
+  const coowner = await signupAndAccept(app, uniqNs());
+  const ns = owner.user.namespace;
+
+  await publishPrivate({ owner, id: 'seed' });
+  await request(app)
+    .patch(`/v1/@${ns}/seed/versions/1.0.0`)
+    .set(bearer(admin.token))
+    .send({ status: 'approved' })
+    .expect(200);
+  await request(app)
+    .put(`/v1/@${ns}/seed/owners/${coowner.user.namespace}`)
+    .set(bearer(owner.token))
+    .expect(204);
+
+  // Size the account for one of the two publishes still to come.
+  const [afterSeed] = await sql`SELECT blob_bytes FROM users WHERE namespace = ${ns}`;
+  const quota = Math.ceil(Number(afterSeed.blob_bytes) * 1.5);
+  await sql`UPDATE users SET blob_bytes = 0, max_blob_bytes = ${quota} WHERE namespace = ${ns}`;
+
+  // A co-owner publishing a different extension charges the same account, and
+  // the per-extension lock does not join the two requests.
+  const publish = async (id, version, token) => {
+    const buffer = await projectTarball({ id, version, code: '// alpha' });
+    return request(app)
+      .post(`/v1/@${ns}/${id}/versions`)
+      .set(bearer(token))
+      .set('Content-Type', 'application/gzip')
+      .send(buffer);
+  };
+  const [alpha, seed] = await Promise.all([
+    publish('alpha', '1.0.0', owner.token),
+    publish('seed', '2.0.0', coowner.token),
+  ]);
+  assert.deepEqual([alpha.status, seed.status].sort(), [201, 413]);
+
+  const [account] = await sql`SELECT blob_bytes FROM users WHERE namespace = ${ns}`;
+  assert.ok(Number(account.blob_bytes) <= quota, `charged ${account.blob_bytes} of ${quota}`);
 });
 
 test('admins can read and tune per-account quota, and only admins view the audit log', async () => {

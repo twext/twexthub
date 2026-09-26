@@ -190,7 +190,6 @@ test('badge renders an SVG with version, downloads, and license', async () => {
   assert.match(svg, /MIT/);
 
   const svgWidth = (markup) => Number(markup.match(/^<svg[^>]*\bwidth="([\d.]+)"/)[1]);
-  assert.ok(svg.includes('fill="#4c1"'), 'MIT badge uses the license color');
 
   // A viewBox lets the badge scale by re-laying out rather than pixel-doubling,
   // and the font stack leads with the face the widths were measured from.
@@ -248,8 +247,114 @@ test('badge renders an SVG with version, downloads, and license', async () => {
   assert.ok(hugePill > 0 && hugePill <= 320, `runaway label pill is bounded, got ${hugePill}`);
   assert.ok(hugeSvg.length < 4000, 'the response stays small');
 
+  // East Asian glyphs are one em wide, not proportional. Measuring them at the
+  // mean ASCII advance under-counts by ~40% and pushes the text out past its own
+  // pill, so they get the em instead. Five of them need 55px of text, and the
+  // 16px gutter has to be there on top of that.
+  const cjk = await request(app)
+    .get(`/v1/badge/@${ns}/zoo?label=${encodeURIComponent('扩展工具包')}`)
+    .expect(200);
+  const cjkPill = pillWidth(cjk.text ?? cjk.body.toString('utf8'));
+  assert.ok(
+    cjkPill >= 5 * 11 + 16,
+    `five full-width glyphs need 55px plus the gutter, got ${cjkPill}`,
+  );
+
   const missing = await request(app).get(`/v1/badge/@${ns}/nonexistent`);
   assert.equal(missing.status, 404);
+});
+
+test('badge colour is derived per package, stays put, and stays readable', async () => {
+  const { ns } = await seedExtensions();
+  const body = (r) => r.text ?? r.body.toString('utf8');
+  // The right pill's fill, and the text drawn on top of it. The first <text> is
+  // the left pill, whose fill is always white, so the pill colour has to be
+  // paired with the second one.
+  const paint = (markup) => {
+    const fills = [
+      ...markup.matchAll(/<rect x="[\d.]+" width="[\d.]+" height="20" fill="#([0-9a-f]{6})"/g),
+    ];
+    const texts = [...markup.matchAll(/<text x="[\d.]+" y="14" fill="#([0-9a-f]{6})"/g)];
+    assert.equal(fills.length, 1, 'expected exactly one right-hand pill');
+    assert.equal(texts.length, 2, 'expected both text runs to carry their own fill');
+    return { background: `#${fills[0][1]}`, foreground: `#${texts[1][1]}` };
+  };
+  const luminance = (hex) => {
+    const channel = (offset) => {
+      const value = parseInt(hex.slice(offset, offset + 2), 16) / 255;
+      return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    };
+    return 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
+  };
+  const contrast = (a, b) => {
+    const [high, low] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+    return (high + 0.05) / (low + 0.05);
+  };
+
+  const zoo = body(await request(app).get(`/v1/badge/@${ns}/zoo`).expect(200));
+  const alpaca = body(await request(app).get(`/v1/badge/@${ns}/alpaca`).expect(200));
+
+  // Same package, twice: identical bytes. A badge is cached publicly for five
+  // minutes, so a per-request colour would make the cached and fresh responses
+  // disagree.
+  assert.equal(zoo, body(await request(app).get(`/v1/badge/@${ns}/zoo`).expect(200)));
+
+  // The label is caller-supplied, so the colour must not be seeded from it --
+  // otherwise anyone could repaint anyone's badge with a query string.
+  const relabelled = body(
+    await request(app).get(`/v1/badge/@${ns}/zoo?label=something-else`).expect(200),
+  );
+  assert.equal(paint(relabelled).background, paint(zoo).background, 'colour follows ?label=');
+
+  // Every colour has to clear the WCAG AA threshold against its own text, which
+  // is why the fill and the text are chosen together.
+  for (const [name, markup] of [
+    ['zoo', zoo],
+    ['alpaca', alpaca],
+  ]) {
+    const { background, foreground } = paint(markup);
+    const ratio = contrast(background, foreground);
+    assert.ok(ratio >= 4.5, `${name} ${background} on ${foreground} is only ${ratio.toFixed(2)}:1`);
+  }
+
+  // Packages that share a license must not all come out the same colour, or the
+  // derivation is not doing anything. Measured over a sample rather than
+  // pairwise: the colour space is finite, so two specific packages can collide by
+  // chance, and a test that bet on a particular pair would be flaky.
+  const names = [
+    'alpha',
+    'bravo',
+    'charlie',
+    'delta',
+    'echo',
+    'foxtrot',
+    'golf',
+    'hotel',
+    'india',
+    'juliet',
+    'kilo',
+    'lima',
+  ];
+  const owner = await sql`SELECT owner_id FROM versions WHERE namespace = ${ns} LIMIT 1`;
+  for (const name of names) {
+    await sql`INSERT INTO versions (owner_id, namespace, extension_id, version, status, name,
+                                   license, description, blob_path, visibility, published_at)
+               VALUES (${owner[0].owner_id}, ${ns}, ${name}, '1.0.0', 'published', ${name},
+                       'MIT', '', ${`badge/${name}.tgz`}, 'public', now())`;
+  }
+  const colours = new Set();
+  for (const name of names) {
+    const markup = body(await request(app).get(`/v1/badge/@${ns}/${name}`).expect(200));
+    assert.match(markup, /MIT/, `${name} is a different licence colour`);
+    const { background, foreground } = paint(markup);
+    const ratio = contrast(background, foreground);
+    assert.ok(ratio >= 4.5, `${name} ${background} on ${foreground} is only ${ratio.toFixed(2)}:1`);
+    colours.add(background);
+  }
+  assert.ok(
+    colours.size >= names.length - 2,
+    `expected a spread of colours, got ${colours.size} across ${names.length} MIT packages`,
+  );
 });
 
 test('feed.atom lists the latest publishes as entries', async () => {

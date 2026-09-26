@@ -258,18 +258,6 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     });
   });
 
-  const LICENSE_BADGE_COLORS = {
-    MIT: '#4c1',
-    'Apache-2.0': '#a04',
-    ISC: '#97ca00',
-    'GPL-3.0': '#d6405f',
-    'GPL-3.0-only': '#d6405f',
-    'GPL-2.0': '#c8404f',
-    BSD: '#0f9',
-    Unlicense: '#777',
-    CC0: '#777',
-  };
-
   const XML_ENTITIES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' };
 
   // Badge text is laid out by hand, so the pills have to be as wide as the
@@ -299,11 +287,45 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     .map(Number);
   const UNITS_PER_EM = 2048;
   const BADGE_FONT_SIZE = 11;
-  // A non-ASCII ?label= gets the mean ASCII advance; guessing the real glyph
-  // width would be worse than an average.
+  // Fallback advance for a code point the table above does not cover. The mean
+  // of printable ASCII is about right for proportional scripts -- Cyrillic and
+  // Greek land near it -- so that is what those get.
   const MEAN_ADVANCE = Math.round(
     ADVANCE_UNITS.reduce((sum, units) => sum + units, 0) / ADVANCE_UNITS.length,
   );
+  // East Asian wide and fullwidth ranges, plus the emoji blocks, are not
+  // proportional at all: each glyph is one em. Measuring them at the mean
+  // under-counts by ~40%, which pushes the text out past the edge of its own
+  // pill. shields.io hits the same problem and resolves it the same way, by
+  // guessing at the em rather than at an average; it simply owns a table with
+  // real widths for everything except emoji, so em is its only fallback.
+  //
+  // Guessing wide is the safe direction to be wrong in: it wastes a few pixels
+  // of padding, where guessing narrow clips the text.
+  const FULL_WIDTH_RANGES = [
+    [0x1100, 0x115f], // Hangul Jamo
+    [0x2e80, 0x303e], // CJK radicals, Kangxi radicals, CJK symbols
+    [0x3041, 0x33ff], // Hiragana, Katakana, Bopomofo, Hangul compat, Kanbun
+    [0x3400, 0x4dbf], // CJK unified ext A
+    [0x4e00, 0x9fff], // CJK unified ideographs
+    [0xa000, 0xa4cf], // Yi
+    [0xac00, 0xd7a3], // Hangul syllables
+    [0xf900, 0xfaff], // CJK compatibility ideographs
+    [0xfe10, 0xfe19], // vertical forms
+    [0xfe30, 0xfe6f], // CJK compatibility forms, small form variants
+    [0xff00, 0xff60], // fullwidth ASCII variants
+    [0xffe0, 0xffe6], // fullwidth signs
+    [0x1f000, 0x1faff], // emoji and pictographs
+  ];
+
+  function advanceOf(codePoint) {
+    const index = codePoint - 0x20;
+    if (index >= 0 && index < ADVANCE_UNITS.length) return ADVANCE_UNITS[index];
+    for (const [lower, upper] of FULL_WIDTH_RANGES) {
+      if (codePoint >= lower && codePoint <= upper) return UNITS_PER_EM;
+    }
+    return MEAN_ADVANCE;
+  }
   // A fixed gutter either side of the text. It has to clear the ~4.5px the text
   // already sits from the top and bottom: at 5px the long right-hand pill read
   // as flush while the short label pill looked generously padded.
@@ -316,8 +338,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
   function textWidth(text) {
     let units = 0;
     for (const char of text) {
-      const index = char.codePointAt(0) - 0x20;
-      units += index >= 0 && index < ADVANCE_UNITS.length ? ADVANCE_UNITS[index] : MEAN_ADVANCE;
+      units += advanceOf(char.codePointAt(0));
     }
     return (units * BADGE_FONT_SIZE) / UNITS_PER_EM;
   }
@@ -330,9 +351,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     let out = '';
     let units = 0;
     for (const char of String(value)) {
-      const index = char.codePointAt(0) - 0x20;
-      const advance =
-        index >= 0 && index < ADVANCE_UNITS.length ? ADVANCE_UNITS[index] : MEAN_ADVANCE;
+      const advance = advanceOf(char.codePointAt(0));
       if ((units + advance) * BADGE_FONT_SIZE > (MAX_LABEL_WIDTH - BADGE_PADDING) * UNITS_PER_EM) {
         break;
       }
@@ -343,6 +362,105 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
   }
 
   const round = (value) => Math.round(value * 100) / 100;
+
+  // The right pill's fill is derived from the extension's identity rather than
+  // its license, so a registry full of MIT packages is not a wall of identical
+  // green. The hue has to be a *hash* and not a random number: a badge is served
+  // with a five minute public max-age, so a per-request random colour would
+  // hand caches and CDNs different bytes for one URL and the badge would flicker
+  // on every reload.
+  //
+  // It is seeded from the namespace and id, never from ?label=, because the
+  // label is caller-supplied -- seeding on it would let anyone repaint any
+  // badge by changing the query string.
+  //
+  // Nothing is lost by dropping the license colour: the license is still spelled
+  // out in the pill's text, so the colour is decoration and the meaning is in
+  // the words.
+  function hashString(value) {
+    // FNV-1a, 32-bit. Cheap, and spreads short similar strings like "zoo" and
+    // "zooo" across the hue circle instead of clustering them.
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < value.length; i++) {
+      hash ^= value.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return hash >>> 0;
+  }
+
+  function hslToHex(hue, saturation, lightness) {
+    const chroma = (1 - Math.abs(2 * lightness - 1)) * saturation;
+    const sector = hue / 60;
+    const second = chroma * (1 - Math.abs((sector % 2) - 1));
+    const [r, g, b] =
+      sector < 1
+        ? [chroma, second, 0]
+        : sector < 2
+          ? [second, chroma, 0]
+          : sector < 3
+            ? [0, chroma, second]
+            : sector < 4
+              ? [0, second, chroma]
+              : sector < 5
+                ? [second, 0, chroma]
+                : [chroma, 0, second];
+    const match = lightness - chroma / 2;
+    const channel = (value) =>
+      Math.round((value + match) * 255)
+        .toString(16)
+        .padStart(2, '0');
+    return `#${channel(r)}${channel(g)}${channel(b)}`;
+  }
+
+  // WCAG relative luminance and contrast ratio, so "readable" is a checked
+  // property rather than a hope about which hue came up.
+  function relativeLuminance(hex) {
+    const channel = (offset) => {
+      const value = parseInt(hex.slice(offset, offset + 2), 16) / 255;
+      return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    };
+    return 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
+  }
+
+  function contrastRatio(background, foreground) {
+    const a = relativeLuminance(background);
+    const b = relativeLuminance(foreground);
+    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+  }
+
+  const BADGE_DARK_TEXT = '#333333';
+  const BADGE_LIGHT_TEXT = '#ffffff';
+  const BADGE_SATURATIONS = [0.5, 0.55, 0.6, 0.65];
+
+  // Returns the pill fill and the text colour to set on top of it. The fill is
+  // the lightest version of the colour that still passes 4.5:1 against one of
+  // the two text colours, so the badge keeps a vivid colour where it can and
+  // only darkens the hues that would otherwise be unreadable. Searching from
+  // the light end matters: always darkening instead would converge every hue on
+  // the same murky shade, which is the same uniformity this is here to avoid.
+  //
+  // Hue alone would be 360 buckets, which is a lot of repeats once a registry
+  // has a few hundred packages, and neighbouring hues are near enough to look
+  // identical side by side. A little saturation variation on top of the hue
+  // widens the space and separates neighbours that would otherwise collide.
+  function badgeColors(seed) {
+    const hash = hashString(seed);
+    const hue = hash % 360;
+    const saturation = BADGE_SATURATIONS[(hash >>> 9) % BADGE_SATURATIONS.length];
+    for (let step = 0; step <= 8; step++) {
+      const background = hslToHex(hue, saturation, 0.55 - step * 0.05);
+      if (contrastRatio(background, BADGE_LIGHT_TEXT) >= 4.5) {
+        return { background, text: BADGE_LIGHT_TEXT };
+      }
+      if (contrastRatio(background, BADGE_DARK_TEXT) >= 4.5) {
+        return { background, text: BADGE_DARK_TEXT };
+      }
+    }
+    // Unreachable: at lightness 0.15 every hue passes against white. Kept so the
+    // function is total rather than able to return undefined into a template.
+    const background = hslToHex(hue, saturation, 0.15);
+    return { background, text: BADGE_LIGHT_TEXT };
+  }
 
   // One pass over every metacharacter, so the ampersands introduced by the
   // earlier entities are not escaped again.
@@ -375,7 +493,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
       ) || id;
     const downloads = Number((await totalDownloads(sql, namespace, id)) ?? 0);
     const license = row.license;
-    const color = LICENSE_BADGE_COLORS[license] ?? '#0070F3';
+    const { background: color, text: textColor } = badgeColors(`${namespace}/${id}`);
     const versionText = `v${row.version}`;
     const downloadsText = downloads === 1 ? '1 download' : `${downloads} downloads`;
     const rightText = `${versionText} | ${downloadsText} | ${license}`;
@@ -397,9 +515,9 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     <rect x="${labelWidth}" width="${rightWidth}" height="20" fill="${color}"/>
     <rect width="${totalWidth}" height="20" fill="url(#s)"/>
   </g>
-  <g fill="#fff" text-anchor="middle" font-family="DejaVu Sans,Verdana,Geneva,sans-serif" font-size="11">
-    <text x="${labelWidth / 2}" y="14">${xmlEscape(label)}</text>
-    <text x="${labelWidth + rightWidth / 2}" y="14">${xmlEscape(rightText)}</text>
+  <g text-anchor="middle" font-family="DejaVu Sans,Verdana,Geneva,sans-serif" font-size="11">
+    <text x="${labelWidth / 2}" y="14" fill="#ffffff">${xmlEscape(label)}</text>
+    <text x="${labelWidth + rightWidth / 2}" y="14" fill="${textColor}">${xmlEscape(rightText)}</text>
   </g>
 </svg>`;
     res.set('Cache-Control', 'public, max-age=300');

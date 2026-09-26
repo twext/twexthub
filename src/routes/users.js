@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto';
-import { mkdir, rename, rm } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import { Router } from 'express';
 import { hashPassword, verifyPassword } from '../password.js';
 import { requireSession } from '../auth.js';
+import { removeBlobIfUnused } from '../blobs.js';
+import { removeSourceIfUnused } from '../sources.js';
 import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
 import { fieldErrors, forbidden, notFound } from '../errors.js';
 import { isValidNamespace } from '../util.js';
@@ -247,40 +249,46 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     if (req.auth.user.namespace !== target.namespace && req.auth.user.role !== 'admin') {
       throw forbidden('Only an admin can delete another account.');
     }
-    // Quarantine the account's blobs before committing the row delete: if the
-    // DELETE fails the directory is restored, and after commit a failed purge
-    // is left in quarantine for the boot-time sweep instead of orphaning data.
-    const blobsDir = path.join(config.dataDir, 'blobs', target.namespace);
-    const quarantineDir = path.join(config.dataDir, 'quarantine');
-    const parked = path.join(quarantineDir, `${target.namespace}-${Date.now()}`);
-    let parkedPath = null;
-    try {
-      await mkdir(quarantineDir, { recursive: true });
-      await rename(blobsDir, parked);
-      parkedPath = parked;
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-    }
+    // Blobs and sources are content-addressed under blobs/<xx>/<rest> and
+    // sources/<xx>/<rest>, not under a per-namespace directory, so the digests
+    // have to be read before the DELETE: it cascades the version rows away and
+    // they are the only record of which files this account put on disk.
+    const owned = await sql`
+      SELECT DISTINCT blob_digest, blob_path, source_digest
+      FROM versions
+      WHERE owner_id = ${target.id}
+    `;
+    await sql`DELETE FROM users WHERE id = ${target.id}`;
 
+    // Only after the commit: a failed DELETE leaves the rows, and the keeper
+    // check keeps any digest another account's version still references.
+    // A cleanup failure costs disk, not correctness -- the boot-time sweep in
+    // db.js collects whatever is left unreferenced.
+    // blob_path is set on digest-backed rows too, so the legacy unlink is
+    // mutually exclusive with the digest path: doing both would delete a file
+    // the keeper check had just decided to keep.
+    const legacyPaths = [
+      ...new Set(
+        owned
+          .filter((row) => !row.blob_digest)
+          .map((row) => row.blob_path)
+          .filter(Boolean),
+      ),
+    ];
     try {
-      await sql`DELETE FROM users WHERE id = ${target.id}`;
+      await Promise.all([
+        ...owned
+          .map((row) => (row.blob_digest ? removeBlobIfUnused(sql, config, row.blob_digest) : null))
+          .filter(Boolean),
+        ...legacyPaths.map((rel) => rm(path.join(config.dataDir, rel), { force: true })),
+      ]);
+      await Promise.all(
+        [...new Set(owned.map((row) => row.source_digest).filter(Boolean))].map((digest) =>
+          removeSourceIfUnused(sql, config, digest),
+        ),
+      );
     } catch (error) {
-      if (parkedPath) {
-        try {
-          await rename(parked, blobsDir);
-        } catch {
-          // leave in quarantine for the boot-time sweep
-        }
-      }
-      throw error;
-    }
-
-    if (parkedPath) {
-      try {
-        await rm(parked, { recursive: true, force: true });
-      } catch (error) {
-        console.error(`quarantine cleanup deferred for ${target.namespace}: ${error.message}`);
-      }
+      console.error(`blob cleanup deferred for ${target.namespace}: ${error.message}`);
     }
     res.status(204).end();
   });

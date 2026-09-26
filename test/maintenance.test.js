@@ -161,7 +161,7 @@ test('boot reconciliation refunds the charge when the staging row is dropped', a
   assert.equal(Number(after.blob_bytes), 0, 'the charged bytes come back');
 });
 
-test('boot reconciliation re-keys a legacy blob that has no digest yet', async () => {
+test('boot reconciliation preserves a legacy blob on rollback and re-keys it on retry', async () => {
   const owner = await signupAndAccept(app, uniqNs());
   const ns = owner.user.namespace;
   const content = '// legacy bytes';
@@ -181,6 +181,21 @@ test('boot reconciliation re-keys a legacy blob that has no digest yet', async (
     RETURNING id
   `;
 
+  let transactions = 0;
+  const failingSql = (...args) => sql(...args);
+  failingSql.begin = (callback) =>
+    sql.begin(async (tx) => {
+      await callback(tx);
+      if (++transactions === 2) throw new Error('migration failed before commit');
+    });
+  await assert.rejects(reconcileOnBoot(failingSql, config), /migration failed before commit/);
+  assert.equal(fs.readFileSync(legacyAbs, 'utf8'), content);
+  const [rolledBack] = await sql`
+    SELECT blob_digest, blob_path FROM versions WHERE id = ${row.id}
+  `;
+  assert.equal(rolledBack.blob_digest, null);
+  assert.equal(rolledBack.blob_path, legacyRel);
+
   await reconcileOnBoot(sql, config);
 
   const [after] = await sql`
@@ -189,7 +204,7 @@ test('boot reconciliation re-keys a legacy blob that has no digest yet', async (
   assert.equal(after.blob_digest, digest);
   assert.equal(after.blob_path, path.join('blobs', digest.slice(0, 2), digest.slice(2)));
   assert.equal(Number(after.blob_size), content.length);
-  assert.ok(!fs.existsSync(legacyAbs), 'the legacy file is removed once it is copied');
+  assert.ok(!fs.existsSync(legacyAbs), 'the legacy file is removed after commit');
   // The digest is only useful if the copy landed where the download looks.
   const download = await request(app).get(`/v1/@${ns}/ancient/versions/1.0.0/download`).expect(200);
   assert.equal(download.text, content);

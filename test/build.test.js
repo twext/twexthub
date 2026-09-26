@@ -274,7 +274,21 @@ test('a build that floods its output cannot grow the log without bound', async (
   );
   assert.equal(result.ok, false);
   assert.ok(result.log.length <= 64 * 1024, `log stayed bounded, got ${result.log.length}`);
-  assert.match(result.log, /more lines cut/);
+  assert.ok(result.log.startsWith(`… (${16 * 1024 * 1024 + 1 - 16384} characters cut) `));
   // The tail survives, which is where a compiler puts the error.
   assert.match(result.log.slice(-200), /y+$/);
+});
+
+test('a build that floods stdout reports truncation even when stderr is empty', async (t) => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'twext-flood-'));
+  t.after(() => fs.rmSync(projectDir, { recursive: true, force: true }));
+  const script = path.join(projectDir, 'flood.mjs');
+  fs.writeFileSync(script, "process.stdout.write('x'.repeat(8 * 1024 * 1024));\n");
+
+  const result = await compileProject(
+    { compiler: { command: script, timeoutMs: 20_000 } },
+    projectDir,
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.log, `… (${8 * 1024 * 1024 - 16384} characters cut) ${'x'.repeat(16384)}`);
 });

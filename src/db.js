@@ -142,6 +142,7 @@ export async function reconcileOnBoot(sql, config) {
   // the same files, so the pass runs under the blob GC lock and picks its rows
   // only once it holds it: by then a peer has finished and written their
   // digests, and those rows no longer match.
+  const legacyPaths = [];
   await sql.begin(async (tx) => {
     await tx`SELECT pg_advisory_xact_lock(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
     const legacy = await tx`
@@ -174,10 +175,13 @@ export async function reconcileOnBoot(sql, config) {
       WHERE id = ${row.id}
       `;
       if (legacyPath !== digestAbs) {
-        await rm(legacyPath, { force: true });
+        legacyPaths.push(legacyPath);
       }
     }
   });
+  for (const legacyPath of legacyPaths) {
+    await rm(legacyPath, { force: true });
+  }
 }
 
 export function ensureDataDirs(dataDir) {

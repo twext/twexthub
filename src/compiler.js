@@ -27,10 +27,10 @@ export function compilerEnv(env = process.env) {
   return allowed;
 }
 
-function capLog(text) {
-  const truncated = text.length - 8;
-  if (truncated <= MAX_LOG_BYTES) return text;
-  return `… (${truncated} more lines cut) ${text.slice(-MAX_LOG_BYTES)}`;
+function capLog(text, dropped) {
+  const truncated = dropped + Math.max(0, text.length - MAX_LOG_BYTES);
+  if (truncated === 0) return text;
+  return `… (${truncated} characters cut) ${text.slice(-MAX_LOG_BYTES)}`;
 }
 
 // Compile an extracted project in place. Runs `twext build` in a child process

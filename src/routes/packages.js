@@ -87,24 +87,32 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     return row;
   }
 
-  async function loadLatestPublished(namespace, id) {
+  // `latest` is the only resolve that has to pick a row before anyone checks
+  // it, so it is resolved against what the caller can see: a private 2.0.0
+  // above a public 1.0.0 must not make `latest` 404 for an anonymous caller.
+  async function loadLatestPublished(namespace, id, user) {
     const rows = await sql`
       SELECT * FROM versions
       WHERE namespace = ${namespace} AND extension_id = ${id}
         AND status IN ('published', 'deprecated')
     `;
     if (rows.length === 0) return null;
-    const published = rows.filter((row) => row.status === 'published');
-    const pool = published.length > 0 ? published : rows;
+    const visible = [];
+    for (const row of rows) {
+      if (await canSee(user ?? null, row)) visible.push(row);
+    }
+    if (visible.length === 0) return null;
+    const published = visible.filter((row) => row.status === 'published');
+    const pool = published.length > 0 ? published : visible;
     const ceiling = maxVersionBySemver(pool.map((row) => row.version));
     return pool.find((row) => row.version === ceiling);
   }
 
-  async function resolveVersion(params) {
+  async function resolveVersion(params, user) {
     const { namespace, id, version } = params;
     const row =
       version === 'latest'
-        ? await loadLatestPublished(namespace, id)
+        ? await loadLatestPublished(namespace, id, user)
         : await loadVersion(namespace, id, version);
     if (row) return row;
     if (!/^[a-zA-Z0-9-]{1,30}$/.test(version)) throw notFound();
@@ -426,7 +434,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
   });
 
   router.get('/@:namespace/:id/versions/:version', async (req, res) => {
-    const row = await resolveVersion(req.params);
+    const row = await resolveVersion(req.params, req.auth?.user ?? null);
     const isVisible =
       row.status === 'published' || row.status === 'yanked' || row.status === 'deprecated';
     if (!isVisible) {
@@ -448,11 +456,10 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
       if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
       requireObjectBody(req);
       const message = req.body.message;
-      if (
-        message !== undefined &&
-        message !== null &&
-        (typeof message !== 'string' || message.trim().length === 0)
-      ) {
+      // `message` is required by the spec: an explicit null clears the notice,
+      // anything else has to be a real string. Omitting it used to fall through
+      // and deprecate with a NULL notice.
+      if (message !== null && (typeof message !== 'string' || message.trim().length === 0)) {
         throw fieldErrors([
           { field: 'message', message: 'Must be a non-empty string, or null to clear.' },
         ]);
@@ -480,11 +487,14 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         { namespace, id, version: updated.version },
         { message: message ?? null },
       );
-      void webhooks.scheduleFor(namespace, id, 'version.deprecated', {
-        version: updated.version,
-        occurredAt: new Date().toISOString(),
-        actor: req.auth.user.namespace,
-      });
+      // A null message puts the version back, so it is not a deprecation.
+      if (message !== null) {
+        void webhooks.scheduleFor(namespace, id, 'version.deprecated', {
+          version: updated.version,
+          occurredAt: new Date().toISOString(),
+          actor: req.auth.user.namespace,
+        });
+      }
       res.json(versionToObject(updated, config));
     },
   );
@@ -582,7 +592,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
   router.delete('/@:namespace/:id/versions/:version', yankChain, async (req, res) => {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
-    const row = await resolveVersion(req.params);
+    const row = await resolveVersion(req.params, req.auth?.user ?? null);
     if (row.status !== 'published' && row.status !== 'deprecated') throw notFound();
     if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
       throw forbidden('You can only yank your own extensions.');
@@ -605,7 +615,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     }
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
-    const row = await resolveVersion(req.params);
+    const row = await resolveVersion(req.params, req.auth?.user ?? null);
     const isPublished =
       row.status === 'published' || row.status === 'yanked' || row.status === 'deprecated';
     const isAdmin = req.auth?.user.role === 'admin' && req.auth.tokenType === 'session';
@@ -644,7 +654,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
       if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
         throw notFound('Only an owner or an admin can fetch the source.');
       }
-      const row = await resolveVersion(req.params);
+      const row = await resolveVersion(req.params, req.auth?.user ?? null);
       if (!row.source_path || !row.source_digest) {
         throw notFound('Source is unavailable for this version.');
       }

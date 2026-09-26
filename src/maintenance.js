@@ -98,14 +98,18 @@ export function makeMaintenanceJob({ sql, config }) {
   const scrubIntervalMs = 24 * 60 * 60 * 1000;
   let lastScrub = 0;
 
-  const tick = async () => {
+  // The startup pass sweeps orphaned files as soon as the process is up, but it
+  // skips the scrub. A scrub that early can read a version row whose blob is
+  // still being written and report the file missing, which puts a false error in
+  // the integrity metric on every boot. The first scheduled tick still scrubs.
+  const tick = async ({ gcOnly = false } = {}) => {
     if (running) return;
     running = true;
     try {
       const removed = await gcBlobs(sql, config.dataDir);
       if (removed > 0) console.log(`blob gc removed ${removed} orphaned file(s)`);
 
-      if (Date.now() - lastScrub >= scrubIntervalMs) {
+      if (!gcOnly && Date.now() - lastScrub >= scrubIntervalMs) {
         lastScrub = Date.now();
         const problems = await scrubBlobs(sql, config.dataDir);
         for (const problem of problems) {
@@ -123,7 +127,7 @@ export function makeMaintenanceJob({ sql, config }) {
 
   return {
     start() {
-      void tick();
+      void tick({ gcOnly: true });
       timer = setInterval(tick, gcIntervalMs);
       timer.unref?.();
       return this;

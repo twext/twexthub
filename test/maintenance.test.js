@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import request from 'supertest';
 import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
-import { gcBlobs, scrubBlobs, getIntegrityErrors } from '../src/maintenance.js';
+import { gcBlobs, makeMaintenanceJob, scrubBlobs, getIntegrityErrors } from '../src/maintenance.js';
 import { createDb, reconcileOnBoot } from '../src/db.js';
 import { blobPathFor, sha256Hex } from '../src/blobs.js';
 
@@ -249,4 +249,62 @@ test('two instances reconciling the same legacy blob do not race each other', as
     .get(`/v1/@${ns}/contested/versions/1.0.0/download`)
     .expect(200);
   assert.equal(download.text, content);
+});
+
+test('the startup pass collects garbage but does not scrub', async () => {
+  // start() runs a pass immediately, which is what makes orphaned files from a
+  // previous run go away without waiting out the GC interval. Scrubbing in that
+  // same pass is the problem: at boot the database still holds the previous
+  // run's rows while a publish may be writing a blob, so the scrub reports live
+  // files as missing and leaves a false error in the integrity metric.
+  const admin = await signupAndAccept(app, uniqNs());
+  const owner = await signupAndAccept(app, uniqNs());
+  await publishAndApprove(admin.token, owner, 'startuppass', '// startup bytes');
+
+  const [row] = await sql`
+    SELECT blob_digest FROM versions
+    WHERE extension_id = 'startuppass' AND blob_digest IS NOT NULL
+  `;
+  const liveAbs = blobPathFor(config.dataDir, row.blob_digest);
+  assert.ok(fs.existsSync(liveAbs));
+
+  // A backdated orphan, so the sweep is willing to take it.
+  const orphanAbs = blobPathFor(config.dataDir, 'a'.repeat(64));
+  fs.mkdirSync(path.dirname(orphanAbs), { recursive: true });
+  fs.writeFileSync(orphanAbs, 'orphaned bytes');
+  const stale = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  fs.utimesSync(orphanAbs, stale, stale);
+
+  // Make this version's own blob unreadable, so a scrub that covers it says so.
+  // The gauge alone cannot prove which pass ran: it is process-wide and the
+  // data directory is shared with rows left behind by other tests.
+  fs.rmSync(liveAbs);
+  const warned = [];
+  const realWarn = console.warn;
+  console.warn = (...args) => {
+    warned.push(args.join(' '));
+    realWarn(...args);
+  };
+
+  try {
+    const job = makeMaintenanceJob({ sql, config });
+    job.start();
+    await job.stop();
+    assert.ok(!fs.existsSync(orphanAbs), 'the startup pass still collects garbage');
+    assert.equal(
+      warned.filter((line) => line.includes('startuppass')).length,
+      0,
+      'the startup pass did not scrub',
+    );
+
+    // A full pass still scrubs, so corruption is caught on the normal schedule.
+    await job.runOnce();
+    assert.equal(
+      warned.filter((line) => line.includes('startuppass')).length,
+      1,
+      'a full pass reports the missing blob',
+    );
+  } finally {
+    console.warn = realWarn;
+  }
 });

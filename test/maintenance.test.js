@@ -5,7 +5,7 @@ import path from 'node:path';
 import request from 'supertest';
 import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
 import { gcBlobs, scrubBlobs, getIntegrityErrors } from '../src/maintenance.js';
-import { reconcileOnBoot } from '../src/db.js';
+import { createDb, reconcileOnBoot } from '../src/db.js';
 import { blobPathFor, sha256Hex } from '../src/blobs.js';
 
 let app;
@@ -192,5 +192,46 @@ test('boot reconciliation re-keys a legacy blob that has no digest yet', async (
   assert.ok(!fs.existsSync(legacyAbs), 'the legacy file is removed once it is copied');
   // The digest is only useful if the copy landed where the download looks.
   const download = await request(app).get(`/v1/@${ns}/ancient/versions/1.0.0/download`).expect(200);
+  assert.equal(download.text, content);
+});
+
+test('two instances reconciling the same legacy blob do not race each other', async () => {
+  const owner = await signupAndAccept(app, uniqNs());
+  const ns = owner.user.namespace;
+  // Big enough that the copy and the unlink cannot land inside one another's
+  // window, which is the interleaving that breaks an unlocked pass.
+  const content = `// contested legacy bytes\n${'x'.repeat(8 * 1024 * 1024)}`;
+  const digest = sha256Hex(content);
+  const legacyRel = path.join('blobs', 'legacy', 'contested.js');
+  const legacyAbs = path.join(config.dataDir, legacyRel);
+  fs.mkdirSync(path.dirname(legacyAbs), { recursive: true });
+  fs.writeFileSync(legacyAbs, content);
+
+  const [{ id: ownerId }] = await sql`SELECT id FROM users WHERE namespace = ${ns}`;
+  const [row] = await sql`
+    INSERT INTO versions
+      (owner_id, namespace, extension_id, version, status, name, license,
+       description, blob_path, created_at, published_at)
+    VALUES (${ownerId}, ${ns}, 'contested', '1.0.0', 'published', 'contested', 'MIT',
+            '', ${legacyRel}, now() - interval '2 days', now() - interval '2 days')
+    RETURNING id
+  `;
+
+  // The second connection stands in for a second instance sharing the database
+  // and the data directory, which is what hosting.md allows behind a balancer.
+  const peer = createDb(config);
+  try {
+    await Promise.all([reconcileOnBoot(sql, config), reconcileOnBoot(peer, config)]);
+  } finally {
+    await peer.end();
+  }
+
+  const [after] = await sql`SELECT blob_digest, blob_path FROM versions WHERE id = ${row.id}`;
+  assert.equal(after.blob_digest, digest);
+  assert.equal(after.blob_path, path.join('blobs', digest.slice(0, 2), digest.slice(2)));
+  assert.ok(!fs.existsSync(legacyAbs), 'the legacy file is removed exactly once');
+  const download = await request(app)
+    .get(`/v1/@${ns}/contested/versions/1.0.0/download`)
+    .expect(200);
   assert.equal(download.text, content);
 });

@@ -1,6 +1,7 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
-import http from 'node:http';
+import { readFileSync } from 'node:fs';
+import https from 'node:https';
 import request from 'supertest';
 import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
 import {
@@ -59,7 +60,18 @@ const PUBLIC_URL = 'https://example.com/twext-hook';
 
 // The receiver below listens on loopback, which the delivery-time policy check
 // refuses; these attempts stand in for an operator with a routable address.
-const allowPrivateUrl = async () => {};
+// The hostname it is registered under does not resolve at all, so a delivery
+// that reached it proves the connection used the address that was checked
+// rather than a second DNS answer.
+const RECEIVER_HOST = 'receiver.invalid';
+const RECEIVER_CA = readFileSync(new URL('./fixtures/test-cert.pem', import.meta.url));
+const RECEIVER_KEY = readFileSync(new URL('./fixtures/test-key.pem', import.meta.url));
+const toLoopbackReceiver = async (url) => ({
+  url: new URL(url),
+  address: '127.0.0.1',
+  family: 4,
+  ca: RECEIVER_CA,
+});
 
 test('creating a webhook returns the secret once; listing never does', async () => {
   const { owner, ns } = await makeOwner();
@@ -204,7 +216,7 @@ test('version.rejected fires from the review endpoint', async () => {
 
 test('delivery posts the signed payload and records status', async () => {
   const received = [];
-  const server = http.createServer((req, res) => {
+  const server = https.createServer({ key: RECEIVER_KEY, cert: RECEIVER_CA }, (req, res) => {
     let chunks = [];
     req.on('data', (chunk) => chunks.push(chunk));
     req.on('end', () => {
@@ -228,7 +240,7 @@ test('delivery posts the signed payload and records status', async () => {
       .send({ url: PUBLIC_URL, events: ['version.published'] })
       .expect(201);
     const { secret, id: webhookId } = created.body;
-    const url = `http://127.0.0.1:${port}/hook`;
+    const url = `https://${RECEIVER_HOST}:${port}/hook`;
     await sql`UPDATE webhooks SET url = ${url} WHERE id = ${webhookId}`;
 
     const payload = {
@@ -247,7 +259,7 @@ test('delivery posts the signed payload and records status', async () => {
       RETURNING *
     `;
 
-    const result = await attemptDelivery(sql, { ...delivery, url }, Date.now(), allowPrivateUrl);
+    const result = await attemptDelivery(sql, { ...delivery, url }, Date.now(), toLoopbackReceiver);
     assert.equal(result.ok, true);
     assert.equal(received.length, 1);
     assert.equal(received[0].event, 'version.published');
@@ -259,6 +271,43 @@ test('delivery posts the signed payload and records status', async () => {
     assert.equal(after.status, 'delivered');
     const [hook] = await sql`SELECT last_delivery_status FROM webhooks WHERE id = ${webhookId}`;
     assert.equal(hook.last_delivery_status, 'ok');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('a delivery connects to the address it validated, not the hostname', async () => {
+  const server = https.createServer({ key: RECEIVER_KEY, cert: RECEIVER_CA }, (req, res) => {
+    res.writeHead(200);
+    res.end('ok');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  try {
+    const { owner, ns } = await makeOwner();
+    const created = await request(app)
+      .post(`/v1/@${ns}/hooked/webhooks`)
+      .set(bearer(owner.token))
+      .send({ url: PUBLIC_URL, events: ['version.published'] })
+      .expect(201);
+    const { secret, id: webhookId } = created.body;
+    // A name that resolves nowhere, paired with an address that resolves
+    // nowhere else. Only a socket pinned to the checked address can complete.
+    const url = `https://${RECEIVER_HOST}:${port}/hook`;
+    await sql`UPDATE webhooks SET url = ${url} WHERE id = ${webhookId}`;
+
+    const body = JSON.stringify({ event: 'version.published', id: 'hooked' });
+    const [delivery] = await sql`
+      INSERT INTO webhook_deliveries (webhook_id, event, payload, body, signature)
+      VALUES (${webhookId}, 'version.published', ${sql.json(JSON.parse(body))}, ${body},
+              ${signWebhookPayload(secret, body)})
+      RETURNING *
+    `;
+
+    const result = await attemptDelivery(sql, { ...delivery, url }, Date.now(), toLoopbackReceiver);
+    assert.equal(result.ok, true);
+    const [after] = await sql`SELECT status FROM webhook_deliveries WHERE id = ${delivery.id}`;
+    assert.equal(after.status, 'delivered');
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

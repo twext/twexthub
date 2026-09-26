@@ -1,5 +1,6 @@
 import { createHmac, randomBytes } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
+import https from 'node:https';
 import { isIP } from 'node:net';
 
 export const WEBHOOK_EVENTS = Object.freeze([
@@ -14,6 +15,7 @@ export const WEBHOOK_EVENTS = Object.freeze([
 const RETRY_DELAYS_MS = [0, 5_000, 30_000, 300_000];
 const POLL_INTERVAL_MS = 15_000;
 const DELIVERY_BATCH = 50;
+const DELIVERY_TIMEOUT_MS = 10_000;
 
 function isPrivateIp(ip) {
   const version = isIP(ip);
@@ -38,7 +40,11 @@ function isPrivateIp(ip) {
   return false;
 }
 
-export async function assertPublicWebhookUrl(rawUrl) {
+// Validate a webhook URL and return it together with the address it resolved
+// to. The address is what a delivery connects to: resolving the name and then
+// connecting by name would leave room for a second answer to point somewhere
+// else, so callers carry this one through instead of the name.
+export async function resolvePublicWebhookTarget(rawUrl) {
   let url;
   try {
     url = new URL(rawUrl);
@@ -58,7 +64,7 @@ export async function assertPublicWebhookUrl(rawUrl) {
     if (isPrivateIp(host)) {
       throw new Error('Webhook URL must resolve to a public (non-private) address.');
     }
-    return url;
+    return { url, address: host, family: isIP(host) };
   }
   let addresses;
   try {
@@ -69,7 +75,11 @@ export async function assertPublicWebhookUrl(rawUrl) {
   if (addresses.length === 0 || addresses.some((entry) => isPrivateIp(entry.address))) {
     throw new Error('Webhook URL must resolve to a public (non-private) address.');
   }
-  return url;
+  return { url, address: addresses[0].address, family: addresses[0].family };
+}
+
+export async function assertPublicWebhookUrl(rawUrl) {
+  return (await resolvePublicWebhookTarget(rawUrl)).url;
 }
 
 export function newWebhookSecret() {
@@ -221,35 +231,60 @@ export async function deliverDue(sql, now = Date.now()) {
   return results;
 }
 
-// `checkUrl` is a seam for the test receiver, which listens on loopback; the
-// worker always passes the real check.
+// POST the body to an address that has already been checked. The socket is
+// pinned with `lookup`, so the request goes to the address the check approved
+// and TLS still validates the hostname it was registered under.
+function postToTarget(target, delivery) {
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      target.url,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-TwextHub-Event': delivery.event,
+          'X-TwextHub-Signature': delivery.signature,
+          'X-TwextHub-Delivery': String(delivery.id),
+          'Content-Length': Buffer.byteLength(delivery.body),
+        },
+        // Undefined outside the test receiver, which supplies the CA for its
+        // self-signed certificate; the default trust store applies otherwise.
+        ca: target.ca,
+        lookup: (_host, options, callback) => {
+          if (options.all) callback(null, [{ address: target.address, family: target.family }]);
+          else callback(null, target.address, target.family);
+        },
+      },
+      (res) => {
+        res.resume();
+        resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode });
+      },
+    );
+    req.setTimeout(DELIVERY_TIMEOUT_MS, () => {
+      req.destroy(new Error(`Delivery timed out after ${DELIVERY_TIMEOUT_MS} ms.`));
+    });
+    req.on('error', reject);
+    req.end(delivery.body);
+  });
+}
+
+// `resolveTarget` is a seam for the test receiver, which listens on loopback;
+// the worker always resolves and validates for real.
 export async function attemptDelivery(
   sql,
   delivery,
   now = Date.now(),
-  checkUrl = assertPublicWebhookUrl,
+  resolveTarget = resolvePublicWebhookTarget,
 ) {
   const attempt = delivery.attempt + 1;
   let error = null;
   let ok = false;
   try {
-    // The host passed the check at registration, but DNS answers change: the
-    // name is resolved again here so a delivery or a retry cannot reach an
-    // address the registry would have refused. The window between this check
-    // and the connect is the deployment's to close (see docs/hosting.md).
-    await checkUrl(delivery.url);
-    const res = await fetch(delivery.url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-TwextHub-Event': delivery.event,
-        'X-TwextHub-Signature': delivery.signature,
-        'X-TwextHub-Delivery': String(delivery.id),
-      },
-      body: delivery.body,
-      redirect: 'manual',
-      signal: AbortSignal.timeout(10_000),
-    });
+    // The name passed the check at registration, but DNS answers change, so
+    // every attempt resolves it again and connects to the address that answer
+    // produced.
+    const target = await resolveTarget(delivery.url);
+    const res = await postToTarget(target, delivery);
     ok = res.ok;
     if (!ok) error = `HTTP ${res.status}`;
   } catch (e) {

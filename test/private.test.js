@@ -193,6 +193,37 @@ test('a semver range never resolves to a version the caller cannot see', async (
   assert.equal(asOwner.body.visibility, 'private');
 });
 
+test('a private version does not hide the public one before it', async () => {
+  const admin = await signupAndAccept(app, uniqNs());
+  const owner = await signupAndAccept(app, uniqNs());
+  const ns = owner.user.namespace;
+
+  await publishProject(app, ns, 'later', owner.token, { version: '1.0.0', code: '// public' });
+  await request(app)
+    .patch(`/v1/@${ns}/later/versions/1.0.0`)
+    .set(bearer(admin.token))
+    .send({ status: 'approved' })
+    .expect(200);
+  // Past the first publish, so this one goes out without review.
+  const priv = await publishPrivate({ owner, id: 'later', version: '2.0.0', code: '// private@2' });
+  assert.equal(priv.body.status, 'published');
+
+  // The newest row is private, which used to make the whole endpoint answer
+  // 404 — including for a range that only the public version satisfies.
+  const anon = await request(app).get(`/v1/@${ns}/later/versions/resolve?range=1.0.0`).expect(200);
+  assert.equal(anon.body.version, '1.0.0');
+  assert.equal(anon.body.visibility, 'public');
+
+  // The private one is still only returned to someone who may read it.
+  const asOwner = await request(app)
+    .get(`/v1/@${ns}/later/versions/resolve?range=2.0.0`)
+    .set(bearer(owner.token))
+    .expect(200);
+  assert.equal(asOwner.body.version, '2.0.0');
+  const denied = await request(app).get(`/v1/@${ns}/later/versions/resolve?range=2.0.0`);
+  assert.equal(denied.status, 404);
+});
+
 test('private downloads do not consume anonymous trending slots', async () => {
   const admin = await signupAndAccept(app, uniqNs());
   const owner = await signupAndAccept(app, uniqNs());

@@ -123,8 +123,9 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     if (!range || !semver.validRange(range)) {
       throw fieldErrors([{ field: 'range', message: 'Must be a valid SemVer range.' }]);
     }
-    const visibility = await loadVisibility(namespace, id);
-    if (!visibility || !(await canSee(req.auth?.user, visibility))) throw notFound();
+    // No extension-level gate here: a namespace whose newest version is private
+    // can still have public versions, and the per-row check below is the
+    // stricter one — it reads the visibility of the version actually returned.
     const rows = await sql`
       SELECT * FROM versions
       WHERE namespace = ${namespace} AND extension_id = ${id}

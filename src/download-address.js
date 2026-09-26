@@ -12,6 +12,14 @@ function keyFile(dataDir) {
   return path.join(dataDir, 'secrets', 'download-address.key');
 }
 
+function readKey(file) {
+  const secret = readFileSync(file, 'utf8').trim();
+  // An empty key is worse than no key: it would hash every address to the same
+  // value and quietly answer nothing useful.
+  if (secret.length === 0) throw new Error(`The download address key at ${file} is empty.`);
+  return secret;
+}
+
 // A download address is hashed so the registry can count distinct clients
 // without keeping the address, and that hash is worth nothing if the key sits
 // next to it: one database dump would undo the whole point. The key therefore
@@ -28,18 +36,32 @@ export async function downloadAddressKey(sql, config) {
 
   const file = keyFile(config.dataDir);
   let secret;
+  let created = false;
   try {
-    secret = readFileSync(file, 'utf8').trim();
-  } catch {
+    secret = readKey(file);
+  } catch (error) {
+    // Only a missing key is ours to create. An unreadable one is the operator's
+    // problem to see, not a reason to rotate: rotating here would clear every
+    // hash and hide the cause.
+    if (error.code !== 'ENOENT') throw error;
     secret = randomBytes(32).toString('base64url');
     mkdirSync(path.dirname(file), { recursive: true });
-    writeFileSync(file, `${secret}\n`, { mode: 0o600 });
+    try {
+      // Exclusive, so an instance starting at the same moment cannot overwrite
+      // the key that hashes written a moment ago were made with.
+      writeFileSync(file, `${secret}\n`, { flag: 'wx', mode: 0o600 });
+      created = true;
+    } catch (writeError) {
+      if (writeError.code !== 'EEXIST') throw writeError;
+      secret = readKey(file);
+    }
+  }
+
+  if (created) {
     // Losing the key leaves hashes that cannot be compared with new ones, so
     // the rows that used it are cleared. The rollup still counts them; their
     // distinct counts fall back to the user agent.
-    const stale = await sql`
-      UPDATE download_events SET ip_hash = NULL WHERE ip_hash IS NOT NULL
-    `;
+    const stale = await sql`UPDATE download_events SET ip_hash = NULL WHERE ip_hash IS NOT NULL`;
     if (stale.count > 0) {
       console.log(`generated a new download address key; cleared ${stale.count} stale hashes`);
     }

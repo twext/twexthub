@@ -1,6 +1,9 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   boot,
   resetDb,
@@ -10,7 +13,7 @@ import {
   publishProject,
   listTarballFiles,
 } from './helpers.mjs';
-import { compilerEnv } from '../src/compiler.js';
+import { compileProject, compilerEnv } from '../src/compiler.js';
 
 let app;
 let sql;
@@ -253,4 +256,25 @@ test('the compiler child gets an allowlist, not the server environment', () => {
   }
   // Nothing from the host leaks in implicitly either.
   assert.deepEqual(Object.keys(env).sort(), ['HOME', 'NO_COLOR', 'PATH']);
+});
+
+test('a build that floods its output cannot grow the log without bound', async () => {
+  // The compiler command is a script inside the project directory, which is the
+  // only place the sandbox lets the child read from.
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'twext-flood-'));
+  const script = path.join(projectDir, 'flood.mjs');
+  fs.writeFileSync(
+    script,
+    "process.stdout.write('x'.repeat(8 * 1024 * 1024));\nprocess.stderr.write('y'.repeat(8 * 1024 * 1024));\n",
+  );
+
+  const result = await compileProject(
+    { compiler: { command: script, timeoutMs: 20_000 } },
+    projectDir,
+  );
+  assert.equal(result.ok, false);
+  assert.ok(result.log.length <= 64 * 1024, `log stayed bounded, got ${result.log.length}`);
+  assert.match(result.log, /more lines cut/);
+  // The tail survives, which is where a compiler puts the error.
+  assert.match(result.log.slice(-200), /y+$/);
 });

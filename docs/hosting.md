@@ -124,7 +124,9 @@ A failed build rejects the publish with `422` and reports the compiler's output 
 
 Webhook destinations are checked when a publisher registers one: the URL must be `https`, resolve to a public address, and carry no credentials in it. The name is resolved again on every delivery attempt, so a destination whose DNS answers have since turned private is refused before the request goes out.
 
-That re-check narrows the window but does not close it: the address is resolved before the connection, so a host that answers differently to the two lookups can still be reached. Closing it entirely means controlling resolution, which belongs at the deployment boundary — run the instance on a network where outbound requests cannot reach loopback, link-local or private ranges, or resolve through a proxy you operate.
+The re-check and the connection read the same answer: the address is resolved once per attempt and the socket is pinned to it, so a name that answers differently to a second lookup cannot redirect the request. TLS still validates the hostname the URL was registered under, which keeps a pinned address from serving a certificate for a different host. Redirects are not followed, so a `3xx` response cannot send the delivery somewhere that was never checked.
+
+What is left is the deployment boundary: an instance can still open outbound connections to whatever is reachable, and a compromised process inside it is not contained by this check. Run the instance where outbound requests cannot reach loopback, link-local or private ranges, or resolve through a proxy you operate.
 
 ## Blobs must live on persistent storage
 
@@ -162,7 +164,7 @@ Two things hold state: the Postgres database and the data directory.
 
 Both trees are content-addressed by SHA-256 (`blobs/<xx>/<rest>`, `sources/<xx>/<rest>`), so a restore is a plain file copy — no paths to rewrite. If a restore leaves a file missing, the daily scrub surfaces it through `twexthub_storage_integrity_errors` and the affected download returns 404.
 
-`secrets/download-address.key` keys the hash that stands in for a download's client address, and the key deliberately lives outside the database: a dump of the database on its own reveals no addresses. Set `TWEXTHUB_DOWNLOAD_HASH_KEY` to hold it yourself (Kubernetes secret, config management); the file is then not written. Changing the key has the same effect as losing it — the hashes made with the old one are cleared the next time the file is created.
+`secrets/download-address.key` keys the hash that stands in for a download's client address, and the key deliberately lives outside the database: a dump of the database on its own reveals no addresses. Set `TWEXTHUB_DOWNLOAD_HASH_KEY` to hold it yourself (Kubernetes secret, config management); the file is then not written. If the key file is missing, the instance generates one (mode 0600) and clears hashes it cannot compare against. If the key changes after hashes exist, the old and new hashes remain in `extension_daily_downloads` and in any new events, so the `distinct_downloads` rollup reflects the key that produced each hash at the time it was written; there is no automated cleanup of values made with a prior key.
 
 `tmp/` and `quarantine/` inside the data directory are scratch space; they matter for no restore.
 

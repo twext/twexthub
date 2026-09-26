@@ -66,8 +66,20 @@ export function compileProject(config, projectDir, { outFile = null } = {}) {
 
     const env = compilerEnv();
 
+    // A build runs untrusted project code, so its output is bounded as it
+    // arrives: truncating at the end would still let a chatty compiler grow
+    // this process without limit. The tail is kept because that is where the
+    // error is.
     let stdout = '';
     let stderr = '';
+    let dropped = 0;
+    const append = (current, chunk) => {
+      const next = current + chunk;
+      if (next.length <= MAX_LOG_BYTES) return next;
+      dropped += next.length - MAX_LOG_BYTES;
+      return next.slice(next.length - MAX_LOG_BYTES);
+    };
+    const log = () => capLog(`${stdout}${stderr ? `\n${stderr}` : ''}`.trim(), dropped);
     let started = Date.now();
 
     const child = spawn(process.execPath, args, {
@@ -80,21 +92,20 @@ export function compileProject(config, projectDir, { outFile = null } = {}) {
       resourceLimits: { maxOldGenerationSizeMb: memoryMb },
     });
     child.stdout.on('data', (chunk) => {
-      stdout += chunk;
+      stdout = append(stdout, chunk);
     });
     child.stderr.on('data', (chunk) => {
-      stderr += chunk;
+      stderr = append(stderr, chunk);
     });
     child.on('error', (error) => {
       resolve({
         ok: false,
         error: `Could not start the compiler: ${error.message}`,
-        log: capLog(`${stdout}\n${stderr}`.trim()),
+        log: log(),
         durationMs: Date.now() - started,
       });
     });
     child.on('close', async (code, signal) => {
-      const log = capLog(`${stdout}${stderr ? `\n${stderr}` : ''}`.trim());
       if (code !== 0 || (signal && signal !== 'SIGTERM')) {
         const reason = signal
           ? `Terminated by ${signal}${signal === 'SIGKILL' ? ' (timed out or out of memory)' : ''}.`
@@ -102,7 +113,7 @@ export function compileProject(config, projectDir, { outFile = null } = {}) {
         resolve({
           ok: false,
           error: reason,
-          log,
+          log: log(),
           durationMs: Date.now() - started,
         });
         return;
@@ -113,14 +124,14 @@ export function compileProject(config, projectDir, { outFile = null } = {}) {
           ok: true,
           code: codeBuffer,
           size: codeBuffer.length,
-          log,
+          log: log(),
           durationMs: Date.now() - started,
         });
       } catch (error) {
         resolve({
           ok: false,
           error: `The compiler reported success but produced no output: ${error.message}`,
-          log,
+          log: log(),
           durationMs: Date.now() - started,
         });
       }

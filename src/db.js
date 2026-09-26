@@ -11,7 +11,7 @@ import { copyFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
-import { blobPathFor, hashFile, sha512Base64 } from './blobs.js';
+import { BLOB_GC_LOCK_KEY, blobPathFor, hashFile, sha512Base64 } from './blobs.js';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 export const MIGRATIONS_DIR = path.join(moduleDir, '..', 'migrations');
@@ -137,39 +137,47 @@ export async function reconcileOnBoot(sql, config) {
   // Pre-digest rows (published before the blob_digest migration) point at
   // legacy namespace/blob paths. Re-key them to content-addressed digests so
   // the whole table can be served from /blobs/:digest and evicted by GC.
-  const legacy = await sql`
-    SELECT * FROM versions
-    WHERE blob_digest IS NULL AND status IN ('published', 'yanked', 'deprecated')
-  `;
-  for (const row of legacy) {
-    const legacyPath = path.join(dataDir, row.blob_path);
-    let digest;
-    try {
-      digest = await hashFile(legacyPath);
-    } catch {
-      console.warn(
-        `indexing skipped for ${row.namespace}/${row.extension_id}@${row.version}: missing blob`,
-      );
-      continue;
-    }
-    const codeBuffer = readFileSync(legacyPath);
-    const digestAbs = blobPathFor(dataDir, digest);
-    // The shard for a digest that has never been stored is not there yet, and
-    // nothing else in the data directory creates it.
-    mkdirSync(path.dirname(digestAbs), { recursive: true });
-    await copyFile(legacyPath, digestAbs);
-    await sql`
-      UPDATE versions
-      SET blob_digest = ${digest},
-          blob_size = ${codeBuffer.length},
-          blob_sha512 = ${sha512Base64(codeBuffer)},
-          blob_path = ${path.join('blobs', digest.slice(0, 2), digest.slice(2))}
-      WHERE id = ${row.id}
+  //
+  // Two instances starting at once would select the same rows and then race on
+  // the same files, so the pass runs under the blob GC lock and picks its rows
+  // only once it holds it: by then a peer has finished and written their
+  // digests, and those rows no longer match.
+  await sql.begin(async (tx) => {
+    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
+    const legacy = await tx`
+      SELECT * FROM versions
+      WHERE blob_digest IS NULL AND status IN ('published', 'yanked', 'deprecated')
     `;
-    if (legacyPath !== digestAbs) {
-      await rm(legacyPath, { force: true });
+    for (const row of legacy) {
+      const legacyPath = path.join(dataDir, row.blob_path);
+      let digest;
+      try {
+        digest = await hashFile(legacyPath);
+      } catch {
+        console.warn(
+          `indexing skipped for ${row.namespace}/${row.extension_id}@${row.version}: missing blob`,
+        );
+        continue;
+      }
+      const codeBuffer = readFileSync(legacyPath);
+      const digestAbs = blobPathFor(dataDir, digest);
+      // The shard for a digest that has never been stored is not there yet, and
+      // nothing else in the data directory creates it.
+      mkdirSync(path.dirname(digestAbs), { recursive: true });
+      await copyFile(legacyPath, digestAbs);
+      await tx`
+        UPDATE versions
+        SET blob_digest = ${digest},
+            blob_size = ${codeBuffer.length},
+            blob_sha512 = ${sha512Base64(codeBuffer)},
+            blob_path = ${path.join('blobs', digest.slice(0, 2), digest.slice(2))}
+      WHERE id = ${row.id}
+      `;
+      if (legacyPath !== digestAbs) {
+        await rm(legacyPath, { force: true });
+      }
     }
-  }
+  });
 }
 
 export function ensureDataDirs(dataDir) {

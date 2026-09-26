@@ -76,16 +76,19 @@ export async function storeProfileImage(sql, config, user, kind, buffer, declare
   const { contentType, size } = validateProfileImage(config, kind, buffer, declaredType);
   const columns = PROFILE_IMAGES[kind];
   const previous = user[columns.digestColumn] ?? null;
-  const externalColumn = kind === 'avatar' ? 'avatar_url' : 'banner_url';
   const { digest } = await sql.begin(async (tx) => {
     await tx`SELECT pg_advisory_xact_lock_shared(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
     const stored = await storeBlobBuffer(config.dataDir, buffer);
+    // The external reference is left alone. An account can hold a URL and an
+    // upload at once; the upload is what a visitor sees, and the URL is what
+    // comes back if the upload is removed, so neither write has to destroy the
+    // other. It is also the only copy the instance controls, and dropping it
+    // because someone picked a file would silently discard it.
     await tx`
       UPDATE users
       SET ${tx(columns.digestColumn)} = ${stored.digest},
           ${tx(columns.typeColumn)} = ${contentType},
-          ${tx(columns.bytesColumn)} = ${size},
-          ${tx(externalColumn)} = NULL
+          ${tx(columns.bytesColumn)} = ${size}
       WHERE id = ${user.id}
     `;
     return stored;
@@ -173,9 +176,8 @@ export async function removeProfileImageBlob(sql, config, digest, exceptUserId =
  * Queues the UPDATE fragment that drops a kind's upload pointer, and returns the
  * digest it freed so the caller can release the bytes after the row commits.
  *
- * Used when an external reference takes the field's place. A no-op when the
- * account has no upload, so a plain text edit to a profile that never uploaded
- * an image does not write three NULL columns for nothing.
+ * A no-op when the account has no upload, so a request that never touched an
+ * upload does not write three NULL columns for nothing.
  */
 export function clearProfileImagePointer(patch, columns, user, kind) {
   const image = PROFILE_IMAGES[kind];

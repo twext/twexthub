@@ -6,7 +6,6 @@ import { hashPassword, verifyPassword } from '../password.js';
 import { requireSession } from '../auth.js';
 import { removeBlobIfUnused } from '../blobs.js';
 import {
-  clearProfileImagePointer,
   PROFILE_IMAGES,
   profileImagePointer,
   removeProfileImageBlob,
@@ -89,8 +88,9 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     if (!isValidNamespace(req.params.namespace)) throw notFound();
     const [user] = await sql`SELECT * FROM users WHERE namespace = ${req.params.namespace}`;
     if (!user) throw notFound();
-    const external = kind === 'avatar' ? user.avatar_url : user.banner_url;
-    const stored = external ? null : await resolveProfileImage(config, user, kind);
+    // The upload is tried first because an account can hold both, and the file
+    // it uploaded is the one the instance is responsible for serving.
+    const stored = await resolveProfileImage(config, user, kind);
     if (stored) {
       // The bytes are content-addressed, so the same image always has the same
       // URL and can be cached hard. A replacement upload lands under a new
@@ -109,6 +109,7 @@ export function makeUsersRouter({ sql, config, termsGate }) {
       res.sendFile(stored.abs);
       return;
     }
+    const external = kind === 'avatar' ? user.avatar_url : user.banner_url;
     if (external) {
       res.redirect(external);
       return;
@@ -159,9 +160,9 @@ export function makeUsersRouter({ sql, config, termsGate }) {
   router.put('/:namespace/avatar', ...uploadProfileImage('avatar'));
   router.put('/:namespace/banner', ...uploadProfileImage('banner'));
 
-  // Removes an upload and falls back to the previous behaviour: the identicon
-  // for an avatar, 404 for a banner. An external reference is left alone,
-  // because the upload is not what that URL is.
+  // Removes an upload. An external reference, if the account has one, becomes
+  // the image again; otherwise the profile falls back to the identicon for an
+  // avatar and to no banner at all.
   const deleteProfileImage = (kind) => [
     requireSession,
     async (req, res) => {
@@ -288,21 +289,17 @@ export function makeUsersRouter({ sql, config, termsGate }) {
       patch.github = github;
       columns.push('github');
     }
-    // Setting or clearing an external reference supersedes an upload of the
-    // same kind, so the pointer is dropped in the same statement and the old
-    // bytes are released afterwards. Leaving both in place would leave the
-    // upload unreachable while remaining the only row pinning those bytes, so
-    // the collector could never reclaim them.
-    const releasedImages = [];
+    // A URL is recorded whether or not the account also has an upload. The
+    // upload stays the face of the profile and this is the fallback, so
+    // clearing the link later never silently discards a file the account
+    // still serves, and uploading a file never discards a link.
     if (avatarUrl !== undefined) {
       patch.avatar_url = avatarUrl;
       columns.push('avatar_url');
-      releasedImages.push(...clearProfileImagePointer(patch, columns, target, 'avatar'));
     }
     if (bannerUrl !== undefined) {
       patch.banner_url = bannerUrl;
       columns.push('banner_url');
-      releasedImages.push(...clearProfileImagePointer(patch, columns, target, 'banner'));
     }
     if (password !== undefined) {
       if (req.auth.user.role !== 'admin') {
@@ -353,13 +350,6 @@ export function makeUsersRouter({ sql, config, termsGate }) {
       return tx`SELECT * FROM users WHERE id = ${target.id}`;
     });
     if (!updated) throw notFound();
-
-    // Only once the row no longer names them, and best-effort: a failure here
-    // costs disk, not correctness, and the next collector pass reclaims
-    // anything left behind.
-    for (const digest of releasedImages) {
-      await removeProfileImageBlob(sql, config, digest, target.id).catch(() => {});
-    }
 
     res.json(userToObject(updated, config.apiRoot));
   });

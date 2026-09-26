@@ -133,16 +133,25 @@ describe('uploading a profile image', () => {
     assert.equal(ra.avatar_blob_digest, rb.avatar_blob_digest);
   });
 
-  test('clears an external reference so the upload is what gets served', async () => {
+  test('keeps an external reference, which the upload then shadows', async () => {
     const ns = await account();
     await request(app)
       .patch(`/v1/users/${ns}`)
       .set(bearer(tokens.get(ns)))
       .send({ avatarUrl: 'https://cdn.example/old.png' })
       .expect(200);
-    await put(ns, 'avatar', pngBytes(), 'image/png');
-    const [row] = await sql`SELECT avatar_url FROM users WHERE namespace = ${ns}`;
-    assert.equal(row.avatar_url, null);
+
+    const res = await put(ns, 'avatar', pngBytes(), 'image/png');
+
+    const [row] =
+      await sql`SELECT avatar_url, avatar_blob_digest FROM users WHERE namespace = ${ns}`;
+    assert.equal(row.avatar_url, 'https://cdn.example/old.png');
+    assert.ok(row.avatar_blob_digest);
+    // The upload is what a visitor is shown, not the linked file.
+    assert.equal(res.body.avatarUrl, `/v1/users/${ns}/avatar`);
+    const served = await request(app).get(`/v1/users/${ns}/avatar`);
+    assert.equal(served.status, 200);
+    assert.equal(served.headers['content-type'], 'image/png');
   });
 });
 
@@ -304,7 +313,7 @@ describe('removing a profile image', () => {
     assert.ok(!existsSync(stored));
   });
 
-  test('leaves an external reference alone', async () => {
+  test('leaves an external reference in place behind the upload', async () => {
     const ns = await account();
     await request(app)
       .patch(`/v1/users/${ns}`)
@@ -340,18 +349,39 @@ describe('swapping one image source for another', () => {
     assert.ok(!existsSync(first));
   });
 
-  test('frees the upload when PATCH installs an external URL', async () => {
+  test('keeps the upload when PATCH installs an external URL', async () => {
     const ns = await account();
     await put(ns, 'avatar', pngBytes(), 'image/png');
     const [row] = await avatarDigest(ns);
     const stored = blobPathFor(config.dataDir, row.avatar_blob_digest);
 
-    await request(app)
+    const res = await request(app)
       .patch(`/v1/users/${ns}`)
       .set(bearer(tokens.get(ns)))
       .send({ avatarUrl: 'https://cdn.example/new.png' })
       .expect(200);
-    assert.ok(!existsSync(stored));
+
+    assert.ok(existsSync(stored));
+    // The upload is still what the profile reports, so the URL only takes over
+    // once the upload is removed.
+    assert.equal(res.body.avatarUrl, `/v1/users/${ns}/avatar`);
+  });
+
+  test('falls back to the URL once the upload is removed', async () => {
+    const ns = await account();
+    await request(app)
+      .patch(`/v1/users/${ns}`)
+      .set(bearer(tokens.get(ns)))
+      .send({ avatarUrl: 'https://cdn.example/fallback.png' })
+      .expect(200);
+    await put(ns, 'avatar', pngBytes(), 'image/png');
+
+    const res = await request(app)
+      .delete(`/v1/users/${ns}/avatar`)
+      .set(bearer(tokens.get(ns)));
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.avatarUrl, 'https://cdn.example/fallback.png');
   });
 
   test('keeps bytes that another account still points at', async () => {

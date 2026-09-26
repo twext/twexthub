@@ -366,18 +366,20 @@ paths:
                   maxLength: 400
                   format: uri
                   description: >
-                    An external avatar to reference, not proxy. Setting this
-                    supersedes an uploaded avatar and releases its bytes; `null`
-                    clears both. Prefer `PUT /users/{namespace}/avatar` for new
-                    accounts.
+                    An external avatar to reference, not proxy. This is the
+                    secondary option and is kept even when the account has
+                    uploaded an avatar, in which case the upload is what
+                    `GET /users/{namespace}/avatar` serves and this is the
+                    fallback; `DELETE /users/{namespace}/avatar` falls back to
+                    it. `null` clears the link and leaves any upload alone.
                 bannerUrl:
                   type: ['string', 'null']
                   maxLength: 400
                   format: uri
                   description: >
                     An external banner to reference, not proxy, with the same
-                    precedence as `avatarUrl`. Prefer `PUT
-                    /users/{namespace}/banner` for new accounts.
+                    relationship to an uploaded banner as `avatarUrl` has to an
+                    uploaded avatar.
       responses:
         '200':
           description: Updated
@@ -443,9 +445,9 @@ paths:
         type past it. SVG is not accepted: it is a document that can run script
         in the origin that serves it.
 
-        Uploading clears any external avatar URL, and the avatarUrl reported in
-        the response becomes this canonical path so the URL stays stable across
-        later replacements.
+        An external avatar URL, if the account has one, is kept as the fallback,
+        and the avatarUrl in the response becomes this canonical path so the URL
+        stays stable across later replacements.
       requestBody:
         required: true
         content:

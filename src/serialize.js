@@ -9,14 +9,15 @@ function profileImagePath(apiRoot, namespace, kind) {
   return `/${normalizeApiRoot(apiRoot)}/users/${namespace}/${kind}`;
 }
 
-// An explicit external reference wins over an upload: the account holder
-// setting a URL is a deliberate override, and the upload routes clear the other
-// side so the two cannot both be live.
+// An account can hold an upload and a URL at once, and the upload is what the
+// instance serves. A URL is the fallback, kept so that removing an upload does
+// not leave the account with no image, and it is also the pointer a consumer can
+// read to find the original file the account linked to.
 function imageUrl(row, kind, apiRoot) {
-  const external = kind === 'avatar' ? row.avatar_url : row.banner_url;
-  if (external) return external;
   const digest = kind === 'avatar' ? row.avatar_blob_digest : row.banner_blob_digest;
-  return digest ? profileImagePath(apiRoot, row.namespace, kind) : null;
+  if (digest) return profileImagePath(apiRoot, row.namespace, kind);
+  const external = kind === 'avatar' ? row.avatar_url : row.banner_url;
+  return external ?? null;
 }
 
 export function userToObject(row, apiRoot) {

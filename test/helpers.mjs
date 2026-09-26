@@ -51,7 +51,7 @@ export async function boot(overrides = {}) {
     return cached;
   }
   const config = makeConfig(overrides);
-  const { app, sql } = await bootstrap(config);
+  const { app, sql } = await bootstrap(config, { backgroundJobs: false });
   cached = { app, sql, config };
   return cached;
 }

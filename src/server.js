@@ -7,13 +7,22 @@ import { dailyAggregationJob } from './metrics.js';
 import { makeMaintenanceJob } from './maintenance.js';
 import { makeWebhooks } from './webhooks.js';
 
-export async function bootstrap(config = loadConfig()) {
+// `backgroundJobs` is off for the test suite. The jobs all run a pass
+// immediately, and their passes collide with the suite's own setup: the daily
+// aggregation locks extension_daily_downloads before reading download_events,
+// which is the reverse of the order a TRUNCATE takes the same two tables in, so
+// resetDb and a background pass deadlock. Tests that want a job build it
+// themselves and drive it directly.
+export async function bootstrap(config = loadConfig(), { backgroundJobs = true } = {}) {
   ensureDataDirs(config.dataDir);
   const sql = createDb(config);
   try {
     await runMigrations(sql);
     await reconcileOnBoot(sql, config);
     const { app, rateLimiter, telemetry } = createApp({ config, sql });
+    if (!backgroundJobs) {
+      return { app, sql, config, rateLimiter, telemetry };
+    }
     const metricsJob = dailyAggregationJob(sql).start();
     const webhookWorker = makeWebhooks({ sql }).worker().start();
     const maintenanceJob = makeMaintenanceJob({ sql, config }).start();

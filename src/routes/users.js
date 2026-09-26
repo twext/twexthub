@@ -88,10 +88,30 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     // it uploaded is the one the instance is responsible for serving.
     const stored = await resolveProfileImage(config, user, kind);
     if (stored) {
-      // The bytes are content-addressed, so the same image always has the same
-      // URL and can be cached hard. A replacement upload lands under a new
-      // digest, which is what busts the cache.
-      res.set('Cache-Control', 'public, max-age=31536000, immutable');
+      // A URL carrying the digest names the exact bytes, so it can be cached
+      // hard: a replacement upload is published under a new URL rather than
+      // served behind the old one. The path without a version is the same
+      // before and after a re-upload, so it revalidates instead, and a stale
+      // version is sent to the current one rather than answered with bytes the
+      // URL did not name.
+      const asked = typeof req.query.v === 'string' ? req.query.v : null;
+      if (asked !== null && asked !== stored.digest.slice(0, 16)) {
+        res.redirect(
+          302,
+          `${req.baseUrl}/${user.namespace}/${kind}?v=${stored.digest.slice(0, 16)}`,
+        );
+        return;
+      }
+      if (asked === null) {
+        res.set('Cache-Control', 'public, max-age=0, must-revalidate');
+        res.set('ETag', `"${stored.digest}"`);
+        if (req.headers['if-none-match'] === `"${stored.digest}"`) {
+          res.status(304).end();
+          return;
+        }
+      } else {
+        res.set('Cache-Control', 'public, max-age=31536000, immutable');
+      }
       res.set('Content-Type', stored.contentType);
       if (stored.expectedSize !== null && stored.expectedSize !== stored.size) {
         // The row and the file disagree. Serving a truncated image is worse than

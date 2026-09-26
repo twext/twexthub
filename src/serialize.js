@@ -10,9 +10,14 @@ import { normalizeApiRoot } from './util.js';
 // see, so a relative path here is resolved against the web origin and points at
 // nothing. A hardcoded "/v1" would also break a deployment that mounts the API
 // elsewhere.
-function profileImagePath(config, namespace, kind) {
+// The published URL carries the digest so that the URL names the exact bytes.
+// Without it the path is the same before and after a re-upload, which makes a
+// one-year immutable cache a lie: a reader would keep the old picture. A short
+// prefix is enough to separate two different images and keeps the URL short.
+function profileImagePath(config, namespace, kind, digest) {
   const root = normalizeApiRoot(config.apiRoot);
-  return `${config.publicBaseUrl.replace(/\/$/, '')}${root ? `/${root}` : ''}/users/${namespace}/${kind}`;
+  const base = `${config.publicBaseUrl.replace(/\/$/, '')}${root ? `/${root}` : ''}/users/${namespace}/${kind}`;
+  return digest ? `${base}?v=${digest.slice(0, 16)}` : base;
 }
 
 // An account can hold an upload and a URL at once, and the upload is what the
@@ -21,7 +26,7 @@ function profileImagePath(config, namespace, kind) {
 // read to find the original file the account linked to.
 function imageUrl(row, kind, config) {
   const digest = kind === 'avatar' ? row.avatar_blob_digest : row.banner_blob_digest;
-  if (digest) return profileImagePath(config, row.namespace, kind);
+  if (digest) return profileImagePath(config, row.namespace, kind, digest);
   const external = kind === 'avatar' ? row.avatar_url : row.banner_url;
   return external ?? null;
 }

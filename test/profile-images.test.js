@@ -82,6 +82,20 @@ const put = (ns, kind, body, type) =>
 
 const avatarDigest = (ns) => sql`SELECT avatar_blob_digest FROM users WHERE namespace = ${ns}`;
 
+// The published URL names the exact bytes, so it carries a short version token
+// taken from the content digest. Reading it back from the row keeps a test from
+// having to re-derive the hash.
+// supertest needs the path the API is mounted on, not the absolute URL a reader
+// would follow, so the published URL is trimmed back to that.
+const asPath = (url) => url.replace(config.publicBaseUrl, '');
+
+const versioned = async (ns, kind) => {
+  const column = kind === 'avatar' ? 'avatar_blob_digest' : 'banner_blob_digest';
+  const [row] = await sql`SELECT ${sql(column)} AS digest FROM users WHERE namespace = ${ns}`;
+  assert.ok(row.digest, `expected ${ns} to have a ${kind} upload`);
+  return `${config.publicBaseUrl}/v1/users/${ns}/${kind}?v=${row.digest.slice(0, 16)}`;
+};
+
 describe('sniffImageType', () => {
   test('recognises a format from its signature bytes', () => {
     assert.equal(sniffImageType(pngBytes()), 'image/png');
@@ -106,7 +120,7 @@ describe('uploading a profile image', () => {
     const ns = await account();
     const res = await put(ns, 'avatar', pngBytes(), 'image/png');
     assert.equal(res.status, 200);
-    assert.equal(res.body.avatarUrl, `${config.publicBaseUrl}/v1/users/${ns}/avatar`);
+    assert.equal(res.body.avatarUrl, await versioned(ns, 'avatar'));
 
     const [row] = await sql`SELECT * FROM users WHERE namespace = ${ns}`;
     assert.match(row.avatar_blob_digest, /^[0-9a-f]{64}$/);
@@ -119,7 +133,7 @@ describe('uploading a profile image', () => {
     const ns = await account();
     const res = await put(ns, 'banner', pngBytes(), 'image/png');
     assert.equal(res.status, 200);
-    assert.equal(res.body.bannerUrl, `${config.publicBaseUrl}/v1/users/${ns}/banner`);
+    assert.equal(res.body.bannerUrl, await versioned(ns, 'banner'));
   });
 
   test('deduplicates identical uploads across accounts', async () => {
@@ -148,7 +162,7 @@ describe('uploading a profile image', () => {
     assert.equal(row.avatar_url, 'https://cdn.example/old.png');
     assert.ok(row.avatar_blob_digest);
     // The upload is what a visitor is shown, not the linked file.
-    assert.equal(res.body.avatarUrl, `${config.publicBaseUrl}/v1/users/${ns}/avatar`);
+    assert.equal(res.body.avatarUrl, await versioned(ns, 'avatar'));
     const served = await request(app).get(`/v1/users/${ns}/avatar`);
     assert.equal(served.status, 200);
     assert.equal(served.headers['content-type'], 'image/png');
@@ -240,11 +254,51 @@ describe('serving profile images', () => {
     assert.equal(Buffer.compare(res.body, bytes), 0);
   });
 
-  test('caches an upload immutably, because the URL is content addressed', async () => {
+  // The two paths have to be cached differently, because only one of them names
+  // the bytes it serves. Caching the bare path hard is how a re-upload keeps
+  // showing the old picture for a year.
+  test('caches the versioned URL immutably, because it names the bytes', async () => {
+    const ns = await account();
+    const upload = await put(ns, 'avatar', pngBytes(), 'image/png');
+    const res = await request(app).get(asPath(upload.body.avatarUrl));
+    assert.equal(res.status, 200);
+    assert.equal(res.headers['cache-control'], 'public, max-age=31536000, immutable');
+  });
+
+  test('makes the bare path revalidate, and answers a match with 304', async () => {
     const ns = await account();
     await put(ns, 'avatar', pngBytes(), 'image/png');
     const res = await request(app).get(`/v1/users/${ns}/avatar`);
-    assert.equal(res.headers['cache-control'], 'public, max-age=31536000, immutable');
+    assert.equal(res.headers['cache-control'], 'public, max-age=0, must-revalidate');
+    const etag = res.headers.etag;
+    assert.match(etag, /^"[0-9a-f]{64}"$/);
+
+    const revalidated = await request(app).get(`/v1/users/${ns}/avatar`).set('If-None-Match', etag);
+    assert.equal(revalidated.status, 304);
+  });
+
+  test('gives a reader a new version after a replacement', async () => {
+    const ns = await account();
+    const first = await put(ns, 'avatar', pngBytes(1), 'image/png');
+    const replacement = await put(ns, 'avatar', pngBytes(2), 'image/png');
+    assert.notEqual(first.body.avatarUrl, replacement.body.avatarUrl);
+  });
+
+  test('sends a reader holding a stale version to the current one', async () => {
+    const ns = await account();
+    const upload = await put(ns, 'avatar', pngBytes(1), 'image/png');
+    const stale = new URL(upload.body.avatarUrl).searchParams.get('v');
+    await put(ns, 'avatar', pngBytes(2), 'image/png');
+
+    const res = await request(app).get(`/v1/users/${ns}/avatar?v=${stale}`);
+    assert.equal(res.status, 302);
+    assert.notEqual(
+      new URL(res.headers.location, config.publicBaseUrl).searchParams.get('v'),
+      stale,
+    );
+
+    const followed = await request(app).get(res.headers.location.replace(config.publicBaseUrl, ''));
+    assert.equal(followed.status, 200);
   });
 
   test('serves a replacement under the same URL', async () => {
@@ -364,7 +418,7 @@ describe('swapping one image source for another', () => {
     assert.ok(existsSync(stored));
     // The upload is still what the profile reports, so the URL only takes over
     // once the upload is removed.
-    assert.equal(res.body.avatarUrl, `${config.publicBaseUrl}/v1/users/${ns}/avatar`);
+    assert.equal(res.body.avatarUrl, await versioned(ns, 'avatar'));
   });
 
   test('falls back to the URL once the upload is removed', async () => {
@@ -468,7 +522,7 @@ describe('visibility', () => {
     await put(ns, 'avatar', pngBytes(), 'image/png');
     const res = await request(app).get(`/v1/users/${ns}`);
     assert.equal(res.status, 200);
-    assert.equal(res.body.avatarUrl, `${config.publicBaseUrl}/v1/users/${ns}/avatar`);
+    assert.equal(res.body.avatarUrl, await versioned(ns, 'avatar'));
   });
 
   test('includes it in the auth payload, so the UI needs no second fetch', async () => {
@@ -478,7 +532,7 @@ describe('visibility', () => {
       .get('/v1/auth/me')
       .set(bearer(tokens.get(ns)));
     assert.equal(res.status, 200);
-    assert.equal(res.body.avatarUrl, `${config.publicBaseUrl}/v1/users/${ns}/avatar`);
+    assert.equal(res.body.avatarUrl, await versioned(ns, 'avatar'));
   });
 
   test('carries the other profile fields the auth payload used to drop', async () => {

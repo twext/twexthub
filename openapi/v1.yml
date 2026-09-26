@@ -404,6 +404,7 @@ paths:
   /users/{namespace}/avatar:
     parameters:
       - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ImageVersion'
     get:
       summary: Get an account's avatar
       operationId: getUserAvatar
@@ -414,6 +415,14 @@ paths:
         redirects to the account's external avatar URL when that is set;
         otherwise serves a deterministic SVG identicon derived from the
         namespace (no email, no tracking dependency).
+
+        The `avatarUrl` an account record publishes carries the `v` parameter
+        taken from the content digest, so the URL names the exact bytes and
+        can be cached hard. Re-uploading publishes a new URL rather than
+        changing the bytes behind the old one. Requested without `v`, the
+        same path revalidates on every request, which keeps a stored URL
+        working and still correct. A `v` that no longer names the current
+        image is redirected to the URL that does.
       responses:
         '200':
           description: The uploaded image, or the identicon SVG (no avatar configured)
@@ -1647,6 +1656,17 @@ components:
       in: path
       required: true
       schema: { $ref: '#/components/schemas/Namespace' }
+    ImageVersion:
+      name: v
+      in: query
+      required: false
+      description: >
+        Short prefix of the content digest of the image being requested, as
+        published in the account's `avatarUrl` or `bannerUrl`. Supplying the
+        current version makes the response cacheable for a year; supplying a
+        stale one is redirected to the current URL; omitting it makes the
+        response revalidate on every request.
+      schema: { type: string, pattern: '^[0-9a-f]{16}$' }
     ExtensionIdPath:
       name: id
       in: path

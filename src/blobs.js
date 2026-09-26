@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { copyFile, mkdir, rename, rm, stat, unlink, utimes } from 'node:fs/promises';
+import { copyFile, mkdir, rename, rm, stat, unlink, utimes, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 export const BLOB_GC_LOCK_KEY = 'blob-gc';
@@ -70,6 +70,21 @@ export async function storeBlob(dataDir, tmpPath, buffer) {
     await rm(staged, { force: true });
   }
   return { digest, abs, size: buffer.length, sha512: sha512Base64(buffer) };
+}
+
+// For callers that already hold the bytes and have no tmp file of their own.
+// storeBlob stages through a path so a large publish upload can be streamed to
+// disk once and moved into place; a body that is already in memory just needs
+// somewhere to land before the same rename.
+export async function storeBlobBuffer(dataDir, buffer) {
+  const tmpPath = path.join(dataDir, 'tmp', `blob-${randomUUID()}.tmp`);
+  await mkdir(path.dirname(tmpPath), { recursive: true });
+  try {
+    await writeFile(tmpPath, buffer);
+    return await storeBlob(dataDir, tmpPath, buffer);
+  } finally {
+    await rm(tmpPath, { force: true });
+  }
 }
 
 // Deletes a blob file when no other version row references its digest. Runs

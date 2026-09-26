@@ -21,6 +21,7 @@ limits:
   maxBlobBytes: 2097152
   maxAccountBlobBytes: 67108864
   maxSourceBytes: 1048576
+  maxProfileImageBytes: 2097152
 compiler:
   timeoutMs: 30000
   memoryMb: 192

@@ -53,7 +53,8 @@ function shouldTouchLastUsed(lastUsedAt) {
 async function lookupToken(sql, hash) {
   const [session] = await sql`
     SELECT s.id AS token_id, s.expires_at, s.last_used_at,
-      u.id, u.namespace, u.display_name, u.role, u.has_published, u.terms_accepted_version, u.created_at
+      u.id, u.namespace, u.display_name, u.role, u.has_published, u.terms_accepted_version, u.created_at,
+      u.bio, u.website, u.github, u.avatar_url, u.banner_url, u.avatar_blob_digest, u.banner_blob_digest
     FROM sessions s
     JOIN users u ON u.id = s.user_id
     WHERE s.token_hash = ${hash}
@@ -71,7 +72,8 @@ async function lookupToken(sql, hash) {
 
   const [token] = await sql`
     SELECT t.id AS token_id, t.expires_at, t.last_used_at, t.scopes,
-      u.id, u.namespace, u.display_name, u.role, u.has_published, u.terms_accepted_version, u.created_at
+      u.id, u.namespace, u.display_name, u.role, u.has_published, u.terms_accepted_version, u.created_at,
+      u.bio, u.website, u.github, u.avatar_url, u.banner_url, u.avatar_blob_digest, u.banner_blob_digest
     FROM automation_tokens t
     JOIN users u ON u.id = t.user_id
     WHERE t.token_hash = ${hash}

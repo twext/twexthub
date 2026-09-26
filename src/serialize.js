@@ -1,6 +1,25 @@
 import { normalizeApiRoot } from './util.js';
 
-export function userToObject(row) {
+// An uploaded image is reported as this account's own canonical path so every
+// consumer -- the web UI, an extension fetching a profile, anything that only
+// reads the serialized user -- resolves it without knowing that uploads exist.
+// The path is built from the configured api root rather than a hardcoded "/v1"
+// so a deployment that mounts the API elsewhere still emits a working URL.
+function profileImagePath(apiRoot, namespace, kind) {
+  return `/${normalizeApiRoot(apiRoot)}/users/${namespace}/${kind}`;
+}
+
+// An explicit external reference wins over an upload: the account holder
+// setting a URL is a deliberate override, and the upload routes clear the other
+// side so the two cannot both be live.
+function imageUrl(row, kind, apiRoot) {
+  const external = kind === 'avatar' ? row.avatar_url : row.banner_url;
+  if (external) return external;
+  const digest = kind === 'avatar' ? row.avatar_blob_digest : row.banner_blob_digest;
+  return digest ? profileImagePath(apiRoot, row.namespace, kind) : null;
+}
+
+export function userToObject(row, apiRoot) {
   return {
     namespace: row.namespace,
     displayName: row.display_name,
@@ -9,13 +28,12 @@ export function userToObject(row) {
     bio: row.bio ?? '',
     website: row.website ?? null,
     github: row.github ?? null,
-    avatarUrl: row.avatar_url ?? null,
-    bannerUrl: row.banner_url ?? null,
+    avatarUrl: imageUrl(row, 'avatar', apiRoot),
+    bannerUrl: imageUrl(row, 'banner', apiRoot),
     createdAt: row.created_at.toISOString(),
     termsAcceptedVersion: row.terms_accepted_version ?? null,
   };
 }
-
 export function sessionToObject(row) {
   return {
     id: String(row.id),

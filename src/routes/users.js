@@ -1,13 +1,21 @@
 import { createHash } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import path from 'node:path';
-import { Router } from 'express';
+import express, { Router } from 'express';
 import { hashPassword, verifyPassword } from '../password.js';
 import { requireSession } from '../auth.js';
 import { removeBlobIfUnused } from '../blobs.js';
+import {
+  clearProfileImagePointer,
+  PROFILE_IMAGES,
+  profileImagePointer,
+  removeProfileImageBlob,
+  resolveProfileImage,
+  storeProfileImage,
+} from '../profile-images.js';
 import { removeSourceIfUnused } from '../sources.js';
 import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
-import { fieldErrors, forbidden, notFound } from '../errors.js';
+import { fieldErrors, forbidden, HttpError, notFound, payloadTooLarge } from '../errors.js';
 import { isValidNamespace } from '../util.js';
 import { userToObject } from '../serialize.js';
 import { notifyUser, roleChangedMessage, tokensRevokedMessage } from '../notify.js';
@@ -33,8 +41,12 @@ export function makeUsersRouter({ sql, config, termsGate }) {
   function serializePublicUser(row, req) {
     const isOwner = req.auth?.user.namespace === row.namespace;
     const isAdmin = req.auth?.user.role === 'admin';
-    if (isOwner || isAdmin) return userToObject(row);
-    const { role: _role, termsAcceptedVersion: _terms, ...rest } = userToObject(row);
+    if (isOwner || isAdmin) return userToObject(row, config.apiRoot);
+    const {
+      role: _role,
+      termsAcceptedVersion: _terms,
+      ...rest
+    } = userToObject(row, config.apiRoot);
     return rest;
   }
 
@@ -67,20 +79,113 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     res.json(serializePublicUser(user, req));
   });
 
-  // Serves the account's external avatar when set, otherwise a deterministic
-  // 8x8 identicon derived from the namespace. Referenced, not proxied, for
-  // external URLs per the profile design; this endpoint only redirects.
-  router.get('/:namespace/avatar', async (req, res) => {
+  // One endpoint per image kind serves all three states in priority order: an
+  // uploaded image is streamed from the blob store, an external reference is
+  // redirected, and an avatar with neither falls back to the namespace
+  // identicon. Serving the upload here rather than publishing a blob URL keeps
+  // the URL stable across re-uploads, so an extension that cached it does not
+  // break when the picture changes.
+  const serveProfileImage = (kind, fallback) => async (req, res) => {
     if (!isValidNamespace(req.params.namespace)) throw notFound();
     const [user] = await sql`SELECT * FROM users WHERE namespace = ${req.params.namespace}`;
     if (!user) throw notFound();
-    if (user.avatar_url) {
-      res.redirect(user.avatar_url);
+    const external = kind === 'avatar' ? user.avatar_url : user.banner_url;
+    const stored = external ? null : await resolveProfileImage(config, user, kind);
+    if (stored) {
+      // The bytes are content-addressed, so the same image always has the same
+      // URL and can be cached hard. A replacement upload lands under a new
+      // digest, which is what busts the cache.
+      res.set('Cache-Control', 'public, max-age=31536000, immutable');
+      res.set('Content-Type', stored.contentType);
+      if (stored.expectedSize !== null && stored.expectedSize !== stored.size) {
+        // The row and the file disagree. Serving a truncated image is worse than
+        // reporting the damage, so fail loudly instead of caching it.
+        throw new HttpError(500, {
+          title: 'Internal Server Error',
+          detail: `Stored ${kind} image does not match its recorded size.`,
+        });
+      }
+      res.set('Content-Length', String(stored.size));
+      res.sendFile(stored.abs);
       return;
     }
+    if (external) {
+      res.redirect(external);
+      return;
+    }
+    if (!fallback) throw notFound('No banner has been set.');
     res.set('Cache-Control', 'public, max-age=3600');
     res.type('image/svg+xml').send(identiconSvg(user.namespace));
-  });
+  };
+
+  router.get('/:namespace/avatar', serveProfileImage('avatar', true));
+  router.get('/:namespace/banner', serveProfileImage('banner', false));
+
+  // Raw bodies rather than multipart: the account uploads one file, the file is
+  // the entire payload, and parsing multipart here would mean accepting a
+  // second content type that carries no extra meaning for this endpoint.
+  const uploadProfileImage = (kind) => [
+    requireSession,
+    express.raw({
+      type: ['image/*', 'application/octet-stream'],
+      limit: config.limits?.maxProfileImageBytes ?? 2 * 1024 * 1024,
+    }),
+    async (req, res) => {
+      const target = await loadUserOr404(sql, req.params.namespace);
+      if (req.auth.user.namespace !== target.namespace) {
+        throw forbidden('You can only change your own profile images.');
+      }
+      const declared = req.get('content-type');
+      try {
+        const stored = await storeProfileImage(sql, config, target, kind, req.body, declared);
+        // The replaced image is only unlinked after the new pointer is
+        // committed, and only when nothing else references those bytes.
+        if (stored.previous && stored.previous !== stored.digest) {
+          await removeProfileImageBlob(sql, config, stored.previous, target.id);
+        }
+        const [updated] = await sql`SELECT * FROM users WHERE id = ${target.id}`;
+        res.json(userToObject(updated, config.apiRoot));
+      } catch (error) {
+        if (error?.type === 'entity.too.large') {
+          throw payloadTooLarge(
+            `Image is larger than the ${Math.floor((config.limits?.maxProfileImageBytes ?? 2 * 1024 * 1024) / 1024)} KiB limit.`,
+          );
+        }
+        throw error;
+      }
+    },
+  ];
+
+  router.put('/:namespace/avatar', ...uploadProfileImage('avatar'));
+  router.put('/:namespace/banner', ...uploadProfileImage('banner'));
+
+  // Removes an upload and falls back to the previous behaviour: the identicon
+  // for an avatar, 404 for a banner. An external reference is left alone,
+  // because the upload is not what that URL is.
+  const deleteProfileImage = (kind) => [
+    requireSession,
+    async (req, res) => {
+      const target = await loadUserOr404(sql, req.params.namespace);
+      if (req.auth.user.namespace !== target.namespace) {
+        throw forbidden('You can only change your own profile images.');
+      }
+      const { digest } = profileImagePointer(target, kind);
+      const columns = PROFILE_IMAGES[kind];
+      const [updated] = await sql`
+        UPDATE users
+        SET ${sql(columns.digestColumn)} = NULL,
+            ${sql(columns.typeColumn)} = NULL,
+            ${sql(columns.bytesColumn)} = NULL
+        WHERE id = ${target.id}
+        RETURNING *
+      `;
+      if (digest) await removeProfileImageBlob(sql, config, digest, target.id);
+      res.json(userToObject(updated, config.apiRoot));
+    },
+  ];
+
+  router.delete('/:namespace/avatar', ...deleteProfileImage('avatar'));
+  router.delete('/:namespace/banner', ...deleteProfileImage('banner'));
 
   // A pure password change stays reachable when the terms have moved on, so an
   // account can still be secured. The old check read "any profile field is
@@ -183,13 +288,21 @@ export function makeUsersRouter({ sql, config, termsGate }) {
       patch.github = github;
       columns.push('github');
     }
+    // Setting or clearing an external reference supersedes an upload of the
+    // same kind, so the pointer is dropped in the same statement and the old
+    // bytes are released afterwards. Leaving both in place would leave the
+    // upload unreachable while remaining the only row pinning those bytes, so
+    // the collector could never reclaim them.
+    const releasedImages = [];
     if (avatarUrl !== undefined) {
       patch.avatar_url = avatarUrl;
       columns.push('avatar_url');
+      releasedImages.push(...clearProfileImagePointer(patch, columns, target, 'avatar'));
     }
     if (bannerUrl !== undefined) {
       patch.banner_url = bannerUrl;
       columns.push('banner_url');
+      releasedImages.push(...clearProfileImagePointer(patch, columns, target, 'banner'));
     }
     if (password !== undefined) {
       if (req.auth.user.role !== 'admin') {
@@ -241,7 +354,14 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     });
     if (!updated) throw notFound();
 
-    res.json(userToObject(updated));
+    // Only once the row no longer names them, and best-effort: a failure here
+    // costs disk, not correctness, and the next collector pass reclaims
+    // anything left behind.
+    for (const digest of releasedImages) {
+      await removeProfileImageBlob(sql, config, digest, target.id).catch(() => {});
+    }
+
+    res.json(userToObject(updated, config.apiRoot));
   });
 
   router.delete('/:namespace', requireSession, async (req, res) => {
@@ -258,6 +378,9 @@ export function makeUsersRouter({ sql, config, termsGate }) {
       FROM versions
       WHERE owner_id = ${target.id}
     `;
+    // Uploaded images are named by the users row itself, so they have to be
+    // read before the DELETE takes it away.
+    const profileDigests = [target.avatar_blob_digest, target.banner_blob_digest].filter(Boolean);
     await sql`DELETE FROM users WHERE id = ${target.id}`;
 
     // Only after the commit: a failed DELETE leaves the rows, and the keeper
@@ -281,6 +404,8 @@ export function makeUsersRouter({ sql, config, termsGate }) {
           .map((row) => (row.blob_digest ? removeBlobIfUnused(sql, config, row.blob_digest) : null))
           .filter(Boolean),
         ...legacyPaths.map((rel) => rm(path.join(config.dataDir, rel), { force: true })),
+        // The row is already gone, so no user can still point at these digests.
+        ...profileDigests.map((digest) => removeProfileImageBlob(sql, config, digest)),
       ]);
       await Promise.all(
         [...new Set(owned.map((row) => row.source_digest).filter(Boolean))].map((digest) =>

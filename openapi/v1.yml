@@ -333,7 +333,9 @@ paths:
       tags: [Userspace]
       description: >
         Self or admin. Only an admin may set `role`. Changing `password`
-        revokes all of that account's existing tokens. Profile fields
+        revokes all of that account's existing tokens, and a non-admin caller
+        must also send their `currentPassword`, which is rejected with a `403`
+        when it does not match. Profile fields
         (`bio`, `website`, `github`, `avatarUrl`, `bannerUrl`) are
         self-service and do not require re-accepting the Terms.
       requestBody:
@@ -346,6 +348,13 @@ paths:
               properties:
                 displayName: { type: string, maxLength: 80 }
                 password: { type: string, minLength: 8, writeOnly: true }
+                currentPassword:
+                  type: string
+                  minLength: 1
+                  writeOnly: true
+                  description: >
+                    Required when a non-admin caller changes `password`.
+                    Ignored otherwise.
                 role: { $ref: '#/components/schemas/Role' }
                 bio: { type: ['string', 'null'], maxLength: 280 }
                 website: { type: ['string', 'null'], maxLength: 400, format: uri }
@@ -353,19 +362,22 @@ paths:
                   type: ['string', 'null']
                   description: GitHub username, shown as a profile link.
                 avatarUrl:
-                  {
-                    type: ['string', 'null'],
-                    maxLength: 400,
-                    format: uri,
-                    description: 'Referenced, not proxied.',
-                  }
+                  type: ['string', 'null']
+                  maxLength: 400
+                  format: uri
+                  description: >
+                    An external avatar to reference, not proxy. Setting this
+                    supersedes an uploaded avatar and releases its bytes; `null`
+                    clears both. Prefer `PUT /users/{namespace}/avatar` for new
+                    accounts.
                 bannerUrl:
-                  {
-                    type: ['string', 'null'],
-                    maxLength: 400,
-                    format: uri,
-                    description: 'Referenced, not proxied.',
-                  }
+                  type: ['string', 'null']
+                  maxLength: 400
+                  format: uri
+                  description: >
+                    An external banner to reference, not proxy, with the same
+                    precedence as `avatarUrl`. Prefer `PUT
+                    /users/{namespace}/banner` for new accounts.
       responses:
         '200':
           description: Updated
@@ -396,18 +408,158 @@ paths:
       tags: [Open]
       security: []
       description: >
-        Redirects to the account's external avatar URL when one is set;
+        Serves the account's uploaded avatar when one exists. Otherwise
+        redirects to the account's external avatar URL when that is set;
         otherwise serves a deterministic SVG identicon derived from the
         namespace (no email, no tracking dependency).
       responses:
         '200':
-          description: Identicon SVG (no avatar configured)
+          description: The uploaded image, or the identicon SVG (no avatar configured)
           content:
+            image/png:
+              schema: { type: string, format: binary }
+            image/jpeg:
+              schema: { type: string, format: binary }
+            image/gif:
+              schema: { type: string, format: binary }
+            image/webp:
+              schema: { type: string, format: binary }
+            image/avif:
+              schema: { type: string, format: binary }
             image/svg+xml:
               schema: { type: string }
         '302':
           description: Redirect to the configured external avatar URL
         '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      summary: Upload an account's avatar
+      operationId: uploadUserAvatar
+      tags: [Account]
+      description: >
+        Replaces the avatar with the uploaded image. The request body is the
+        image itself, not a multipart form. The server matches the bytes
+        against the signature of each supported format and rejects anything
+        that is not one, so a declared Content-Type cannot smuggle a different
+        type past it. SVG is not accepted: it is a document that can run script
+        in the origin that serves it.
+
+        Uploading clears any external avatar URL, and the avatarUrl reported in
+        the response becomes this canonical path so the URL stays stable across
+        later replacements.
+      requestBody:
+        required: true
+        content:
+          image/png:
+            schema: { type: string, format: binary }
+          image/jpeg:
+            schema: { type: string, format: binary }
+          image/gif:
+            schema: { type: string, format: binary }
+          image/webp:
+            schema: { type: string, format: binary }
+          image/avif:
+            schema: { type: string, format: binary }
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '200':
+          description: The updated account
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+    delete:
+      summary: Remove an uploaded avatar
+      operationId: deleteUserAvatar
+      tags: [Account]
+      description: >
+        Drops the uploaded avatar and its bytes. The account falls back to its
+        external avatar URL, or to the identicon when it has none.
+      responses:
+        '200':
+          description: The updated account
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /users/{namespace}/banner:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+    get:
+      summary: Get an account's banner
+      operationId: getUserBanner
+      tags: [Open]
+      security: []
+      description: >
+        Serves the account's uploaded banner, or redirects to its external
+        banner URL. Unlike an avatar there is no generated fallback, so an
+        account with neither is a 404.
+      responses:
+        '200':
+          description: The banner image
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+            image/jpeg:
+              schema: { type: string, format: binary }
+            image/gif:
+              schema: { type: string, format: binary }
+            image/webp:
+              schema: { type: string, format: binary }
+            image/avif:
+              schema: { type: string, format: binary }
+        '302':
+          description: Redirect to the configured external banner URL
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      summary: Upload an account's banner
+      operationId: uploadUserBanner
+      tags: [Account]
+      description: >
+        Replaces the banner with the uploaded image, under the same format and
+        body rules as the avatar upload.
+      requestBody:
+        required: true
+        content:
+          image/png:
+            schema: { type: string, format: binary }
+          image/jpeg:
+            schema: { type: string, format: binary }
+          image/gif:
+            schema: { type: string, format: binary }
+          image/webp:
+            schema: { type: string, format: binary }
+          image/avif:
+            schema: { type: string, format: binary }
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '200':
+          description: The updated account
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+    delete:
+      summary: Remove an uploaded banner
+      operationId: deleteUserBanner
+      tags: [Account]
+      responses:
+        '200':
+          description: The updated account
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   # ---------------------------------------------------------- Notifications
   /notifications:
@@ -1031,6 +1183,8 @@ paths:
         Owner or admin. The `secret` is returned exactly once; deliveries are
         signed with `X-TwextHub-Signature` (HMAC-SHA256 over the raw body).
         URLs resolving to private or loopback addresses are rejected.
+        Each delivery body carries a pre-rendered `message`, repeated under
+        `content` and `text` so a Discord or Slack endpoint accepts it as sent.
       requestBody:
         required: true
         content:
@@ -1539,8 +1693,20 @@ components:
         bio: { type: string }
         website: { type: ['string', 'null'], format: uri }
         github: { type: ['string', 'null'] }
-        avatarUrl: { type: ['string', 'null'], format: uri }
-        bannerUrl: { type: ['string', 'null'], format: uri }
+        avatarUrl:
+          type: ['string', 'null']
+          format: uri
+          description: >
+            The external reference, or this account's own
+            `/users/{namespace}/avatar` path when the image was uploaded rather
+            than referenced. Either way this resolves to the image to display,
+            so a consumer does not need to know which it is.
+        bannerUrl:
+          type: ['string', 'null']
+          format: uri
+          description: >
+            The external reference, or this account's own
+            `/users/{namespace}/banner` path after an upload.
         createdAt: { type: string, format: date-time, readOnly: true }
         termsAcceptedVersion:
           type: ['integer', 'null']
@@ -1770,6 +1936,14 @@ components:
       content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
     Conflict:
       description: Resource already exists
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    PayloadTooLarge:
+      description: The request body exceeded the configured limit for this field
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    UnsupportedMediaType:
+      description: >
+        The uploaded bytes are not a supported image, or the declared
+        Content-Type disagrees with what the bytes actually are
       content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
     UnprocessableEntity:
       description: Semantically invalid input (e.g. non-SemVer version, id mismatch)

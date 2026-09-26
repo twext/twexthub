@@ -41,6 +41,7 @@ export const DEFAULTS = {
     maxBlobBytes: 2 * 1024 * 1024,
     maxAccountBlobBytes: 64 * 1024 * 1024,
     maxSourceBytes: 1024 * 1024,
+    maxProfileImageBytes: 2 * 1024 * 1024,
   },
   compiler: {
     command: null,
@@ -93,6 +94,7 @@ const ENV_OVERRIDES = [
   ['limits.maxBlobBytes', 'TWEXTHUB_MAX_BLOB_BYTES'],
   ['limits.maxAccountBlobBytes', 'TWEXTHUB_MAX_ACCOUNT_BLOB_BYTES'],
   ['limits.maxSourceBytes', 'TWEXTHUB_MAX_SOURCE_BYTES'],
+  ['limits.maxProfileImageBytes', 'TWEXTHUB_MAX_PROFILE_IMAGE_BYTES'],
   ['compiler.command', 'TWEXTHUB_COMPILER'],
   ['compiler.timeoutMs', 'TWEXTHUB_COMPILER_TIMEOUT_MS'],
   ['compiler.memoryMb', 'TWEXTHUB_COMPILER_MEMORY_MB'],

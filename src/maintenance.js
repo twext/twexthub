@@ -2,10 +2,10 @@ import { readdir, readFile, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { BLOB_GC_LOCK_KEY, blobPathFor, sha256Hex } from './blobs.js';
 
-// Blob garbage collection: a file under blobs/ whose digest no version row
-// references is deleted. Sources are handled by removeSourceIfUnused at the
-// call sites that already know the digest; this sweep only covers blobs so a
-// crash between the DB delete and the file removal cannot strand bytes.
+// Blob garbage collection: a file under blobs/ whose digest no row references is
+// deleted. Sources are handled by removeSourceIfUnused at the call sites that
+// already know the digest; this sweep only covers blobs so a crash between the
+// DB delete and the file removal cannot strand bytes.
 export async function gcBlobs(sql, dataDir) {
   const blobsDir = path.join(dataDir, 'blobs');
 
@@ -19,7 +19,20 @@ export async function gcBlobs(sql, dataDir) {
   const referenced = await sql.begin(async (tx) => {
     await tx`SELECT pg_advisory_xact_lock(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
     const known = await tx`SELECT DISTINCT blob_digest FROM versions WHERE blob_digest IS NOT NULL`;
-    return new Set(known.map((row) => row.blob_digest));
+    // Uploaded profile images share this store, so their digests have to be in
+    // the referenced set too. Leaving them out would make every avatar on the
+    // instance collectable the first time the sweep ran.
+    const profiles = await tx`
+      SELECT avatar_blob_digest AS digest, banner_blob_digest AS banner
+      FROM users
+      WHERE avatar_blob_digest IS NOT NULL OR banner_blob_digest IS NOT NULL
+    `;
+    const referenced = new Set(known.map((row) => row.blob_digest));
+    for (const row of profiles) {
+      if (row.digest) referenced.add(row.digest);
+      if (row.banner) referenced.add(row.banner);
+    }
+    return referenced;
   });
 
   // A blob lands on disk before the versions row that references it, so a file

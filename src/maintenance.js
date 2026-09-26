@@ -7,45 +7,53 @@ import { BLOB_GC_LOCK_KEY, blobPathFor, sha256Hex } from './blobs.js';
 // call sites that already know the digest; this sweep only covers blobs so a
 // crash between the DB delete and the file removal cannot strand bytes.
 export async function gcBlobs(sql, dataDir) {
-  return sql.begin(async (tx) => {
+  const blobsDir = path.join(dataDir, 'blobs');
+
+  // The transaction covers the two queries and nothing else. Nearly all of this
+  // function is filesystem work, and holding a transaction open across it keeps
+  // a read lock on versions for the length of the pass -- long enough to
+  // deadlock against a TRUNCATE, which wants an exclusive lock on versions and
+  // everything cascading from it. The advisory lock only keeps two instances off
+  // the same directory at once; the unlink below already tolerates losing that
+  // race, so releasing it before the walk costs nothing.
+  const referenced = await sql.begin(async (tx) => {
     await tx`SELECT pg_advisory_xact_lock(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
-    const blobsDir = path.join(dataDir, 'blobs');
     const known = await tx`SELECT DISTINCT blob_digest FROM versions WHERE blob_digest IS NOT NULL`;
-    const referenced = new Set(known.map((row) => row.blob_digest));
+    return new Set(known.map((row) => row.blob_digest));
+  });
 
-    // A blob lands on disk before the versions row that references it, so a file
-    // younger than an hour may still belong to a publish in flight. Leave those
-    // to the next pass rather than deleting them out from under it.
-    const cutoff = Date.now() - 60 * 60 * 1000;
+  // A blob lands on disk before the versions row that references it, so a file
+  // younger than an hour may still belong to a publish in flight. Leave those
+  // to the next pass rather than deleting them out from under it.
+  const cutoff = Date.now() - 60 * 60 * 1000;
 
-    let removed = 0;
-    let prefixes;
-    try {
-      prefixes = await readdir(blobsDir, { withFileTypes: true });
-    } catch (error) {
-      // Nothing has ever been published here, so there is nothing to sweep.
-      if (error.code !== 'ENOENT') throw error;
-      return 0;
-    }
-    for (const prefix of prefixes) {
-      if (!prefix.isDirectory()) continue;
-      const prefixDir = path.join(blobsDir, prefix.name);
-      for (const rest of await readdir(prefixDir)) {
-        const digest = prefix + rest;
-        if (referenced.has(digest)) continue;
-        const abs = path.join(prefixDir, rest);
-        const info = await stat(abs).catch(() => null);
-        if (!info || info.mtimeMs > cutoff) continue;
-        try {
-          await unlink(abs);
-          removed += 1;
-        } catch {
-          // Gone already, or another sweep got there first.
-        }
+  let removed = 0;
+  let prefixes;
+  try {
+    prefixes = await readdir(blobsDir, { withFileTypes: true });
+  } catch (error) {
+    // Nothing has ever been published here, so there is nothing to sweep.
+    if (error.code !== 'ENOENT') throw error;
+    return 0;
+  }
+  for (const prefix of prefixes) {
+    if (!prefix.isDirectory()) continue;
+    const prefixDir = path.join(blobsDir, prefix.name);
+    for (const rest of await readdir(prefixDir)) {
+      const digest = prefix + rest;
+      if (referenced.has(digest)) continue;
+      const abs = path.join(prefixDir, rest);
+      const info = await stat(abs).catch(() => null);
+      if (!info || info.mtimeMs > cutoff) continue;
+      try {
+        await unlink(abs);
+        removed += 1;
+      } catch {
+        // Gone already, or another sweep got there first.
       }
     }
-    return removed;
-  });
+  }
+  return removed;
 }
 
 // Verify every referenced blob against its stored digest. Missing or

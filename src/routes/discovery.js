@@ -167,7 +167,11 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
   });
 
   router.get('/extensions/trending', async (req, res) => {
-    const limit = Math.min(Number(req.query.limit ?? 10) || 10, 50);
+    // Trending is lenient about a bad limit rather than throwing like
+    // parseLimit, so clamp here: a negative or fractional value used to reach
+    // the query as a negative or fractional LIMIT.
+    const requested = Number(req.query.limit ?? 10);
+    const limit = Math.min(Number.isInteger(requested) && requested > 0 ? requested : 10, 50);
     const user = req.auth?.user ?? null;
     const trending = await trendingExtensions(sql, { limit, visibility: visibilityFilter(user) });
     if (trending.length === 0) {
@@ -274,6 +278,26 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     return String(value).replace(/[&<>"']/g, (ch) => XML_ENTITIES[ch]);
   }
 
+  // The widest label the 190px badge can hold: the left pill is
+  // BADGE_CHAR_WIDTH per escaped character plus 12px of padding, and it has to
+  // leave the right pill a non-negative width.
+  const BADGE_WIDTH = 190;
+  const BADGE_CHAR_WIDTH = 7;
+  const BADGE_PILL_PADDING = 12;
+  const BADGE_LABEL_MAX_CHARS = Math.floor((BADGE_WIDTH - BADGE_PILL_PADDING) / BADGE_CHAR_WIDTH);
+
+  // Escapes one character at a time and stops at the budget, so a cut can never
+  // land in the middle of an entity and emit unparseable XML.
+  function xmlEscapeWithin(value, maxChars) {
+    let out = '';
+    for (const ch of String(value)) {
+      const piece = xmlEscape(ch);
+      if (out.length + piece.length > maxChars) break;
+      out += piece;
+    }
+    return out;
+  }
+
   router.get('/badge/@:namespace/:id', async (req, res) => {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
@@ -294,14 +318,15 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     if (rows.length === 0) throw notFound();
     const row = rows[0];
     // The badge is a fixed 190px wide, so a long label has to be cut before the
-    // width heuristic runs or the second rect gets a negative width. Length is
-    // taken from the escaped text: escapes expand (& -> 5 chars) and geometry
-    // must be derived from what is actually rendered.
+    // width heuristic runs or the second rect gets a negative width. The budget
+    // is in *escaped* characters, because escapes expand (& -> 5 chars) and the
+    // geometry has to match what is actually rendered. Truncating the raw label
+    // to 25 was not enough: 25 ampersands escaped to 125 and a negative width.
     const rawLabel =
       typeof req.query.label === 'string' && req.query.label.length > 0
         ? req.query.label.slice(0, 25)
         : id;
-    const label = xmlEscape(rawLabel);
+    const label = xmlEscapeWithin(rawLabel, BADGE_LABEL_MAX_CHARS);
     const downloads = Number((await totalDownloads(sql, namespace, id)) ?? 0);
     const license = row.license;
     const color = LICENSE_BADGE_COLORS[license] ?? '#0070F3';
@@ -309,21 +334,22 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     const downloadsText = xmlEscape(downloads === 1 ? '1 download' : `${downloads} downloads`);
     const licenseText = xmlEscape(license);
     const labelEscaped = label;
+    const labelPillWidth = label.length * BADGE_CHAR_WIDTH + BADGE_PILL_PADDING;
     // shields-style flat badge: two pills, 18px tall, DejaVu-ish width heuristic
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="190" height="20" role="img" aria-label="${labelEscaped}: ${versionText}">
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${BADGE_WIDTH}" height="20" role="img" aria-label="${labelEscaped}: ${versionText}">
   <linearGradient id="s" x2="0" y2="100%">
     <stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
     <stop offset="1" stop-opacity=".1"/>
   </linearGradient>
-  <clipPath id="r"><rect width="190" height="20" rx="3"/></clipPath>
+  <clipPath id="r"><rect width="${BADGE_WIDTH}" height="20" rx="3"/></clipPath>
   <g clip-path="url(#r)">
-    <rect width="${label.length * 7 + 12}" height="20" fill="#555"/>
-    <rect x="${label.length * 7 + 12}" width="${190 - label.length * 7 - 12}" height="20" fill="#0070F3"/>
-    <rect width="190" height="20" fill="url(#s)"/>
+    <rect width="${labelPillWidth}" height="20" fill="#555"/>
+    <rect x="${labelPillWidth}" width="${BADGE_WIDTH - labelPillWidth}" height="20" fill="#0070F3"/>
+    <rect width="${BADGE_WIDTH}" height="20" fill="url(#s)"/>
   </g>
   <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11">
-    <text x="${(label.length * 7 + 12) / 2}" y="14">${label}</text>
-    <text x="${label.length * 7 + 12 + (190 - label.length * 7 - 12) / 2}" y="14">${versionText} | ${downloadsText} | ${licenseText} ${color === '#4c1' ? '' : ''}</text>
+    <text x="${labelPillWidth / 2}" y="14">${label}</text>
+    <text x="${labelPillWidth + (BADGE_WIDTH - labelPillWidth) / 2}" y="14">${versionText} | ${downloadsText} | ${licenseText} ${color === '#4c1' ? '' : ''}</text>
   </g>
 </svg>`;
     res.set('Cache-Control', 'public, max-age=300');

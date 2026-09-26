@@ -20,6 +20,10 @@ const DELIVERY_TIMEOUT_MS = 10_000;
 // Comfortably past the attempt timeout so a slow-but-live request is never
 // duplicated; it only covers a worker that died mid-attempt.
 const DELIVERY_LEASE_MS = 60_000;
+// Discord's edge is fronted by Cloudflare, which answers a request carrying no
+// User-Agent at all with a 403 before the body is read, and other protected
+// hosts do the same. Node does not send one on its own.
+const USER_AGENT = 'TwextHub-Webhooks';
 
 function isPrivateIp(ip) {
   const version = isIP(ip);
@@ -106,6 +110,30 @@ export function isValidWebhookEvent(event) {
   return typeof event === 'string' && WEBHOOK_EVENTS.includes(event);
 }
 
+// One line per event, in the same register as the notification messages in
+// notify.js. A namespace is at most 40 characters and an extension id at most
+// 64, so the longest line here stays well inside Discord's 2000 character
+// ceiling on `content`.
+export function renderWebhookMessage(event, namespace, id, payload) {
+  const ref = `@${namespace}/${id}`;
+  switch (event) {
+    case 'version.published':
+      return `${ref} ${payload.version} was published.`;
+    case 'version.yanked':
+      return `${ref} ${payload.version} was yanked.`;
+    case 'version.deprecated':
+      return `${ref} ${payload.version} was deprecated.`;
+    case 'version.rejected':
+      return `${ref} ${payload.version} was rejected.`;
+    case 'owners.changed':
+      return payload.added
+        ? `${payload.added} was added as an owner of ${ref}.`
+        : `${payload.removed} was removed as an owner of ${ref}.`;
+    default:
+      throw new Error(`No message rendered for event ${event}.`);
+  }
+}
+
 export class WebhookInputError extends Error {
   constructor(fields) {
     super(fields.map((f) => f.message).join('; '));
@@ -173,11 +201,20 @@ export function makeWebhooks({ sql }) {
           AND active AND ${event} = ANY (events)
       `;
       for (const hook of hooks) {
+        const message = renderWebhookMessage(event, namespace, extensionId, basePayload);
         const payload = {
           event,
           namespace,
           id: extensionId,
           ...basePayload,
+          message,
+          // A Discord endpoint reads `content` and a Slack one reads `text`;
+          // both ignore every other key, so repeating the line under each name
+          // is what lets either accept a delivery unmodified. Nothing here
+          // inspects the destination -- the hub still does not know which
+          // provider a URL points at.
+          content: message,
+          text: message,
         };
         // Sign these exact bytes and store them with the delivery: jsonb
         // round-trips reorder keys, so re-serializing at delivery time would
@@ -291,6 +328,7 @@ function postToTarget(target, delivery) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'User-Agent': USER_AGENT,
           'X-TwextHub-Event': delivery.event,
           'X-TwextHub-Signature': delivery.signature,
           'X-TwextHub-Delivery': String(delivery.id),

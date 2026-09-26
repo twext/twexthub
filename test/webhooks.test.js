@@ -222,7 +222,7 @@ test('registry events schedule deliveries for subscribed hooks', async () => {
     .expect(204);
 
   await settle();
-  const events = await sql`SELECT event, payload FROM webhook_deliveries ORDER BY id`;
+  const events = await sql`SELECT event, payload, body FROM webhook_deliveries ORDER BY id`;
   const seen = events.map((row) => row.event);
   for (const event of [
     'version.published',
@@ -236,6 +236,17 @@ test('registry events schedule deliveries for subscribed hooks', async () => {
   assert.equal(published.payload.version, '2.0.0');
   assert.equal(published.payload.namespace, ns);
   assert.ok(published.payload.occurredAt);
+  assert.equal(published.payload.message, `@${ns}/hooked 2.0.0 was published.`);
+  const [ownerChange] = events.filter((row) => row.event === 'owners.changed');
+  assert.match(ownerChange.payload.message, /^[a-z0-9-]+ was (added|removed) as an owner of /);
+  for (const row of events) {
+    // Discord and Slack read the bytes that went out, not the jsonb the hub
+    // keeps, so the aliases have to be in the signed body.
+    const wire = JSON.parse(row.body);
+    assert.ok(wire.message, `${row.event} should carry a rendered line`);
+    assert.equal(wire.content, wire.message, `${row.event} should carry a content alias`);
+    assert.equal(wire.text, wire.message, `${row.event} should carry a text alias`);
+  }
 });
 
 test('version.rejected fires from the review endpoint', async () => {
@@ -279,6 +290,7 @@ test('delivery posts the signed payload and records status', async () => {
         event: req.headers['x-twexthub-event'],
         signature: req.headers['x-twexthub-signature'],
         delivery: req.headers['x-twexthub-delivery'],
+        userAgent: req.headers['user-agent'],
         body: Buffer.concat(chunks).toString('utf8'),
       });
       res.writeHead(200);
@@ -324,6 +336,9 @@ test('delivery posts the signed payload and records status', async () => {
     assert.equal(received.length, 1);
     assert.equal(received[0].event, 'version.published');
     assert.equal(received[0].signature, signature);
+    // Cloudflare-fronted hosts answer a request with no User-Agent at all with
+    // 403, and Node sends none unless it is set here.
+    assert.equal(received[0].userAgent, 'TwextHub-Webhooks');
     assert.deepEqual(JSON.parse(received[0].body), payload);
 
     const [after] =

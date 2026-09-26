@@ -128,6 +128,26 @@ The re-check and the connection read the same answer: the address is resolved on
 
 What is left is the deployment boundary: an instance can still open outbound connections to whatever is reachable, and a compromised process inside it is not contained by this check. Run the instance where outbound requests cannot reach loopback, link-local or private ranges, or resolve through a proxy you operate.
 
+A delivery body carries the event, the extension it concerns, and a pre-rendered line of prose:
+
+```json
+{
+  "event": "version.published",
+  "namespace": "acme",
+  "id": "logger",
+  "version": "1.4.0",
+  "occurredAt": "2026-09-26T12:00:00.000Z",
+  "actor": "acme",
+  "message": "@acme/logger 1.4.0 was published.",
+  "content": "@acme/logger 1.4.0 was published.",
+  "text": "@acme/logger 1.4.0 was published."
+}
+```
+
+`message` is the hub's own field. `content` and `text` repeat it because those are the keys a Discord and a Slack endpoint read respectively, and both ignore the rest of the body — a delivery can therefore be pointed straight at either without a translating service in between. Nothing in the hub inspects the destination to decide this, and no provider is named in the payload; the duplication is what lets a generic consumer and a chat endpoint read the same bytes.
+
+Consumers that want the structured fields ignore all three. The signature covers the body exactly as sent, so a receiver that rewrites the text before verifying will fail the HMAC.
+
 ## Blobs must live on persistent storage
 
 Published blobs are written to the local disk under `dataDir`, not to the database. The `versions` table records that a version exists; the blob is a file on whatever machine handled the publish. This shapes every deployment on a container platform:

@@ -100,13 +100,17 @@ const ENV_OVERRIDES = [
   ['cors.allowedOrigins', 'TWEXTHUB_CORS_ALLOWED_ORIGINS'],
 ];
 
-function coerceEnvValue(raw, current, envName) {
-  if (typeof current === 'boolean') {
+// `fallback` is the DEFAULTS value for the key, not whatever YAML merged in: an
+// operator writes limits as strings through the environment, and "off" is the
+// only way to spell the null that switches a windowed bucket off entirely.
+function coerceEnvValue(raw, fallback, envName) {
+  if (raw === 'off' || raw === 'null') return null;
+  if (typeof fallback === 'boolean') {
     if (raw === 'true' || raw === '1') return true;
     if (raw === 'false' || raw === '0') return false;
     throw new Error(`${envName} must be "true" or "false" (got "${raw}")`);
   }
-  if (typeof current === 'number') {
+  if (typeof fallback === 'number') {
     const n = Number(raw);
     if (!Number.isInteger(n) || n <= 0) {
       throw new Error(`${envName} must be a positive integer (got "${raw}")`);
@@ -146,7 +150,11 @@ function applyEnvOverrides(config) {
       target[last] = coerceAllowedOrigins(raw);
       continue;
     }
-    target[last] = coerceEnvValue(raw, target[last], envName);
+    target[last] = coerceEnvValue(
+      raw,
+      parts.reduce((acc, part) => acc[part], DEFAULTS),
+      envName,
+    );
   }
 }
 

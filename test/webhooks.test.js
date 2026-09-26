@@ -133,6 +133,36 @@ test('webhook validation rejects bad events, bad urls, and non-owners', async ()
   assert.match(plaintext.body.errors[0].message, /https/);
 });
 
+test('webhook targets inside non-RFC1918 internal ranges are refused', async () => {
+  // Carrier-grade NAT, the benchmarking range, and the IETF protocol
+  // assignments are not RFC1918, but each is routed inside networks an operator
+  // runs, so a delivery aimed at one is still an SSRF attempt.
+  const { owner, ns } = await makeOwner();
+  const refused = ['100.64.0.1', '100.127.255.255', '198.18.0.1', '198.19.255.255', '192.0.0.1'];
+  for (const address of refused) {
+    const r = await request(app)
+      .post(`/v1/@${ns}/hooked/webhooks`)
+      .set(bearer(owner.token))
+      .send({ url: `https://${address}/hook`, events: ['version.published'] });
+    assert.equal(r.status, 422, `${address} should be refused`);
+    assert.match(r.body.errors[0].message, /public/);
+  }
+});
+
+test('neighbours just outside the refused ranges are still allowed', async () => {
+  // The guards are on exact prefixes, so the addresses on either side have to
+  // keep working.
+  const { owner, ns } = await makeOwner();
+  const allowed = ['100.63.255.255', '100.128.0.0', '198.17.255.255', '198.20.0.0', '192.0.1.1'];
+  for (const address of allowed) {
+    const r = await request(app)
+      .post(`/v1/@${ns}/hooked/webhooks`)
+      .set(bearer(owner.token))
+      .send({ url: `https://${address}/hook`, events: ['version.published'] });
+    assert.equal(r.status, 201, `${address} should be accepted, got ${JSON.stringify(r.body)}`);
+  }
+});
+
 test('registry events schedule deliveries for subscribed hooks', async () => {
   const { owner, ns } = await makeOwner();
   await request(app)

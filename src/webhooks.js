@@ -20,11 +20,17 @@ const DELIVERY_TIMEOUT_MS = 10_000;
 function isPrivateIp(ip) {
   const version = isIP(ip);
   if (version === 4) {
-    const [a, b] = ip.split('.').map(Number);
+    const [a, b, c] = ip.split('.').map(Number);
     if (a === 10 || a === 127 || a === 0) return true;
     if (a === 169 && b === 254) return true;
     if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 0 && c === 0) return true; // IETF protocol assignments
     if (a === 192 && b === 168) return true;
+    // Carrier-grade NAT and the benchmarking range are not RFC1918, but both
+    // sit inside networks an operator runs for internal services, so a
+    // delivery aimed at either is still an SSRF attempt.
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    if (a === 198 && (b === 18 || b === 19)) return true;
     return a >= 224; // multicast and reserved
   }
   if (version !== 6) return true;

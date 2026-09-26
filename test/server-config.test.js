@@ -66,15 +66,26 @@ const CONTAINER_MOUNT = '1 0 0:1 / / rw,relatime - overlay overlay rw\n';
 const volumeMount = (dir) => `${CONTAINER_MOUNT}2 0 0:2 / ${dir} rw,relatime - ext4 /dev/sda1 rw\n`;
 
 describe('configStorage', () => {
-  test('calls a file under the root mount read-only', () => {
-    const storage = configStorage(configFile, { mountInfo: CONTAINER_MOUNT });
+  test('calls a file under the root mount read-only inside a container', () => {
+    const storage = configStorage(configFile, { mountInfo: CONTAINER_MOUNT, container: true });
     assert.equal(storage.writable, true);
     assert.equal(storage.persistent, false);
     assert.match(storage.reason, /volume/i);
   });
 
+  test('accepts a file on the host filesystem, which a recreate does not discard', () => {
+    // A host install writing to its own root filesystem keeps the file, so
+    // refusing the change there would refuse one that is safe to make.
+    const storage = configStorage(configFile, { mountInfo: CONTAINER_MOUNT, container: false });
+    assert.equal(storage.persistent, true);
+    assert.equal(storage.reason, null);
+  });
+
   test('calls a file under a bind mount persistent', () => {
-    const storage = configStorage(configFile, { mountInfo: volumeMount(dirname(configFile)) });
+    const storage = configStorage(configFile, {
+      mountInfo: volumeMount(dirname(configFile)),
+      container: true,
+    });
     assert.equal(storage.writable, true);
     assert.equal(storage.persistent, true);
     assert.equal(storage.reason, null);
@@ -83,6 +94,7 @@ describe('configStorage', () => {
   test('reports a missing or unwritable file as read-only', () => {
     const storage = configStorage('/nonexistent/twexthub/config.yaml', {
       mountInfo: volumeMount(dirname(configFile)),
+      container: true,
     });
     assert.equal(storage.writable, false);
     assert.equal(storage.persistent, false);
@@ -99,6 +111,7 @@ describe('applyServerConfig', () => {
           configPath: configFile,
           patch: { 'pagination.defaultLimit': 10 },
           mountInfo: CONTAINER_MOUNT,
+          container: true,
         }),
       (err) => err.status === 409 && /volume/i.test(err.detail),
     );
@@ -111,6 +124,7 @@ describe('applyServerConfig', () => {
       configPath: configFile,
       patch: { 'pagination.defaultLimit': 25 },
       mountInfo: volumeMount(dirname(configFile)),
+      container: true,
     });
     assert.deepEqual(result.changes['pagination.defaultLimit'], { before: 20, after: 25 });
     const written = readFileSync(configFile, 'utf8');
@@ -125,6 +139,7 @@ describe('applyServerConfig', () => {
       configPath: configFile,
       patch: { 'pagination.maxLimit': 120 },
       mountInfo: volumeMount(dirname(configFile)),
+      container: true,
     });
     assert.equal(config.pagination.maxLimit, 120);
   });
@@ -135,6 +150,7 @@ describe('applyServerConfig', () => {
       configPath: configFile,
       patch: { 'pagination.defaultLimit': 20 },
       mountInfo: volumeMount(dirname(configFile)),
+      container: true,
     });
     assert.deepEqual(result.changes, {});
   });
@@ -147,6 +163,7 @@ describe('applyServerConfig', () => {
           configPath: configFile,
           patch: { 'pagination.maxLimit': 100000 },
           mountInfo: volumeMount(dirname(configFile)),
+          container: true,
         }),
       (err) => err.status === 422 && err.errors[0].field === 'pagination.maxLimit',
     );
@@ -161,6 +178,7 @@ describe('applyServerConfig', () => {
           configPath: configFile,
           patch: { publicBaseUrl: 'not a url' },
           mountInfo: volumeMount(dirname(configFile)),
+          container: true,
         }),
       (err) => err.status === 422 && err.errors[0].field === 'publicBaseUrl',
     );
@@ -173,6 +191,7 @@ describe('applyServerConfig', () => {
         configPath: configFile,
         patch: { 'pagination.maxLimit': 0, 'compiler.memoryMb': 0 },
         mountInfo: volumeMount(dirname(configFile)),
+        container: true,
       });
       assert.fail('expected a validation error');
     } catch (err) {

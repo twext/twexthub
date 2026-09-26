@@ -1486,11 +1486,14 @@ paths:
         stop an instance answering than a hand-edited file, and the API root in
         particular would 404 the route the admin is using to fix it.
 
-        `editable` is false when the configuration file cannot hold a change,
-        which is the case when it sits inside the container rather than on a
-        volume. `reason` then says so, and `PUT` refuses with 409 until an
-        operator mounts the file. Reported either way, so the interface can
-        explain the state rather than showing a form that quietly does nothing.
+        `editable` is false when the configuration file cannot hold a change.
+        In a container that means the file sits in the instance's own writable
+        layer rather than on a volume, so a change would be discarded when the
+        instance is recreated. A host install writing to its own filesystem is
+        left alone: a recreate does not discard that. `reason` explains the
+        state, and `PUT` refuses with 409 until an operator mounts the file.
+        Reported either way, so the interface can explain rather than showing a
+        form that quietly does nothing.
       responses:
         '200':
           description: Current settings

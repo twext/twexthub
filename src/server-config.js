@@ -1,4 +1,11 @@
-import { accessSync, constants, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import {
+  accessSync,
+  constants,
+  existsSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
 import { fieldErrors, HttpError } from './errors.js';
@@ -115,6 +122,15 @@ export const EDITABLE_SETTINGS = [
 ];
 
 /** null where the platform has no mount table to read. */
+// Whether this process is inside a container. The volume requirement is a
+// statement about a container's writable layer, which is discarded when the
+// instance is recreated; a host install writing to its own filesystem keeps
+// the file, so treating a root-mounted path as temporary there would refuse a
+// change that is perfectly safe to make.
+function inContainer() {
+  return existsSync('/.dockerenv') || existsSync('/run/.containerenv');
+}
+
 function readMountInfo() {
   try {
     return readFileSync('/proc/self/mountinfo', 'utf8');
@@ -153,7 +169,10 @@ function writeAt(target, key, value) {
  * development checkout -- the filesystem is the machine's own and is taken to
  * be persistent, so the writability check carries the decision alone.
  */
-export function configStorage(configPath, { mountInfo = readMountInfo() } = {}) {
+export function configStorage(
+  configPath,
+  { mountInfo = readMountInfo(), container = inContainer() } = {},
+) {
   const resolved = path.resolve(configPath);
   try {
     accessSync(resolved, constants.W_OK);
@@ -186,7 +205,7 @@ export function configStorage(configPath, { mountInfo = readMountInfo() } = {}) 
     }
   }
 
-  if (deepest === '' || deepest === '/') {
+  if (container && (deepest === '' || deepest === '/')) {
     return {
       path: resolved,
       writable: true,
@@ -284,8 +303,8 @@ export function editableSettings(config) {
  * into the file, which turns a small edit into a large diff an operator has to
  * read before the next deploy.
  */
-export function applyServerConfig({ config, configPath, patch, mountInfo }) {
-  const storage = configStorage(configPath, { mountInfo });
+export function applyServerConfig({ config, configPath, patch, mountInfo, container }) {
+  const storage = configStorage(configPath, { mountInfo, container });
   if (!storage.persistent) {
     throw new HttpError(409, { title: 'Configuration is read-only', detail: storage.reason });
   }

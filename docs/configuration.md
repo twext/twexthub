@@ -102,11 +102,11 @@ Publishing a version charges its blob bytes **and** the retained source tarball 
 
 ## Compiler
 
-| Key                  | Default | Environment                    | Purpose                                                                       |
-| -------------------- | ------- | ------------------------------ | ----------------------------------------------------------------------------- |
-| `compiler.command`   | —       | `TWEXTHUB_COMPILER`            | Compiler binary or script to invoke instead of the bundled `@twext/twext` CLI |
-| `compiler.timeoutMs` | `30000` | `TWEXTHUB_COMPILER_TIMEOUT_MS` | Wall-clock limit for one build; the child is SIGKILLed past it                |
-| `compiler.memoryMb`  | `192`   | `TWEXTHUB_COMPILER_MEMORY_MB`  | V8 old-generation heap cap for the build child process                        |
+| Key                  | Default | Environment                    | Purpose                                                         |
+| -------------------- | ------- | ------------------------------ | --------------------------------------------------------------- |
+| `compiler.command`   | —       | `TWEXTHUB_COMPILER`            | Node.js script to run instead of the bundled `@twext/twext` CLI |
+| `compiler.timeoutMs` | `30000` | `TWEXTHUB_COMPILER_TIMEOUT_MS` | Wall-clock limit for one build; the child is SIGKILLed past it  |
+| `compiler.memoryMb`  | `192`   | `TWEXTHUB_COMPILER_MEMORY_MB`  | V8 old-generation heap cap for the build child process          |
 
 ## Logging
 

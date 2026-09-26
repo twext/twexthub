@@ -110,13 +110,13 @@ Publish requests carry a gzipped source tarball (up to `limits.maxSourceBytes`, 
 The hub compiles every publish itself: the uploaded tarball is expanded under `dataDir/tmp/`, and `twext build` runs there in a child process. The sandbox is:
 
 - **Filesystem** — Node's permission model restricts the child to reads and writes inside the extracted project directory plus reads of the server's own `node_modules` (the compiler and its dependencies). A `twext.yml` cannot redirect the output elsewhere; the output path is forced inside the sandbox directory.
-- **Memory** — `compiler.memoryMb` (192 MB default) bounds the child twice: V8's old space gets `--max-old-space-size`, and OS rlimits cap the process, so buffers outside the heap count too. The child is killed if it grows past that.
+- **Memory** — `compiler.memoryMb` (192 MB default) becomes the child's `--max-old-space-size`, and a build that grows past it fails as an out-of-memory error. That is the only bound a `spawn` can carry: `resourceLimits` is a `fork()` option and is ignored here, so buffers outside V8's heap are only bounded by whatever limit the host or container sets.
 - **Time** — `compiler.timeoutMs` (30 s default) SIGKILLs the child.
 - **No secrets** — the child receives an allowlist (`PATH`, `HOME`, `TMPDIR`, `TMP`, `TEMP`, `LANG`, `LC_ALL`, `TZ`) instead of the server's environment, so a build cannot read the database URL or any other credential the host passes in.
 
 Node's permission model does not gate outbound sockets, so an extension's build step could attempt network egress. Isolate that at the deployment boundary: run the container with no egress (Docker's `--network none` for a dedicated builder, or an egress firewall), or accept the risk if only moderated accounts can publish. The sandbox prevents code from escaping the box; it does not stop it from calling out.
 
-Operators can substitute their own compiler with `TWEXTHUB_COMPILER` (a binary or script invoked as `<command> build -o <out>`); see the [compiler configuration](configuration.md#compiler). A substituted compiler gets the same environment allowlist, so a script that needs its own variables must read them from a file it controls.
+Operators can substitute their own compiler with `TWEXTHUB_COMPILER` (a Node.js script, run as `node <command> build -o <out>`); see the [compiler configuration](configuration.md#compiler). A substituted compiler gets the same environment allowlist, so a script that needs its own variables must read them from a file it controls.
 
 A failed build rejects the publish with `422` and reports the compiler's output as `buildLog`; nothing is staged. Moderation reviews the source tarball and build log — the queue's `sourceUrl` fetches the exact uploaded bytes — so what an admin approves is what compiles into the served blob.
 

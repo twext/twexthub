@@ -8,9 +8,11 @@ const MAX_LOG_BYTES = 16384;
 
 // The bundled compiler lives behind @twext/twext's package "exports" watch,
 // so it cannot be imported by specifier; spawn it by absolute path instead.
-// TWEXTHUB_COMPILER lets an operator substitute their own compiler binary.
+// TWEXTHUB_COMPILER names a Node.js script to run in place of it, so the path is
+// resolved here: the child runs with the project as its cwd, and the read grant
+// below has to be absolute to reach a script outside that directory.
 export function compilerCommand(config) {
-  if (config.compiler?.command) return config.compiler.command;
+  if (config.compiler?.command) return path.resolve(config.compiler.command);
   return path.join(HERE, '..', 'node_modules', '@twext', 'twext', 'src', 'cli.js');
 }
 
@@ -63,15 +65,16 @@ export function compileProject(config, projectDir, { outFile = null } = {}) {
     // own dependencies. Node's model does not gate outbound sockets, so egress
     // isolation is left to the deployment boundary (see docs/hosting.md).
     const args = [
-      // resourceLimits sets OS rlimits, which cap the process rather than
-      // V8's heap, so the heap flag carries the same number: a build that
-      // grows past it is reported as an out-of-memory failure instead of
-      // being killed mid-write, and buffers outside the heap still hit the
-      // rlimit.
+      // V8's heap cap is the only memory bound a spawn can carry: resourceLimits
+      // is a fork() option and spawn drops it, so buffers outside the old space
+      // are left to whatever limit the host or container sets.
       `--max-old-space-size=${memoryMb}`,
       '--permission',
       `--allow-fs-read=${projectDir}`,
       `--allow-fs-read=${path.join(HERE, '..', 'node_modules')}`,
+      // Node reads the entrypoint implicitly from 24.2 on, and a substituted
+      // compiler lives outside both paths above.
+      `--allow-fs-read=${cli}`,
       `--allow-fs-write=${projectDir}`,
       cli,
       'build',
@@ -106,7 +109,6 @@ export function compileProject(config, projectDir, { outFile = null } = {}) {
       timeout: timeoutMs,
       killSignal: 'SIGKILL',
       windowsHide: true,
-      resourceLimits: { maxOldGenerationSizeMb: memoryMb },
     });
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');

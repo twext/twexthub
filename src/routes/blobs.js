@@ -36,6 +36,12 @@ export function makeBlobsRouter({ sql, config }) {
     if (isPublic) {
       res.set('Cache-Control', 'public, max-age=31536000, immutable');
     } else {
+      // Same status rule as the download route, and it comes first: canSee
+      // answers visibility, so asking it about a pending or staging row would
+      // let its owner read a blob the download route refuses.
+      const isAdmin = req.auth?.user.role === 'admin' && req.auth.tokenType === 'session';
+      if (!PUBLIC_STATUSES.has(row.status) && !(row.status === 'pending' && isAdmin))
+        throw notFound();
       if (!(await canSee(sql, req.auth?.user ?? null, row))) throw notFound();
       res.set('Cache-Control', 'private, no-store');
     }

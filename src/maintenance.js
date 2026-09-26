@@ -19,8 +19,17 @@ export async function gcBlobs(sql, dataDir) {
     const cutoff = Date.now() - 60 * 60 * 1000;
 
     let removed = 0;
-    for (const prefix of await readdir(blobsDir)) {
-      const prefixDir = path.join(blobsDir, prefix);
+    let prefixes;
+    try {
+      prefixes = await readdir(blobsDir, { withFileTypes: true });
+    } catch (error) {
+      // Nothing has ever been published here, so there is nothing to sweep.
+      if (error.code !== 'ENOENT') throw error;
+      return 0;
+    }
+    for (const prefix of prefixes) {
+      if (!prefix.isDirectory()) continue;
+      const prefixDir = path.join(blobsDir, prefix.name);
       for (const rest of await readdir(prefixDir)) {
         const digest = prefix + rest;
         if (referenced.has(digest)) continue;
@@ -58,7 +67,9 @@ export async function scrubBlobs(sql, dataDir) {
     ORDER BY blob_digest, id DESC
   `;
 
-  integrityErrorCount = 0;
+  // Counted locally so a scrape partway through a long pass does not read a
+  // half-finished tally.
+  let errors = 0;
   const problems = [];
   for (const row of rows) {
     const abs = blobPathFor(dataDir, row.blob_digest);
@@ -66,15 +77,16 @@ export async function scrubBlobs(sql, dataDir) {
     try {
       actual = sha256Hex(await readFile(abs));
     } catch {
-      integrityErrorCount += 1;
+      errors += 1;
       problems.push({ ...row, problem: 'missing' });
       continue;
     }
     if (actual !== row.blob_digest) {
-      integrityErrorCount = integrityErrorCount + 1;
+      errors += 1;
       problems.push({ ...row, problem: 'mismatch' });
     }
   }
+  integrityErrorCount = errors;
   return problems;
 }
 
@@ -111,6 +123,7 @@ export function makeMaintenanceJob({ sql, config }) {
 
   return {
     start() {
+      void tick();
       timer = setInterval(tick, gcIntervalMs);
       timer.unref?.();
       return this;

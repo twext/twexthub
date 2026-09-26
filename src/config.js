@@ -184,5 +184,8 @@ export function loadConfig(configPath = product.defaults?.configFilename ?? 'con
     );
   }
   config.dataDir = path.resolve(process.cwd(), config.dataDir);
+  // Recorded so the admin configuration endpoints can edit the same file this
+  // instance was started from, rather than guessing at a name.
+  config.configPath = path.resolve(configPath);
   return config;
 }

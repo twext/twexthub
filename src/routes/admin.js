@@ -4,7 +4,13 @@ import { renderRegistryMetrics } from '../observability.js';
 import { fieldErrors, notFound } from '../errors.js';
 import { legalDocumentToObject } from '../serialize.js';
 import { notifyUsersMatching, termsBumpedMessage } from '../notify.js';
-import { audit, auditRowToObject } from '../audit.js';
+import { audit, auditRowToObject, auditSoon } from '../audit.js';
+import {
+  applyServerConfig,
+  configStorage,
+  editableSettings,
+  EDITABLE_SETTINGS,
+} from '../server-config.js';
 import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
 
 // trim() is applied to the broadcast message before insert, so this limit
@@ -19,6 +25,54 @@ export function makeAdminRouter({ sql, config, termsGate }) {
     res
       .type('text/plain; version=0.0.4; charset=utf-8')
       .send(await renderRegistryMetrics(sql, req.app.locals.telemetry));
+  });
+
+  // The instance's own configuration, as far as an admin is allowed to change
+  // it. editable is false when the file cannot hold a change -- see
+  // configStorage for why a file inside the container counts as read-only.
+  router.get('/admin/config', requireAdmin, async (req, res) => {
+    const storage = configStorage(config.configPath ?? 'config.yaml');
+    res.json({
+      editable: storage.persistent,
+      reason: storage.reason,
+      configPath: storage.path,
+      settings: editableSettings(config),
+    });
+  });
+
+  router.put('/admin/config', requireAdmin, async (req, res) => {
+    requireObjectBody(req);
+    const patch = req.body.settings;
+    if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+      throw fieldErrors([{ field: 'settings', message: 'Must be an object of settings.' }]);
+    }
+    const known = new Set(EDITABLE_SETTINGS.map((setting) => setting.key));
+    const unknown = Object.keys(patch).filter((key) => !known.has(key));
+    if (unknown.length) {
+      // Refused rather than ignored: silently dropping a key an admin believed
+      // they had set is how somebody ends up believing the database URL moved.
+      throw fieldErrors(
+        unknown.map((key) => ({
+          field: key,
+          message: 'This setting cannot be changed from the admin interface.',
+        })),
+      );
+    }
+
+    const result = applyServerConfig({
+      config,
+      configPath: config.configPath ?? 'config.yaml',
+      patch,
+    });
+
+    if (Object.keys(result.changes).length) {
+      await auditSoon(sql, req.auth.user, 'config.update', {}, { changed: result.changes });
+    }
+    res.json({
+      changed: result.changes,
+      restartRequired: result.restartRequired,
+      settings: editableSettings(config),
+    });
   });
 
   function makeLegalDocumentHandler(kind, bodyError) {

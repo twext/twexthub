@@ -41,11 +41,7 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     const isOwner = req.auth?.user.namespace === row.namespace;
     const isAdmin = req.auth?.user.role === 'admin';
     if (isOwner || isAdmin) return userToObject(row, config);
-    const {
-      role: _role,
-      termsAcceptedVersion: _terms,
-      ...rest
-    } = userToObject(row, config);
+    const { role: _role, termsAcceptedVersion: _terms, ...rest } = userToObject(row, config);
     return rest;
   }
 

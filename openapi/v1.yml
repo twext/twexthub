@@ -1465,6 +1465,104 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
+  /admin/config:
+    get:
+      summary: Read the settings an admin may change
+      operationId: getAdminConfig
+      tags: [Adminspace]
+      description: >
+        The instance's own settings, limited to the ones an admin is allowed to
+        change from the interface. The database URL, the API root, the port and
+        the blob store location are not among them: a form is an easier way to
+        stop an instance answering than a hand-edited file, and the API root in
+        particular would 404 the route the admin is using to fix it.
+
+        `editable` is false when the configuration file cannot hold a change,
+        which is the case when it sits inside the container rather than on a
+        volume. `reason` then says so, and `PUT` refuses with 409 until an
+        operator mounts the file. Reported either way, so the interface can
+        explain the state rather than showing a form that quietly does nothing.
+      responses:
+        '200':
+          description: Current settings
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [editable, configPath, settings]
+                properties:
+                  editable:
+                    type: boolean
+                    description: Whether a change written here would survive a restart.
+                  reason:
+                    type: ['string', 'null']
+                    description: Why the file is read-only, when it is.
+                  configPath:
+                    type: string
+                  settings:
+                    type: array
+                    items: { $ref: '#/components/schemas/ServerSetting' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    put:
+      summary: Change the instance's settings
+      operationId: updateAdminConfig
+      tags: [Adminspace]
+      description: >
+        Applies the submitted settings to the configuration file and to the
+        running instance, so a setting the process reads per request takes
+        effect on the next request. `restartRequired` lists any changed setting
+        that is only read at startup.
+
+        The file is edited as a YAML document, so comments and key order the
+        operator wrote survive. A setting already at the submitted value is not
+        written and does not appear in `changed`. A key outside the offered set
+        is refused by name rather than ignored, so a caller is never left
+        believing it changed something it did not.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [settings]
+              properties:
+                settings:
+                  type: object
+                  additionalProperties: true
+                  example:
+                    limits.maxProfileImageBytes: 4194304
+                    pagination.maxLimit: 100
+      responses:
+        '200':
+          description: Applied
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  changed:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      properties:
+                        before: {}
+                        after: {}
+                  restartRequired:
+                    type: array
+                    items: { type: string }
+                  settings:
+                    type: array
+                    items: { $ref: '#/components/schemas/ServerSetting' }
+        '409':
+          description: The configuration file cannot hold a change
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
   /admin/notifications:
     post:
       summary: Broadcast a notification to every account
@@ -1898,6 +1996,27 @@ components:
       properties:
         nextCursor: { type: ['string', 'null'] }
         hasMore: { type: boolean }
+
+    ServerSetting:
+      type: object
+      required: [key, label, type, restartRequired, value]
+      properties:
+        key:
+          type: string
+          description: Dotted path in the configuration file, e.g. `limits.maxBlobBytes`.
+        label: { type: string }
+        help: { type: ['string', 'null'] }
+        type:
+          type: string
+          enum: [string, number, bytes, boolean, url, origins]
+        min: { type: ['integer', 'null'] }
+        max: { type: ['integer', 'null'] }
+        restartRequired:
+          type: boolean
+          description: >
+            True when the running process only reads this at startup, so the
+            change takes effect after a restart rather than on the next request.
+        value: {}
 
     Problem:
       type: object

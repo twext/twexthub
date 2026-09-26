@@ -39,9 +39,9 @@ Twext is maintained by the [Twext Team](https://github.com/twext).
 
 Three kinds of callers use the API:
 
-- **The registry** — `GET /v1/extensions`, `/v1/search`, `GET /v1/@:namespace/:id` — is public and read-only. Blobs download via `GET /v1/@:namespace/:id/versions/:version/download`, which keeps serving yanked and deprecated versions so existing consumers keep working.
-- **A publisher** uses the `twext` command-line interface to create an account/sign in, and publish extension versions (the CLI packs the project and uploads it; the hub compiles it). _This requires at least Twext v0.3.0._
-- **An admin** reviews that queue with `GET /v1/versions?status=pending` — entries carry the build log and a source URL — and approves or rejects each entry via `PATCH /v1/@:namespace/:id/versions/:version`. Admins also publish the terms/privacy text (`PATCH /v1/admin/terms`, `PATCH /v1/admin/privacy`) — a terms bump forces everyone to re-accept before publishing again — and can read `GET /v1/admin/metrics` and `GET /v1/admin/audit`.
+- The registry is public and read-only: `GET /v1/extensions`, `/v1/search`, `GET /v1/@:namespace/:id`. Blobs download via `GET /v1/@:namespace/:id/versions/:version/download`, which keeps serving yanked and deprecated versions so existing consumers keep working.
+- A publisher uses the `twext` command-line interface to create an account/sign in, and publish extension versions (the CLI packs the project and uploads it; the hub compiles it). _This requires at least Twext v0.3.0._
+- An admin reviews that queue with `GET /v1/versions?status=pending` — entries carry the build log and a source URL — and approves or rejects each entry via `PATCH /v1/@:namespace/:id/versions/:version`. Admins also publish the terms/privacy text (`PATCH /v1/admin/terms`, `PATCH /v1/admin/privacy`) — a terms bump forces everyone to re-accept before publishing again — and can read `GET /v1/admin/metrics` and `GET /v1/admin/audit`.
 
 CI can publish with automation tokens created at `POST /v1/tokens`; the `publish` scope covers publishing, `yank` covers `DELETE /v1/@:namespace/:id/versions/:version`.
 

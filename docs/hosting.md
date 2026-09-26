@@ -178,8 +178,6 @@ On every start the server reconciles leftover state:
 
 A hard kill mid-publish therefore leaves the registry consistent after the next boot. Between boots, a background job garbage-collects blob files that no database row references (crash residue from deletes) and runs the daily integrity scrub described under Monitoring.
 
-A hard kill mid-publish therefore leaves the registry consistent after the next boot.
-
 ## Next steps
 
 - [configuration.md](configuration.md) — every config key and environment variable.

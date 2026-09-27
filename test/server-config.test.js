@@ -184,6 +184,84 @@ describe('applyServerConfig', () => {
     );
   });
 
+  // A null would pass the form's own type check and then reach consumers that
+  // read the key as the type the form advertises.
+  test('rejects a null setting', () => {
+    const rejects = (patch) =>
+      assert.throws(
+        () =>
+          applyServerConfig({
+            config,
+            configPath: configFile,
+            patch,
+            mountInfo: volumeMount(dirname(configFile)),
+            container: true,
+          }),
+        (err) => err.status === 422 && /value is required/i.test(err.errors[0].message),
+      );
+    rejects({ publicBaseUrl: null });
+    rejects({ 'pagination.maxLimit': null });
+    rejects({ 'logging.requests': null });
+    rejects({ 'cors.allowedOrigins': null });
+  });
+
+  test('leaves the running config alone when a null is rejected', () => {
+    const before = config.publicBaseUrl;
+    assert.throws(() =>
+      applyServerConfig({
+        config,
+        configPath: configFile,
+        patch: { publicBaseUrl: null, 'pagination.defaultLimit': 30 },
+        mountInfo: volumeMount(dirname(configFile)),
+        container: true,
+      }),
+    );
+    assert.equal(config.publicBaseUrl, before);
+    assert.equal(config.pagination.defaultLimit, 20);
+  });
+
+  // The list is matched against the Origin header, so anything that does not
+  // serialize to exactly one origin is a value that can never match.
+  test('rejects an allowed origin that is not exactly an origin', () => {
+    const rejects = (value) =>
+      assert.throws(
+        () =>
+          applyServerConfig({
+            config,
+            configPath: configFile,
+            patch: { 'cors.allowedOrigins': value },
+            mountInfo: volumeMount(dirname(configFile)),
+            container: true,
+          }),
+        (err) => err.status === 422 && /absolute origin/i.test(err.errors[0].message),
+      );
+    rejects('not a url');
+    rejects('https://a.example/x');
+    rejects('https://a.example?q=1');
+    rejects('https://a.example:443');
+    rejects('data:text/plain,hi');
+    rejects('https://ok.example,not a url');
+  });
+
+  test('accepts a plain origin, with or without a trailing slash', () => {
+    for (const [value, stored] of [
+      ['https://a.example', ['https://a.example']],
+      // The Origin header carries no trailing slash, so the stored value is the
+      // serialized form: that is the string makeCors compares against.
+      ['https://b.example/', ['https://b.example']],
+      ['http://localhost:3000', ['http://localhost:3000']],
+    ]) {
+      const result = applyServerConfig({
+        config,
+        configPath: configFile,
+        patch: { 'cors.allowedOrigins': value },
+        mountInfo: volumeMount(dirname(configFile)),
+        container: true,
+      });
+      assert.deepEqual(result.changes['cors.allowedOrigins'].after, stored);
+    }
+  });
+
   test('collects every bad field rather than stopping at the first', () => {
     try {
       applyServerConfig({

@@ -218,7 +218,14 @@ export function configStorage(
 }
 
 function coerce(setting, value) {
-  if (value === null) return null;
+  // No editable setting is nullable, and the consumers of these keys read them
+  // as the type the form advertises: userToObject calls replace on
+  // publicBaseUrl, and the pagination and compiler keys are compared as numbers.
+  // A null here would pass the form's own type check and then break every
+  // request that touched it, so it is a field error like any other bad value.
+  if (value === null || value === undefined) {
+    throw fieldErrors([{ field: setting.key, message: 'A value is required.' }]);
+  }
   switch (setting.type) {
     case 'number':
     case 'bytes': {
@@ -247,16 +254,24 @@ function coerce(setting, value) {
             .map((s) => s.trim())
             .filter(Boolean);
       if (list.includes('*')) return '*';
+      const origins = [];
       for (const origin of list) {
-        try {
-          URL.parse ? URL.parse(origin) : new URL(origin);
-        } catch {
+        // The list is compared against the Origin header by string equality, so
+        // a value that does not serialize to exactly one origin can never match
+        // one. URL.parse answers null for input it cannot parse instead of
+        // throwing, and a parsed URL keeps its path and query, so both have to be
+        // checked: "not a url" and "https://a.example/x" would otherwise be
+        // stored and silently never match anything. Storing the serialized form
+        // also drops a trailing slash the header would not carry.
+        const parsed = URL.parse(origin);
+        if (!parsed || parsed.origin === 'null' || parsed.origin !== origin.replace(/\/$/, '')) {
           throw fieldErrors([
             { field: setting.key, message: `"${origin}" is not an absolute origin.` },
           ]);
         }
+        origins.push(parsed.origin);
       }
-      return list;
+      return origins;
     }
     case 'url': {
       const text = String(value).trim();

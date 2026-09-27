@@ -1125,12 +1125,12 @@ paths:
                     type: array
                     items:
                       type: object
-                      required: [namespace, displayName]
+                      required: [namespace, display_name]
                       properties:
                         namespace: { $ref: '#/components/schemas/Namespace' }
-                        displayName: { type: string }
+                        display_name: { type: string }
                         role: { $ref: '#/components/schemas/Role' }
-                        addedAt: { type: string, format: date-time }
+                        added_at: { type: string, format: date-time }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /@{namespace}/{id}/owners/{ownerNamespace}:

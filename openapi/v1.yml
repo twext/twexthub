@@ -1462,6 +1462,47 @@ paths:
               schema: { type: string }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /blobs/{digest}:
+    parameters:
+      - name: digest
+        in: path
+        required: true
+        schema: { type: string, pattern: '^[0-9a-f]{64}$' }
+        description: >
+          The bare hex digest, as published in a version's `dist.digest` with
+          the `sha256:` prefix removed.
+    get:
+      summary: Fetch a compiled blob by its content digest
+      operationId: getBlob
+      tags: [Open]
+      security:
+        - {}
+        - BearerAuth: []
+      description: >
+        Serves the same bytes as `/@{namespace}/{id}/versions/{version}/download`
+        for any version compiled to them, which is what makes a digest a
+        stable cache key: identical source republished under a new version
+        resolves to one blob, and every version pointing at it keeps working
+        after an unrelated version is deleted.
+
+        A digest is only as secret as the URL carrying it, so this route runs
+        the download route's own status and visibility checks rather than
+        treating content addressing as permission. A digest reached by at least
+        one public published, deprecated, or yanked version is public and served
+        cacheable for a year; anything else needs a bearer token the same way
+        `/download` needs one, and a `pending` version stays admin-session-only.
+
+        404 for a digest that is not 64 hex characters, names no version, has
+        no bytes on disk, or fails the size and hash check against the digest
+        it is stored under.
+      responses:
+        '200':
+          description: Compiled extension
+          content:
+            application/javascript:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   # --------------------------------------------------------------- Admin
   /admin/audit:
     get:

@@ -56,13 +56,30 @@ export const DEFAULTS = {
   },
 };
 
-function mergeDeep(base, override) {
-  if (override === undefined || override === null) return base;
+// The buckets that a null switches off entirely, and the only keys for which a
+// null is a value rather than the absence of one. An environment variable is a
+// string, so "off" (or "null") is how an operator spells it there; no other key
+// may use those spellings, or a mistyped port or quota would become null instead
+// of failing startup.
+const NULLABLE_KEYS = new Set([
+  'rateLimits.publishPerWindow',
+  'rateLimits.downloadsPerIpPerWindow',
+]);
+
+// Merge the config file over the defaults. `path` is the dotted key the value
+// came from, because an explicit null means "off" for the two nullable buckets
+// and "not set" for everything else: keeping the default when a file says
+// `publishPerWindow: null` would silently leave the bucket on, which is the one
+// thing that line is there to do.
+function mergeDeep(base, override, path = '') {
+  if (override === undefined) return base;
+  if (override === null) return NULLABLE_KEYS.has(path) ? null : base;
   if (Array.isArray(base)) return override;
   if (typeof base === 'object' && base !== null) {
     const out = structuredClone(base);
     for (const [key, value] of Object.entries(override)) {
-      if (value !== undefined) out[key] = mergeDeep(base[key], value);
+      if (value !== undefined)
+        out[key] = mergeDeep(base[key], value, path ? `${path}.${key}` : key);
     }
     return out;
   }
@@ -102,19 +119,10 @@ const ENV_OVERRIDES = [
   ['cors.allowedOrigins', 'TWEXTHUB_CORS_ALLOWED_ORIGINS'],
 ];
 
-// The buckets that a null switches off entirely. An environment variable is a
-// string, so "off" (or "null") is how an operator spells it there; no other key
-// may use those spellings, or a mistyped port or quota would become null
-// instead of failing startup.
-const NULLABLE_ENV_KEYS = new Set([
-  'rateLimits.publishPerWindow',
-  'rateLimits.downloadsPerIpPerWindow',
-]);
-
 // `fallback` is the DEFAULTS value for the key, not whatever YAML merged in: the
 // coercion each value goes through is the one its default type calls for.
 function coerceEnvValue(raw, fallback, envName, key) {
-  if (NULLABLE_ENV_KEYS.has(key) && (raw === 'off' || raw === 'null')) return null;
+  if (NULLABLE_KEYS.has(key) && (raw === 'off' || raw === 'null')) return null;
   if (typeof fallback === 'boolean') {
     if (raw === 'true' || raw === '1') return true;
     if (raw === 'false' || raw === '0') return false;

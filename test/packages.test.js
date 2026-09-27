@@ -287,3 +287,26 @@ test('published versions expose digest and integrity, served from /blobs/:digest
   );
   assert.equal(blobFile, compiled);
 });
+
+test('a version awaiting moderation is not served by digest', async () => {
+  const { adminToken, ownerToken, ownerNs } = await makeAdminAndOwner();
+  const published = await publishProject(app, ownerNs, 'hello', ownerToken);
+  assert.equal(published.body.status, 'pending');
+  // A pending version publishes no dist, so the digest comes from the row. It
+  // is the whole address of the bytes: anyone can derive it from a build.
+  const { sql } = await boot();
+  const [row] = await sql`
+    SELECT blob_digest FROM versions
+    WHERE namespace = ${ownerNs} AND extension_id = 'hello' AND blob_digest IS NOT NULL
+  `;
+  assert.ok(row.blob_digest, 'the pending version should have compiled output');
+
+  // A pending version is public until an admin approves it, so a check on
+  // visibility alone would hand its compiled output to any caller holding the
+  // digest. The status rule the download route applies has to come first.
+  await request(app).get(`/v1/blobs/${row.blob_digest}`).expect(404);
+  // Not to the owner either: the download route refuses them the same way.
+  await request(app).get(`/v1/blobs/${row.blob_digest}`).set(bearer(ownerToken)).expect(404);
+  // The moderation queue is where an unapproved version is meant to be read.
+  await request(app).get(`/v1/blobs/${row.blob_digest}`).set(bearer(adminToken)).expect(200);
+});

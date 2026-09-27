@@ -34,11 +34,11 @@ The response includes `token`; every admin endpoint below takes it as `Authoriza
 
 A submitted version moves `staging → pending → published`, or `pending → rejected`. A published version can later be `yanked`.
 
-- The first publish from an owner is held in `pending` until an admin approves it.
-- Once an owner has any published version, every later publish skips review and goes straight to `published`.
-- An owner can have only one version in the queue (`staging` or `pending`) at a time. To let a publisher correct and resubmit, reject the queued version — the rejection stores a reason and frees the slot.
+- The namespace account's first publish is held in `pending` until an admin approves it, including a publish submitted by a co-owner.
+- Once the namespace has a published version, later publishes to it skip review and go straight to `published`.
+- A publishing account can have only one version in the queue (`staging` or `pending`) at a time. To let a publisher correct and resubmit, reject the queued version — the rejection stores a reason and frees the slot.
 
-Rejected, staging, and pending versions are neither listed publicly nor downloadable.
+Rejected and staging versions are neither listed publicly nor downloadable. Pending versions are available to an admin with a session token for review.
 
 ## Reviewing the queue
 
@@ -49,7 +49,7 @@ curl -H 'Authorization: Bearer <session-token>' \
   'https://hub.example.com/v1/versions?status=pending'
 ```
 
-Returns the pending versions with namespace, id, version, name, license, description, and timestamps. The list is paginated with `?limit` and `?cursor`.
+Returns the pending versions with namespace, id, version, name, license, description, build log, source URL, and timestamps. The list is paginated with `?limit` and `?cursor`.
 
 Approve:
 
@@ -69,7 +69,7 @@ curl -X PATCH -H 'Authorization: Bearer <session-token>' \
   https://hub.example.com/v1/@alice/myext/versions/1.0.0
 ```
 
-Approving publishes the version, sets its `publishedAt`, and marks the owner as established so their next publish skips the queue.
+Approving publishes the version, sets its `publishedAt`, and marks the namespace account as established so its next publish skips the queue, including one submitted by a co-owner.
 
 The version address is `@<namespace>/<id>/versions/<version>`, under your `apiRoot` (default `/v1`).
 
@@ -89,7 +89,7 @@ Roles are `admin` and `normal`. Only admins change roles or act on other account
 
 - `PATCH /v1/users/:namespace` updates `displayName`, `role`, or `password` — self-service for your own password, or anything as admin for another account.
 - Resetting a password revokes every session and automation token on that account.
-- `DELETE /v1/users/:namespace` deletes the account, its versions, and its blobs. Published extensions disappear from the registry; the blob directory is quarantined and purged.
+- `DELETE /v1/users/:namespace` deletes the account and its versions. Unreferenced blobs and source tarballs are removed after the database delete; shared content remains available to other accounts.
 
 Sessions and automation tokens can be listed and revoked per account under `/v1/sessions` and `/v1/tokens`.
 

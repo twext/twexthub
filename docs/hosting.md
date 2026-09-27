@@ -110,11 +110,11 @@ Publish requests carry a gzipped source tarball (up to `limits.maxSourceBytes`, 
 The hub compiles every publish itself: the uploaded tarball is expanded under `dataDir/tmp/`, and `twext build` runs there in a child process. The sandbox is:
 
 - **Filesystem** — Node's permission model restricts the child to reads and writes inside the extracted project directory plus reads of the server's own `node_modules` (the compiler and its dependencies). A `twext.yml` cannot redirect the output elsewhere; the output path is forced inside the sandbox directory.
-- **Memory** — `compiler.memoryMb` (192 MB default) becomes the child's `--max-old-space-size`, and a build that grows past it fails as an out-of-memory error. That is the only bound a `spawn` can carry: `resourceLimits` is a `fork()` option and is ignored here, so buffers outside V8's heap are only bounded by whatever limit the host or container sets.
+- **Memory** — `compiler.memoryMb` (192 MB default) caps V8's old heap. Before starting Node, `/bin/sh` applies `ulimit -v` from `compiler.addressSpaceMb` (1536 MB default). This caps the whole build process's virtual address space, including native buffers. Node reserves address space it has not filled with physical pages, so the address-space cap is larger than the heap cap. If the shell cannot apply it, the build fails before Node starts. The supplied Alpine image supports this shell limit; a custom host must provide `/bin/sh` with `ulimit -v`.
 - **Time** — `compiler.timeoutMs` (30 s default) SIGKILLs the child.
 - **No secrets** — the child receives an allowlist (`PATH`, `HOME`, `TMPDIR`, `TMP`, `TEMP`, `LANG`, `LC_ALL`, `TZ`) instead of the server's environment, so a build cannot read the database URL or any other credential the host passes in.
 
-Node's permission model does not gate outbound sockets, so an extension's build step could attempt network egress. Isolate that at the deployment boundary: run the container with no egress (Docker's `--network none` for a dedicated builder, or an egress firewall), or accept the risk if only moderated accounts can publish. The sandbox prevents code from escaping the box; it does not stop it from calling out.
+Node's permission model does not gate outbound sockets, so an extension's build step can attempt network egress. The current in-process build runner shares the hub's network namespace; a network rule on the hub container also affects its database and webhook connections. If builds must have no egress, run them in a separate network-isolated builder or impose an equivalent per-process network policy. The filesystem and memory controls here do not provide network isolation.
 
 Operators can substitute their own compiler with `TWEXTHUB_COMPILER` (a Node.js script, run as `node <command> build -o <out>`); see the [compiler configuration](configuration.md#compiler). A substituted compiler gets the same environment allowlist, so a script that needs its own variables must read them from a file it controls.
 
@@ -123,6 +123,8 @@ A failed build rejects the publish with `422` and reports the compiler's output 
 ## Webhooks
 
 Webhook destinations are checked when a publisher registers one: the URL must be `https`, resolve to a public address, and carry no credentials in it. The name is resolved again on every delivery attempt, so a destination whose DNS answers have since turned private is refused before the request goes out.
+
+The signing secret is returned only when the webhook is created. The hub retains it in the database to sign future deliveries; a one-way hash alone cannot produce the HMAC. Protect database backups that contain webhook secrets.
 
 The re-check and the connection read the same answer: the address is resolved once per attempt and the socket is pinned to it, so a name that answers differently to a second lookup cannot redirect the request. TLS still validates the hostname the URL was registered under, which keeps a pinned address from serving a certificate for a different host. Redirects are not followed, so a `3xx` response cannot send the delivery somewhere that was never checked.
 
@@ -186,7 +188,7 @@ Both trees are content-addressed by SHA-256 (`blobs/<xx>/<rest>`, `sources/<xx>/
 
 `secrets/download-address.key` keys the hash that stands in for a download's client address, and the key deliberately lives outside the database: a dump of the database on its own reveals no addresses. Set `TWEXTHUB_DOWNLOAD_HASH_KEY` to hold it yourself (Kubernetes secret, config management); the file is then not written. If the key file is missing, the instance generates one (mode 0600) and clears hashes it cannot compare against. If the key changes after hashes exist, the old and new hashes remain in `extension_daily_downloads` and in any new events, so the `distinct_downloads` rollup reflects the key that produced each hash at the time it was written; there is no automated cleanup of values made with a prior key.
 
-`tmp/` and `quarantine/` inside the data directory are scratch space; they matter for no restore.
+`tmp/` and the legacy `quarantine/` directory inside the data directory are scratch space; they matter for no restore.
 
 ## Boot-time cleanup
 

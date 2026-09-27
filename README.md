@@ -20,9 +20,11 @@
 
 ## Highlights
 
+See [CHANGELOG.md](CHANGELOG.md) for the v1.0.0 release notes.
+
 - Build on publish: you upload a tarball of the Twext project; the hub compiles it in a sandboxed build and queues the source and build log for moderation.
 - Public, cursor-paginated discovery of published extensions (`/v1/extensions`, `/v1/search`) with sort, license filter, badges, and an Atom feed.
-- Namespaced publishing with a per-owner moderation gate: a first publish is `pending` until an admin approves; later publishes go straight to `published`.
+- Namespaced publishing with a moderation gate: a namespace's first publish is `pending` until an admin approves; later publishes to that namespace go straight to `published`.
 - Sessions and scoped automation tokens (`publish`, `yank`), npm-style dist-tags, SemVer range resolution, multi-owner extensions, webhooks, and deprecation as a softer alternative to yank.
 - Per-account notifications for review decisions, terms bumps, and admin broadcasts (`GET /v1/notifications`), with a `twext notifications` command in the CLI.
 - Download metrics, private extensions with access grants, storage quotas, an append-only audit log, and Prometheus metrics at `GET /v1/admin/metrics`.
@@ -30,7 +32,7 @@
 
 ## Overview
 
-TwextHub is the server-side half of the [Twext](https://github.com/twext/twext) workflow. A Twext project is compiled locally with the `twext` CLI, then published to a TwextHub instance with the resulting JavaScript IIFE and manifest metadata. Once an admin approves it, the version is listed in the public registry and available for download.
+TwextHub is the server-side half of the [Twext](https://github.com/twext/twext) workflow. A publisher uploads a Twext project tarball; the hub compiles it and retains the source and build log for review. Once an admin approves a public version, it is listed in the registry and available for download.
 
 ### Authors
 

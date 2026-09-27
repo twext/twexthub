@@ -104,7 +104,15 @@ export const EDITABLE_SETTINGS = [
     min: 16,
     max: 4096,
     restartRequired: false,
-    label: 'Compiler memory (MB)',
+    label: 'Compiler V8 heap (MB)',
+  },
+  {
+    key: 'compiler.addressSpaceMb',
+    type: 'number',
+    min: 768,
+    max: 16384,
+    restartRequired: false,
+    label: 'Compiler address space (MB)',
   },
   {
     key: 'logging.requests',

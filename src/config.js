@@ -47,6 +47,7 @@ export const DEFAULTS = {
     command: null,
     timeoutMs: 30_000,
     memoryMb: 192,
+    addressSpaceMb: 1536,
   },
   logging: {
     requests: false,
@@ -115,6 +116,7 @@ const ENV_OVERRIDES = [
   ['compiler.command', 'TWEXTHUB_COMPILER'],
   ['compiler.timeoutMs', 'TWEXTHUB_COMPILER_TIMEOUT_MS'],
   ['compiler.memoryMb', 'TWEXTHUB_COMPILER_MEMORY_MB'],
+  ['compiler.addressSpaceMb', 'TWEXTHUB_COMPILER_ADDRESS_SPACE_MB'],
   ['logging.requests', 'TWEXTHUB_LOG_REQUESTS'],
   ['cors.allowedOrigins', 'TWEXTHUB_CORS_ALLOWED_ORIGINS'],
 ];

@@ -1,15 +1,28 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept, FIXTURE_PASSWORD } from './helpers.mjs';
+import {
+  boot,
+  resetDb,
+  bearer,
+  uniqNs,
+  signupAndAccept,
+  publishProject,
+  FIXTURE_PASSWORD,
+} from './helpers.mjs';
+import { blobPathFor } from '../src/blobs.js';
 
 let app;
+let sql;
+let config;
 before(async () => {
-  ({ app } = await boot());
+  ({ app, sql, config } = await boot());
 });
 beforeEach(resetDb);
 after(async () => {
-  await (await boot()).sql.end();
+  await sql.end();
 });
 
 test('users list is public and includes created users', async () => {
@@ -108,6 +121,32 @@ test('account deletion bypasses terms re-acceptance', async () => {
 
   await request(app).delete(`/v1/users/${user.namespace}`).set(bearer(token)).expect(204);
   await request(app).get(`/v1/users/${user.namespace}`).expect(404);
+});
+
+test('account deletion still removes sources when blob cleanup fails', async () => {
+  await signupAndAccept(app, uniqNs());
+  const owner = await signupAndAccept(app, uniqNs());
+  const ns = owner.user.namespace;
+  await publishProject(app, ns, 'cleanup', owner.token);
+  const [version] = await sql`
+    SELECT blob_digest, source_path FROM versions
+    WHERE namespace = ${ns} AND extension_id = 'cleanup'
+  `;
+  const blobPath = blobPathFor(config.dataDir, version.blob_digest);
+  const sourcePath = path.join(config.dataDir, version.source_path);
+  await fs.rm(blobPath);
+  await fs.mkdir(blobPath);
+  const errors = [];
+  const originalError = console.error;
+  console.error = (message) => errors.push(message);
+  try {
+    await request(app).delete(`/v1/users/${ns}`).set(bearer(owner.token)).expect(204);
+  } finally {
+    console.error = originalError;
+    await fs.rm(blobPath, { recursive: true, force: true });
+  }
+  assert.ok(errors.some((message) => message.includes(`blob cleanup deferred for ${ns}`)));
+  await assert.rejects(fs.stat(sourcePath), { code: 'ENOENT' });
 });
 
 test('non-owner cannot update another user', async () => {

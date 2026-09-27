@@ -6,13 +6,24 @@ import { fileURLToPath } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const MAX_LOG_BYTES = 16384;
 
+function validatedCompilerPath(command) {
+  if (typeof command !== 'string') return null;
+  const trimmed = command.trim();
+  if (!trimmed) return null;
+  const resolved = path.resolve(trimmed);
+  const ext = path.extname(resolved).toLowerCase();
+  if (ext !== '.js' && ext !== '.mjs' && ext !== '.cjs') return null;
+  return resolved;
+}
+
 // The bundled compiler lives behind @twext/twext's package "exports" watch,
 // so it cannot be imported by specifier; spawn it by absolute path instead.
 // TWEXTHUB_COMPILER names a Node.js script to run in place of it, so the path is
 // resolved here: the child runs with the project as its cwd, and the read grant
 // below has to be absolute to reach a script outside that directory.
 export function compilerCommand(config) {
-  if (config.compiler?.command) return path.resolve(config.compiler.command);
+  const custom = validatedCompilerPath(config.compiler?.command);
+  if (custom) return custom;
   return path.join(HERE, '..', 'node_modules', '@twext', 'twext', 'src', 'cli.js');
 }
 

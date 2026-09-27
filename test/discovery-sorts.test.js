@@ -186,17 +186,11 @@ test('badge splits into one-fact endpoints that are each far narrower', async ()
     assert.match(r.headers['content-type'], /image\/svg\+xml/);
     return r.text ?? r.body.toString('utf8');
   };
-  const stripTagsFully = (input) => {
-    let out = input;
-    let previous;
-    do {
-      previous = out;
-      out = out.replace(/<[^>]*>/g, '');
-    } while (out !== previous);
-    return out;
-  };
+  // The renderer emits flat text nodes with escaped content, so the text is
+  // captured rather than sanitized out of a matched element. Nested markup now
+  // fails the assertion instead of being silently stripped away.
   const texts = (markup) =>
-    markup.match(/<text[^>]*>([^<]*)<\/text>/g).map((t) => stripTagsFully(t));
+    [...markup.matchAll(/<text[^>]*>([^<]*)<\/text>/g)].map((match) => match[1]);
 
   // The left pill names the fact and the right pill is a bare value, so the unit
   // lives in the label and there is no pluralisation to get wrong.

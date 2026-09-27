@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import postgres from 'postgres';
 import { bootstrap } from '../src/server.js';
 import { createTarballBuffer } from '../src/tarball.js';
+import { DEFAULTS } from '../src/config.js';
 
 export const TEST_DATABASE_URL =
   process.env.TWEXTHUB_TEST_DATABASE_URL ??
@@ -20,26 +21,53 @@ export function uniqNs() {
   return 'ns' + seq + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
 
+// Deep-merges `overrides` over a base, one section at a time, so a test can
+// override a single bucket (`signupsPerIpPerWindow: 10_000`) or a single limit
+// without re-spelling its whole section. A null merges as a value, not a
+// section: `publishPerWindow: null` means "off", and replacing an entire object
+// (`database: {...}`) still works because the override replaces the leaf.
+function mergeOverrides(base, overrides) {
+  if (overrides === undefined) return base;
+  if (
+    overrides === null ||
+    typeof overrides !== 'object' ||
+    Array.isArray(overrides) ||
+    base === null ||
+    typeof base !== 'object' ||
+    Array.isArray(base)
+  ) {
+    return overrides;
+  }
+  const out = { ...base };
+  for (const [key, value] of Object.entries(overrides)) {
+    out[key] = mergeOverrides(out[key], value);
+  }
+  return out;
+}
+
 export function makeConfig(overrides = {}) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'twexthub-test-'));
-  return {
+  // Built over the production DEFAULTS rather than restated key by key, so the
+  // suite exercises what an instance actually ships with and a key the server
+  // gains cannot be missing here. The keys a test config must pin for its own
+  // sake — a fast scrypt, a short-lived database pool — are the overrides
+  // below. This also fixes what the guard in makeHttpRateLimiter surfaced:
+  // routeWindowMinutes used to be undefined at the coarse limiter (NaN window,
+  // one validation error logged per app booted) because this literal had never
+  // spelled the coarse-limiter keys out.
+  const config = mergeOverrides(structuredClone(DEFAULTS), {
     port: 0,
     dataDir,
     apiRoot: '/v1',
     publicBaseUrl: 'http://hub.test:8080',
     requireHttps: false,
+    trustProxy: false,
     database: { url: TEST_DATABASE_URL, maxConnections: 6 },
-    auth: { sessionTtlDays: 7, scrypt: { N: 16384, r: 8, p: 1 } },
-    rateLimits: {
-      loginAttemptsPerWindow: 5,
-      loginWindowMinutes: 15,
-      signupsPerIpPerWindow: 5,
-      signupWindowMinutes: 15,
-    },
-    pagination: { defaultLimit: 20, maxLimit: 50 },
+    // scrypt at production cost would dominate the suite's runtime.
+    auth: { scrypt: { N: 16384, r: 8, p: 1 } },
     cors: { allowedOrigins: '*' },
-    ...overrides,
-  };
+  });
+  return mergeOverrides(config, overrides);
 }
 
 // postgres.js connects lazily, so a database that is not there does not fail

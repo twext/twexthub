@@ -6,6 +6,20 @@ import { tooManyRequests } from './errors.js';
 // publish, download) keep their precise per-account/per-IP windows in
 // rate-limit.js. This global limiter is the coarse DoS backstop.
 export function makeHttpRateLimiter(config) {
+  // The window and cap come from the config, and a config that omits them hands
+  // express-rate-limit a NaN: it logs one validation error and runs anyway, with
+  // the window clamped to 1ms and the limit silently at its default — a DoS
+  // backstop that neither backstops nor says so. Refusing to build the app is
+  // the honest failure, and the only way a hand-assembled config (the production
+  // loader always fills these from DEFAULTS) gets caught at boot.
+  const { routesPerIpPerWindow, routeWindowMinutes } = config.rateLimits ?? {};
+  const positive = (v) => Number.isInteger(v) && v > 0;
+  if (!positive(routesPerIpPerWindow) || !positive(routeWindowMinutes)) {
+    throw new Error(
+      'rateLimits.routesPerIpPerWindow and rateLimits.routeWindowMinutes must be positive integers; the coarse per-IP limiter cannot run without them',
+    );
+  }
+
   // `rate-limit` v8 uses `ipKeyGenerator` for fixed-width IPv4/IPv6 subnet
   // keying, which fails with a runtime error on unknown value types. `req.ip`
   // is always a string in Express 5, so validate before delegating.

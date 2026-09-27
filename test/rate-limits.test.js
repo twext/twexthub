@@ -14,16 +14,12 @@ let coarseApp;
 let coarseTelemetry;
 
 function makeRateConfig(overrides = {}) {
+  // makeConfig deep-merges, so the nulls switch off exactly these two buckets
+  // and every other key stays at its default.
   return makeConfig({
     rateLimits: {
-      loginAttemptsPerWindow: 5,
-      loginWindowMinutes: 15,
-      signupsPerIpPerWindow: 5,
-      signupWindowMinutes: 15,
       publishPerWindow: null,
-      publishWindowMinutes: 60,
       downloadsPerIpPerWindow: null,
-      downloadWindowMinutes: 5,
       ...overrides,
     },
   });

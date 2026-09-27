@@ -45,14 +45,9 @@ let config;
 
 before(async () => {
   ({ app, sql, config } = await boot({
-    // A small ceiling keeps the over-limit case cheap. The other keys are
-    // repeated because the override replaces the whole limits object.
-    limits: {
-      maxBlobBytes: 2 * 1024 * 1024,
-      maxAccountBlobBytes: 64 * 1024 * 1024,
-      maxSourceBytes: 1024 * 1024,
-      maxProfileImageBytes: 4096,
-    },
+    // A small ceiling keeps the over-limit case cheap; the rest of the limits
+    // section stays at its production default.
+    limits: { maxProfileImageBytes: 4096 },
   }));
 });
 beforeEach(resetDb);

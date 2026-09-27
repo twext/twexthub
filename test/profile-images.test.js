@@ -212,6 +212,31 @@ describe('upload validation', () => {
     const res = await put(ns, 'avatar', pngBytes(config.limits.maxProfileImageBytes), 'image/png');
     assert.equal(res.status, 413);
   });
+
+  // The body parser is built when the routes are wired, so with the configured
+  // limit baked into it a change on the running instance would not reach the next
+  // upload: the parser reads up to the ceiling and the live limit is applied to
+  // what arrives. Both directions have to hold, so neither a lower limit that
+  // still lets bytes through nor a higher one the parser would refuse can pass.
+  test('applies a limit changed on the running instance', async () => {
+    const ns = await account();
+    const before = config.limits.maxProfileImageBytes;
+    try {
+      config.limits.maxProfileImageBytes = 64;
+      const tooBig = await put(ns, 'avatar', pngBytes(2000), 'image/png');
+      assert.equal(tooBig.status, 413);
+      // The rejection names the setting rather than the parser's ceiling, which
+      // is what says the live value was the one consulted.
+      assert.match(tooBig.body.detail, /limit for this field/);
+
+      // Above the 4 KiB this suite booted with, so a parser still holding that
+      // value would refuse the body instead of storing it.
+      config.limits.maxProfileImageBytes = 8192;
+      assert.equal((await put(ns, 'avatar', pngBytes(5000), 'image/png')).status, 200);
+    } finally {
+      config.limits.maxProfileImageBytes = before;
+    }
+  });
 });
 
 describe('upload authorization', () => {

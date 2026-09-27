@@ -6,6 +6,7 @@ import { hashPassword, verifyPassword } from '../password.js';
 import { requireSession } from '../auth.js';
 import { removeBlobIfUnused } from '../blobs.js';
 import {
+  MAX_PROFILE_IMAGE_BYTES,
   PROFILE_IMAGES,
   profileImagePointer,
   removeProfileImageBlob,
@@ -14,7 +15,7 @@ import {
 } from '../profile-images.js';
 import { removeSourceIfUnused } from '../sources.js';
 import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
-import { fieldErrors, forbidden, HttpError, notFound, payloadTooLarge } from '../errors.js';
+import { fieldErrors, forbidden, HttpError, notFound } from '../errors.js';
 import { isValidNamespace } from '../util.js';
 import { userToObject } from '../serialize.js';
 import { notifyUser, roleChangedMessage, tokensRevokedMessage } from '../notify.js';
@@ -149,7 +150,10 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     requireSession,
     express.raw({
       type: ['image/*', 'application/octet-stream'],
-      limit: config.limits?.maxProfileImageBytes ?? 2 * 1024 * 1024,
+      // The ceiling, not the limit: the parser is built once, so it reads up to
+      // the largest body any configuration allows and validateProfileImage
+      // applies the configured limit on the request that arrives.
+      limit: MAX_PROFILE_IMAGE_BYTES,
     }),
     async (req, res) => {
       const target = await loadUserOr404(sql, req.params.namespace);
@@ -157,23 +161,14 @@ export function makeUsersRouter({ sql, config, termsGate }) {
         throw forbidden('You can only change your own profile images.');
       }
       const declared = req.get('content-type');
-      try {
-        const stored = await storeProfileImage(sql, config, target, kind, req.body, declared);
-        // The replaced image is only unlinked after the new pointer is
-        // committed, and only when nothing else references those bytes.
-        if (stored.previous && stored.previous !== stored.digest) {
-          await removeProfileImageBlob(sql, config, stored.previous);
-        }
-        const [updated] = await sql`SELECT * FROM users WHERE id = ${target.id}`;
-        res.json(userToObject(updated, config));
-      } catch (error) {
-        if (error?.type === 'entity.too.large') {
-          throw payloadTooLarge(
-            `Image is larger than the ${Math.floor((config.limits?.maxProfileImageBytes ?? 2 * 1024 * 1024) / 1024)} KiB limit.`,
-          );
-        }
-        throw error;
+      const stored = await storeProfileImage(sql, config, target, kind, req.body, declared);
+      // The replaced image is only unlinked after the new pointer is committed,
+      // and only when nothing else references those bytes.
+      if (stored.previous && stored.previous !== stored.digest) {
+        await removeProfileImageBlob(sql, config, stored.previous);
       }
+      const [updated] = await sql`SELECT * FROM users WHERE id = ${target.id}`;
+      res.json(userToObject(updated, config));
     },
   ];
 

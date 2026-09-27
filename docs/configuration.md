@@ -93,11 +93,12 @@ On top of those buckets, a coarse per-IP middleware (`express-rate-limit`) caps 
 
 ## Limits
 
-| Key                          | Default    | Environment                       | Purpose                                                     |
-| ---------------------------- | ---------- | --------------------------------- | ----------------------------------------------------------- |
-| `limits.maxBlobBytes`        | `2097152`  | `TWEXTHUB_MAX_BLOB_BYTES`         | Upper bound on a single published blob                      |
-| `limits.maxAccountBlobBytes` | `67108864` | `TWEXTHUB_MAX_ACCOUNT_BLOB_BYTES` | Per-account storage quota, applied at publish time          |
-| `limits.maxSourceBytes`      | `1048576`  | `TWEXTHUB_MAX_SOURCE_BYTES`       | Upper bound on the gzipped source tarball a publish carries |
+| Key                           | Default    | Environment                        | Purpose                                                                                                                                    |
+| ----------------------------- | ---------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `limits.maxBlobBytes`         | `2097152`  | `TWEXTHUB_MAX_BLOB_BYTES`          | Upper bound on a single published blob                                                                                                     |
+| `limits.maxAccountBlobBytes`  | `67108864` | `TWEXTHUB_MAX_ACCOUNT_BLOB_BYTES`  | Per-account storage quota, applied at publish time                                                                                         |
+| `limits.maxSourceBytes`       | `1048576`  | `TWEXTHUB_MAX_SOURCE_BYTES`        | Upper bound on the gzipped source tarball a publish carries                                                                                |
+| `limits.maxProfileImageBytes` | `2097152`  | `TWEXTHUB_MAX_PROFILE_IMAGE_BYTES` | Upper bound on an avatar or banner upload, applied per request; the upload route reads at most 16 MiB, so a higher value cannot be reached |
 
 Publishing a version charges its blob bytes **and** the retained source tarball to the namespace account's running total. Deleting the extension refunds every byte it charged. An admin can override an account's cumulative quota with `PATCH /v1/admin/users/:namespace/quota`; a `null` `maxBlobBytes` resets it to the configured default.
 

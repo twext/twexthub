@@ -3,6 +3,14 @@ import { sniffImageType, supportedImageTypes } from './image-sniff.js';
 import { BLOB_GC_LOCK_KEY, blobPathFor, storeBlobBuffer } from './blobs.js';
 import { payloadTooLarge, unsupportedMediaType } from './errors.js';
 
+// The body parser is built once, when the routes are wired, so it cannot read
+// the configured limit the way validateProfileImage does. It accepts up to this
+// ceiling and the configured limit is enforced per request, which is what keeps
+// limits.maxProfileImageBytes hot. The ceiling is the hard cap: a configured or
+// per-kind limit above it is unreachable, because this is the largest body the
+// route will read.
+export const MAX_PROFILE_IMAGE_BYTES = 16 * 1024 * 1024;
+
 // Which images an account can upload, and how each maps to the columns and the
 // serving path. Keeping both in one table means adding a third image later
 // cannot half-work in the upload route and the serving route.

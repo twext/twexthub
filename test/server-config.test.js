@@ -310,6 +310,39 @@ describe('editable settings', () => {
       assert.equal(typeof setting.restartRequired, 'boolean');
     }
   });
+
+  // A setting the running process copies while it starts cannot take effect
+  // until the instance restarts, so saying otherwise is how an admin saves a
+  // value and watches the old one keep being enforced.
+  test('calls a setting hot only when its value is read per request', () => {
+    const restart = EDITABLE_SETTINGS.filter((s) => s.restartRequired)
+      .map((s) => s.key)
+      .sort();
+    assert.deepEqual(restart, [
+      'auth.sessionTtlDays',
+      'cors.allowedOrigins',
+      'limits.maxSourceBytes',
+      'logging.requests',
+    ]);
+    // publicBaseUrl, the limits, pagination, and the compiler settings are all
+    // read as each operation runs, so all of them stay hot.
+    for (const key of [
+      'publicBaseUrl',
+      'pagination.defaultLimit',
+      'pagination.maxLimit',
+      'limits.maxBlobBytes',
+      'limits.maxAccountBlobBytes',
+      'limits.maxProfileImageBytes',
+      'compiler.timeoutMs',
+      'compiler.memoryMb',
+    ]) {
+      assert.equal(
+        EDITABLE_SETTINGS.find((s) => s.key === key).restartRequired,
+        false,
+        `${key} is read per request and should not claim a restart`,
+      );
+    }
+  });
 });
 
 describe('GET /admin/config', () => {

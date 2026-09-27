@@ -37,7 +37,7 @@ export const EDITABLE_SETTINGS = [
     type: 'number',
     min: 1,
     max: 365,
-    restartRequired: false,
+    restartRequired: true,
     label: 'Session lifetime (days)',
     help: 'Applies to new sessions; existing ones keep the expiry they were given.',
   },
@@ -79,7 +79,7 @@ export const EDITABLE_SETTINGS = [
     type: 'bytes',
     min: 1024,
     max: 64 * 1024 * 1024,
-    restartRequired: false,
+    restartRequired: true,
     label: 'Maximum source upload',
   },
   {
@@ -109,13 +109,13 @@ export const EDITABLE_SETTINGS = [
   {
     key: 'logging.requests',
     type: 'boolean',
-    restartRequired: false,
+    restartRequired: true,
     label: 'Log every request',
   },
   {
     key: 'cors.allowedOrigins',
     type: 'origins',
-    restartRequired: false,
+    restartRequired: true,
     label: 'Allowed origins',
     help: 'A comma separated list, or * for any.',
   },

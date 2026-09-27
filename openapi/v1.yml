@@ -712,9 +712,22 @@ paths:
       operationId: getTrendingExtensions
       tags: [Open]
       security: []
+      description: >
+        One flat list rather than a page through the registry: there is no
+        cursor, so `nextCursor` is always `null` and `hasMore` always `false`.
+        An extension with no downloads in the window is not ranked at all.
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 10 }
+          description: >
+            How many to return, at most 50. A value above the cap is clamped to
+            it; a value that is not a positive whole number (including a
+            negative or fractional one) falls back to the default rather than
+            being rejected, so a client with a bad value still gets a list.
       responses:
         '200':
-          description: Up to 50 extensions ordered by 7-day downloads
+          description: Extensions ordered by 7-day downloads
           content:
             application/json:
               schema:

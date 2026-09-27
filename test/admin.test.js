@@ -1,7 +1,15 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
+import {
+  boot,
+  resetDb,
+  bearer,
+  uniqNs,
+  acceptTerms,
+  signupAndAccept,
+  publishProject,
+} from './helpers.mjs';
 
 let app;
 let sql;
@@ -24,7 +32,7 @@ test('admin can update terms and privacy; version bumps', async () => {
   assert.equal(terms.body.version, 2);
   assert.equal(terms.body.body, 'New terms v2.');
 
-  await request(app).post('/v1/terms/accept').set(bearer(admin.token)).expect(204);
+  await acceptTerms(app, admin.user.namespace, admin.token);
 
   const privacy = await request(app)
     .patch('/v1/admin/privacy')
@@ -52,7 +60,7 @@ test('bumping terms forces re-acceptance for other users', async () => {
   assert.equal(pub.status, 403);
   assert.match(pub.body.detail, /Terms/i);
 
-  await request(app).post('/v1/terms/accept').set(bearer(token)).expect(204);
+  await acceptTerms(app, ns, token);
   const after = await publishProject(app, ns, 'aaa', token);
   assert.equal(after.body.status, 'pending');
 });

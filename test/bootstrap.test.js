@@ -1,7 +1,7 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, bearer, uniqNs, signup } from './helpers.mjs';
+import { boot, bearer, uniqNs, acceptTerms, signup } from './helpers.mjs';
 
 // This file deliberately never seeds legal_documents (resetDb does), so it
 // exercises a fresh registry where no terms or privacy document exists.
@@ -44,7 +44,7 @@ test('a fresh registry can create its first legal documents, then gates writes',
   assert.equal(publicTerms.body.version, 1);
 
   // The admin accepts the document they just created, so later edits pass.
-  await request(app).post('/v1/terms/accept').set(bearer(adminToken)).expect(204);
+  await acceptTerms(app, admin.body.user.namespace, adminToken);
 
   const privacy = await request(app)
     .patch('/v1/admin/privacy')
@@ -62,7 +62,7 @@ test('a fresh registry can create its first legal documents, then gates writes',
     .send({ displayName: 'Pledger' })
     .expect(403);
 
-  await request(app).post('/v1/terms/accept').set(bearer(others.body.token)).expect(204);
+  await acceptTerms(app, others.body.user.namespace, others.body.token);
   await request(app)
     .patch(`/v1/users/${others.body.user.namespace}`)
     .set(bearer(others.body.token))

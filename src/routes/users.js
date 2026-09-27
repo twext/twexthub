@@ -203,22 +203,41 @@ export function makeUsersRouter({ sql, config, termsGate }) {
   // account can still be secured. The old check read "any profile field is
   // present" and so was always false next to a password, which meant a password
   // field alone waved the whole request through: attaching one smuggled a
-  // profile or role edit past the gate too. Only the password fields are exempt.
-  function skipTermsForPasswordOnly(req, res, next) {
-    const { password, currentPassword: _currentPassword, ...rest } = req.body ?? {};
-    const onlyPassword =
-      password !== undefined && Object.values(rest).every((value) => value === undefined);
-    return onlyPassword ? next() : termsGate(req, res, next);
+  // profile or role edit past the gate too. Only the fields that are themselves
+  // gated or ungated alike are exempt: a password change has to work before the
+  // terms are accepted (it is the way out of a locked account), and so does the
+  // acceptance itself.
+  function skipTermsForAcceptance(req, res, next) {
+    const {
+      password,
+      currentPassword: _currentPassword,
+      termsAcceptedVersion,
+      ...rest
+    } = req.body ?? {};
+    const onlyUngated =
+      (password !== undefined || termsAcceptedVersion !== undefined) &&
+      Object.values(rest).every((value) => value === undefined);
+    return onlyUngated ? next() : termsGate(req, res, next);
   }
 
-  router.patch('/:namespace', requireSession, skipTermsForPasswordOnly, async (req, res) => {
+  router.patch('/:namespace', requireSession, skipTermsForAcceptance, async (req, res) => {
     const target = await loadUserOr404(sql, req.params.namespace);
     if (req.auth.user.namespace !== target.namespace && req.auth.user.role !== 'admin') {
       throw forbidden('Only an admin can update another account.');
     }
     requireObjectBody(req);
 
-    const { displayName, password, role, bio, website, github, avatarUrl, bannerUrl } = req.body;
+    const {
+      displayName,
+      password,
+      role,
+      bio,
+      website,
+      github,
+      avatarUrl,
+      bannerUrl,
+      termsAcceptedVersion,
+    } = req.body;
     if (
       displayName === undefined &&
       password === undefined &&
@@ -227,7 +246,8 @@ export function makeUsersRouter({ sql, config, termsGate }) {
       website === undefined &&
       github === undefined &&
       avatarUrl === undefined &&
-      bannerUrl === undefined
+      bannerUrl === undefined &&
+      termsAcceptedVersion === undefined
     ) {
       throw fieldErrors([{ field: 'body', message: 'Provide at least one field to update.' }]);
     }
@@ -272,6 +292,24 @@ export function makeUsersRouter({ sql, config, termsGate }) {
         });
       }
     }
+    // The client sends back the version it actually read, so an acceptance
+    // cannot be recorded against text the account never saw. A stale one means
+    // the terms changed since: the client has to read them again. The version
+    // is an integer in the documents but a string in the users row, so both
+    // spellings are compared as text.
+    if (termsAcceptedVersion !== undefined) {
+      const [terms] = await sql`SELECT version FROM legal_documents WHERE kind = 'terms'`;
+      if (!terms) {
+        throw notFound('There are no terms to accept yet.');
+      }
+      const current = String(terms.version);
+      if (String(termsAcceptedVersion) !== current) {
+        errors.push({
+          field: 'termsAcceptedVersion',
+          message: `Must be the current terms version ${current}. Read GET /v1/terms to see it.`,
+        });
+      }
+    }
     if (errors.length > 0) throw fieldErrors(errors);
 
     if (role !== undefined && req.auth.user.role !== 'admin') {
@@ -311,6 +349,10 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     if (bannerUrl !== undefined) {
       patch.banner_url = bannerUrl;
       columns.push('banner_url');
+    }
+    if (termsAcceptedVersion !== undefined) {
+      patch.terms_accepted_version = termsAcceptedVersion;
+      columns.push('terms_accepted_version');
     }
     if (password !== undefined) {
       if (req.auth.user.role !== 'admin') {

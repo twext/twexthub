@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAdmin, requireSession } from '../auth.js';
+import { requireAdmin } from '../auth.js';
 import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
 import { HttpError, notFound } from '../errors.js';
 import { foldText, isValidExtensionId, isValidNamespace } from '../util.js';
@@ -648,13 +648,6 @@ ${entries}
     const [row] = await sql`SELECT * FROM legal_documents WHERE kind = 'privacy'`;
     if (!row) throw notFound();
     res.json(legalDocumentToObject(row));
-  });
-
-  router.post('/terms/accept', requireSession, async (req, res) => {
-    const [terms] = await sql`SELECT * FROM legal_documents WHERE kind = 'terms'`;
-    if (!terms) throw notFound();
-    await sql`UPDATE users SET terms_accepted_version = ${terms.version} WHERE id = ${req.auth.user.id}`;
-    res.status(204).end();
   });
 
   router.get('/versions', requireAdmin, termsGate, async (req, res) => {

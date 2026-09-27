@@ -6,6 +6,7 @@ import {
   resetDb,
   bearer,
   uniqNs,
+  acceptTerms,
   signupAndAccept,
   signup,
   FIXTURE_PASSWORD,
@@ -172,6 +173,14 @@ test('a password change does not carry a profile or role edit past the terms gat
     assert.equal(patched.status, 403, `${field} should stay behind the terms gate`);
   }
 
+  // Accepting the terms is itself exempt from the gate, but only on its own:
+  // riding it in with a profile edit would be the same smuggling.
+  const acceptancePlusEdit = await request(app)
+    .patch(`/v1/users/${ns}`)
+    .set(bearer(r.body.token))
+    .send({ termsAcceptedVersion: 1, bio: 'sneaky' });
+  assert.equal(acceptancePlusEdit.status, 403);
+
   // The control: bio on its own is refused too, so the 403s above are the gate
   // and not a validation error.
   const bioOnly = await request(app)
@@ -181,7 +190,7 @@ test('a password change does not carry a profile or role edit past the terms gat
   assert.equal(bioOnly.status, 403);
 
   // Once the terms are accepted, the same combined update goes through.
-  await request(app).post('/v1/terms/accept').set(bearer(r.body.token)).expect(204);
+  await acceptTerms(app, ns, r.body.token);
   const allowed = await request(app)
     .patch(`/v1/users/${ns}`)
     .set(bearer(r.body.token))

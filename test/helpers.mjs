@@ -83,11 +83,20 @@ export async function signup(app, namespace, password = FIXTURE_PASSWORD, displa
   return request(app).post('/v1/auth/signup').send({ namespace, password, displayName });
 }
 
+export async function acceptTerms(app, namespace, token) {
+  const terms = await request(app).get('/v1/terms').expect(200);
+  const accepted = await request(app)
+    .patch(`/v1/users/${namespace}`)
+    .set(bearer(token))
+    .send({ termsAcceptedVersion: String(terms.body.version) });
+  assert.equal(accepted.status, 200, `terms accept failed: ${JSON.stringify(accepted.body)}`);
+  return accepted.body;
+}
+
 export async function signupAndAccept(app, namespace, password = FIXTURE_PASSWORD) {
   const r = await signup(app, namespace, password);
   assert.equal(r.status, 201, `signup failed: ${JSON.stringify(r.body)}`);
-  const accepted = await request(app).post('/v1/terms/accept').set(bearer(r.body.token));
-  assert.equal(accepted.status, 204, `terms accept failed: ${JSON.stringify(accepted.body)}`);
+  await acceptTerms(app, namespace, r.body.token);
   return r.body;
 }
 

@@ -78,10 +78,10 @@ The version address is `@<namespace>/<id>/versions/<version>`, under your `apiRo
 The registry can carry terms of service and a privacy policy. Neither exists until you publish it — the public endpoints return 404 beforehand.
 
 - `PATCH /v1/admin/terms` with `{"body":"…"}` publishes the terms; `PATCH /v1/admin/privacy` does the same for privacy. Each update bumps the document version. On a fresh registry the first call creates the document.
-- A terms bump forces every publisher to accept the new version before publishing again; the publish gate and other write endpoints reject them until `POST /v1/terms/accept`. Existing published versions keep serving.
+- A terms bump forces every publisher to accept the new version before publishing again; the publish gate and other write endpoints reject them until the account patches itself with the new `termsAcceptedVersion`. Existing published versions keep serving.
 - The current documents are public at `GET /v1/terms` and `GET /v1/privacy`.
 
-Order matters when bootstrapping: create the terms document first, then accept it, then create the privacy document — approving a later terms bump requires having accepted the current one.
+Order matters when bootstrapping: create the terms document first, then accept it with `PATCH /v1/users/{namespace}`, then create the privacy document — approving a later terms bump requires having accepted the current one.
 
 ## Accounts and roles
 

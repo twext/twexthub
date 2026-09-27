@@ -20,10 +20,12 @@ info:
 
     Every authenticated (`Userspace`/`Adminspace`) endpoint requires the
     caller to have accepted the current Terms of Service; a caller who
-    hasn't gets a `403` (see `Forbidden`) until they call
-    `POST /terms/accept`. Exemptions that stay available without
-    re-acceptance: `POST /auth/logout`, `GET /auth/me`, password-only user
-    updates, and account deletion.
+    hasn't gets a `403` (see `Forbidden`) until they patch their own user with
+    `termsAcceptedVersion` set to the `version` that `GET /terms` reports. A
+    stale version is a `422`, so an acceptance is always recorded against text
+    the account was shown. Exemptions that stay available without
+    re-acceptance: `POST /auth/logout`, `GET /auth/me`, the acceptance itself,
+    password-only user updates, and account deletion.
 
     Bearer tokens come in two kinds. **Sessions** are created by
     `/auth/login` or `/auth/signup`, expire after 7 days, and implicitly
@@ -338,6 +340,14 @@ paths:
         when it does not match. Profile fields
         (`bio`, `website`, `github`, `avatarUrl`, `bannerUrl`) are
         self-service and do not require re-accepting the Terms.
+
+        `termsAcceptedVersion` records acceptance of the Terms of Service. It is
+        exempt from the gate that every other field is behind, so a caller who
+        has not accepted yet can still call this — but only on its own: send it
+        alone, or with `password`/`currentPassword`. Sending it next to a
+        profile or role edit is a `403`, so acceptance cannot be used to carry
+        an edit past the gate. A version other than the one `GET /terms`
+        reports is a `422`.
       requestBody:
         required: true
         content:
@@ -380,6 +390,12 @@ paths:
                     An external banner to reference, not proxy, with the same
                     relationship to an uploaded banner as `avatarUrl` has to an
                     uploaded avatar.
+                termsAcceptedVersion:
+                  type: ['integer', 'string']
+                  description: >
+                    The `version` from `GET /terms` that the caller accepts.
+                    The users row holds it as a string, so either spelling is
+                    compared as text.
       responses:
         '200':
           description: Updated
@@ -861,16 +877,6 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/LegalDocument' }
-
-  /terms/accept:
-    post:
-      summary: Accept the current Terms of Service
-      operationId: acceptTerms
-      tags: [Userspace]
-      description: Records acceptance of whichever `version` of the Terms of Service is current at the time of the call.
-      responses:
-        '204': { description: Recorded }
-        '401': { $ref: '#/components/responses/Unauthorized' }
 
   /privacy:
     get:
@@ -2228,7 +2234,8 @@ components:
         Authenticated, but not allowed to perform this action — e.g. not the
         resource owner or an admin, a namespace mismatch on publish, the
         current Terms of Service haven't been accepted yet
-        (see `POST /terms/accept`), an automation token missing the
+        (see `termsAcceptedVersion` on `PATCH /users/{namespace}`), an
+        automation token missing the
         required scope, or an automation token used against a
         session-only endpoint (session/token management, `/admin/*`,
         account settings).

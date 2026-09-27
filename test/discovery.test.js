@@ -155,10 +155,20 @@ test('terms and privacy documents are public', async () => {
   assert.equal(privacy.body.version, 1);
 });
 
-test('terms/accept records acceptance for a session', async () => {
-  const { token } = await signupAndAccept(app, uniqNs());
+test('accepting terms on the user records the version that was read', async () => {
+  const { token, user } = await signupAndAccept(app, uniqNs());
   const me = await request(app).get('/v1/auth/me').set(bearer(token)).expect(200);
   assert.equal(me.body.termsAcceptedVersion, 1);
+
+  // The version has to be the one the account was shown, so a stale acceptance
+  // is refused rather than quietly recorded.
+  const stale = await request(app)
+    .patch(`/v1/users/${user.namespace}`)
+    .set(bearer(token))
+    .send({ termsAcceptedVersion: 99 });
+  assert.equal(stale.status, 422);
+  assert.equal(stale.body.errors[0].field, 'termsAcceptedVersion');
+  assert.match(stale.body.errors[0].message, /current terms version 1/);
 });
 
 test('publish without accepting terms is forbidden', async () => {

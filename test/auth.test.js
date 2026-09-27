@@ -8,6 +8,7 @@ import {
   uniqNs,
   signup,
   signupAccept,
+  acceptTerms,
   FIXTURE_PASSWORD,
 } from './helpers.mjs';
 
@@ -127,7 +128,7 @@ test('terms gate: 403 until accept', async () => {
     .set(bearer(token))
     .send({ displayName: 'Updated' })
     .expect(403);
-  await request(app).post('/v1/terms/accept').set(bearer(token)).expect(204);
+  await acceptTerms(app, ns, token);
   await request(app)
     .patch(`/v1/users/${ns}`)
     .set(bearer(token))

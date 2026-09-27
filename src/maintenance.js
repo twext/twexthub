@@ -1,6 +1,6 @@
-import { readdir, readFile, stat, unlink } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
-import { BLOB_GC_LOCK_KEY, blobPathFor, sha256Hex } from './blobs.js';
+import { BLOB_GC_LOCK_KEY, blobPathFor, removeBlobIfUnused, sha256Hex } from './blobs.js';
 
 // Blob garbage collection: a file under blobs/ whose digest no row references is
 // deleted. Sources are handled by removeSourceIfUnused at the call sites that
@@ -14,8 +14,8 @@ export async function gcBlobs(sql, dataDir) {
   // a read lock on versions for the length of the pass -- long enough to
   // deadlock against a TRUNCATE, which wants an exclusive lock on versions and
   // everything cascading from it. The advisory lock only keeps two instances off
-  // the same directory at once; the unlink below already tolerates losing that
-  // race, so releasing it before the walk costs nothing.
+  // the same directory at once. The unlink is a separate locked step per
+  // candidate, so releasing it before the walk costs nothing.
   const referenced = await sql.begin(async (tx) => {
     await tx`SELECT pg_advisory_xact_lock(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
     const known = await tx`SELECT DISTINCT blob_digest FROM versions WHERE blob_digest IS NOT NULL`;
@@ -58,11 +58,12 @@ export async function gcBlobs(sql, dataDir) {
       const abs = path.join(prefixDir, rest);
       const info = await stat(abs).catch(() => null);
       if (!info || info.mtimeMs > cutoff) continue;
-      try {
-        await unlink(abs);
+      // The snapshot above was taken under the lock, but the walk that follows
+      // it is not, and a publish can claim an aged file in between. The final
+      // check and the unlink both happen under the lock in the helper, so a
+      // digest that gained a reference since the snapshot is kept.
+      if (await removeBlobIfUnused(sql, { dataDir }, digest, null)) {
         removed += 1;
-      } catch {
-        // Gone already, or another sweep got there first.
       }
     }
   }

@@ -1,6 +1,6 @@
-import { stat, unlink } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 import { sniffImageType, supportedImageTypes } from './image-sniff.js';
-import { BLOB_GC_LOCK_KEY, blobPathFor, storeBlobBuffer } from './blobs.js';
+import { BLOB_GC_LOCK_KEY, blobPathFor, removeBlobIfUnused, storeBlobBuffer } from './blobs.js';
 import { payloadTooLarge, unsupportedMediaType } from './errors.js';
 
 // The body parser is built once, when the routes are wired, so it cannot read
@@ -155,9 +155,9 @@ export function profileImagePointer(user, kind) {
  *
  * The blob store is shared with version uploads and is content-addressed, so a
  * digest can be referenced by a version row, by an account's avatar, by that
- * same account's banner, or by all of them. removeBlobIfUnused only knows about
- * versions, so this check spans every table that can name a digest before
- * deleting anything.
+ * same account's banner, or by all of them. removeBlobIfUnused asks about every
+ * one of those under the GC lock before it unlinks, so the check cannot go
+ * stale between the decision and the delete.
  *
  * Callers run this after the pointer update has committed, so the account that
  * just dropped its avatar no longer names those bytes in that column. Excluding
@@ -166,25 +166,5 @@ export function profileImagePointer(user, kind) {
  * the banner.
  */
 export async function removeProfileImageBlob(sql, config, digest) {
-  if (!digest) return false;
-  return sql.begin(async (tx) => {
-    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
-    const [version] = await tx`
-      SELECT 1 FROM versions WHERE blob_digest = ${digest} LIMIT 1
-    `;
-    if (version) return false;
-    const [user] = await tx`
-      SELECT 1 FROM users
-      WHERE avatar_blob_digest = ${digest} OR banner_blob_digest = ${digest}
-      LIMIT 1
-    `;
-    if (user) return false;
-    try {
-      await unlink(blobPathFor(config.dataDir, digest));
-      return true;
-    } catch (error) {
-      if (error.code === 'ENOENT') return false;
-      throw error;
-    }
-  });
+  return removeBlobIfUnused(sql, config, digest, null);
 }

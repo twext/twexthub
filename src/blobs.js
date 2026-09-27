@@ -87,14 +87,24 @@ export async function storeBlobBuffer(dataDir, buffer) {
   }
 }
 
-// Deletes a blob file when no other version row references its digest. Runs
-// under the exclusive GC advisory lock so a publish of the same digest cannot
-// be mid-flight: publishers hold the shared lock from before storeBlob until
-// the version promotion commits, so cleanup either sees the new version row
-// (and keeps the file) or completes before the publisher re-creates it.
+// Deletes a blob file when nothing references its digest. Runs under the
+// exclusive GC advisory lock so a publish of the same digest cannot be
+// mid-flight: publishers hold the shared lock from before storeBlob until the
+// version promotion commits, so cleanup either sees the new version row (and
+// keeps the file) or completes before the publisher re-creates it.
+//
+// The reference check covers profile images as well as versions, because the
+// store is shared and content-addressed: a digest an account's avatar points at
+// is a live blob, and a caller that only knows about versions would free it
+// underneath the account. The sweep's snapshot asks the same question, so a
+// digest that was unreferenced a moment ago and has been claimed since is kept
+// rather than deleted out from under its new owner.
+//
+// Resolves to true when the file was removed, false when it was kept or was
+// already gone. Callers that report how much they collected need the difference.
 export async function removeBlobIfUnused(sql, config, digest, exceptId) {
-  if (!digest) return;
-  await sql.begin(async (tx) => {
+  if (!digest) return false;
+  return sql.begin(async (tx) => {
     await tx`SELECT pg_advisory_xact_lock(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
     // `id != NULL` is never true in SQL, so a null exceptId has to drop the
     // clause entirely rather than filter on it.
@@ -105,11 +115,19 @@ export async function removeBlobIfUnused(sql, config, digest, exceptId) {
       WHERE blob_digest = ${digest} ${exclude}
       LIMIT 1
     `;
-    if (keeper) return;
+    if (keeper) return false;
+    const [profile] = await tx`
+      SELECT 1 FROM users
+      WHERE avatar_blob_digest = ${digest} OR banner_blob_digest = ${digest}
+      LIMIT 1
+    `;
+    if (profile) return false;
     try {
       await unlink(blobPathFor(config.dataDir, digest));
+      return true;
     } catch (error) {
       if (error.code !== 'ENOENT') throw error;
+      return false;
     }
   });
 }

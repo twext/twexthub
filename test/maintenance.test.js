@@ -6,7 +6,7 @@ import request from 'supertest';
 import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
 import { gcBlobs, makeMaintenanceJob, scrubBlobs, getIntegrityErrors } from '../src/maintenance.js';
 import { createDb, reconcileOnBoot } from '../src/db.js';
-import { blobPathFor, sha256Hex } from '../src/blobs.js';
+import { blobPathFor, removeBlobIfUnused, sha256Hex } from '../src/blobs.js';
 
 let app;
 let sql;
@@ -63,6 +63,64 @@ test('gc removes blobs no version references and keeps live ones', async () => {
   assert.ok(fs.existsSync(liveAbs), 'referenced blob survives');
   assert.ok(!fs.existsSync(orphanAbs), 'stale orphan is gone');
   assert.ok(fs.existsSync(freshAbs), 'fresh orphan is left for the next pass');
+});
+
+// A profile image is a reference to the same content-addressed store a version
+// publishes into, and it is not a versions row. The sweep has to treat the
+// account's pointer as a keeper the same way it treats a version, or an avatar
+// is collectable the first time its file passes the age guard.
+test('gc keeps an aged blob that a profile image names', async () => {
+  const ns = (await signupAndAccept(app, uniqNs())).user.namespace;
+  const bytes = Buffer.from('avatar bytes that live in the shared store');
+  const digest = sha256Hex(bytes);
+  const abs = blobPathFor(config.dataDir, digest);
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, bytes);
+  await sql`
+    UPDATE users SET avatar_blob_digest = ${digest}, avatar_content_type = 'image/png'
+    WHERE namespace = ${ns}
+  `;
+  const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  fs.utimesSync(abs, old, old);
+
+  const removed = await gcBlobs(sql, config.dataDir);
+  assert.equal(removed, 0);
+  assert.ok(fs.existsSync(abs), 'a profile image still names these bytes');
+  // Nothing names these bytes once the next test truncates the users table, so
+  // the file is left for that test's sweep to count. Every aged file a test
+  // creates has to be accounted for, or it lands in someone else's total.
+  fs.rmSync(abs, { force: true });
+});
+
+// The sweep reports what it collected, so the final check and the unlink have to
+// come back as one answer rather than a void the caller has to guess at. This is
+// the decision the whole per-candidate locked step exists to make.
+test('removeBlobIfUnused reports whether it freed the file', async () => {
+  const orphan = 'a'.repeat(64);
+  const orphanAbs = blobPathFor(config.dataDir, orphan);
+  fs.mkdirSync(path.dirname(orphanAbs), { recursive: true });
+  fs.writeFileSync(orphanAbs, 'collectable bytes');
+
+  assert.equal(await removeBlobIfUnused(sql, config, orphan, null), true);
+  assert.ok(!fs.existsSync(orphanAbs), 'an unreferenced blob is freed');
+
+  // Already gone: a second sweep, or a caller that lost the race. Not an error,
+  // and not a removal worth reporting.
+  assert.equal(await removeBlobIfUnused(sql, config, orphan, null), false);
+
+  // The same answer for a file an account's avatar names. The helper only ever
+  // looked at versions, so this digest was free to be deleted underneath the
+  // account that pointed at it.
+  const ns = (await signupAndAccept(app, uniqNs())).user.namespace;
+  const held = 'b'.repeat(64);
+  const heldAbs = blobPathFor(config.dataDir, held);
+  fs.mkdirSync(path.dirname(heldAbs), { recursive: true });
+  fs.writeFileSync(heldAbs, 'bytes an avatar still points at');
+  await sql`UPDATE users SET avatar_blob_digest = ${held} WHERE namespace = ${ns}`;
+
+  assert.equal(await removeBlobIfUnused(sql, config, held, null), false);
+  assert.ok(fs.existsSync(heldAbs), 'a profile image names these bytes');
+  fs.rmSync(heldAbs, { force: true });
 });
 
 test('gc keeps a referenced blob however old the file is', async () => {

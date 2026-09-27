@@ -310,3 +310,42 @@ test('a version awaiting moderation is not served by digest', async () => {
   // The moderation queue is where an unapproved version is meant to be read.
   await request(app).get(`/v1/blobs/${row.blob_digest}`).set(bearer(adminToken)).expect(200);
 });
+
+test('a version points at itself, its extension, its author and its bytes', async () => {
+  const { adminToken, ownerToken, ownerNs } = await makeAdminAndOwner();
+  await publishProject(app, ownerNs, 'hello', ownerToken);
+
+  const queued = await request(app)
+    .get('/v1/versions?status=pending')
+    .set(bearer(adminToken))
+    .expect(200);
+  const pending = queued.body.data[0];
+  assert.equal(pending.status, 'pending');
+  assert.equal(pending._links.self, `/v1/@${ownerNs}/hello/versions/${pending.version}`);
+  assert.equal(pending._links.extension, `/v1/@${ownerNs}/hello`);
+  assert.equal(pending._links.author, `/v1/users/${ownerNs}`);
+  // Nothing has been approved, so there are no bytes to point at yet.
+  assert.equal(pending._links.download, undefined);
+  // The source is there, though, and that is what a moderator reads.
+  assert.equal(
+    pending._links.source,
+    pending.sourceUrl,
+    'the source link and the source url are the same page',
+  );
+
+  await approveVersion(app, adminToken, ownerNs, 'hello', pending.version);
+  const got = await request(app)
+    .get(`/v1/@${ownerNs}/hello/versions/${pending.version}`)
+    .expect(200);
+  assert.equal(got.body._links.download, got.body.dist.downloadUrl);
+  assert.equal(got.body._links.self, `/v1/@${ownerNs}/hello/versions/${pending.version}`);
+
+  // Every link a version carries has to be a page that answers, or following it
+  // is a 404 the client has to guess the meaning of.
+  for (const [rel, url] of Object.entries(got.body._links)) {
+    const link = await request(app)
+      .get(url.replace(/^https?:\/\/[^/]+/, ''))
+      .set(bearer(ownerToken));
+    assert.equal(link.status, 200, `version ${rel} link: ${JSON.stringify(link.body)}`);
+  }
+});

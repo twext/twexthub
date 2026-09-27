@@ -85,6 +85,30 @@ export function legalDocumentToObject(row) {
   };
 }
 
+// The pages a version is reachable through, so a client holding one version
+// does not have to know the shape of the paths to it. `self` and `extension`
+// are relative to the API root like the collection links in a paginated body;
+// `download` and `source` are absolute because they are served from
+// publicBaseUrl, which need not be this server.
+function versionLinks(config, row) {
+  const root = normalizeApiRoot(config.apiRoot);
+  const base = root ? `/${root}` : '';
+  const extension = `${base}/@${row.namespace}/${row.extension_id}`;
+  const links = {
+    self: `${extension}/versions/${encodeURIComponent(row.version)}`,
+    extension,
+    author: `${base}/users/${encodeURIComponent(row.namespace)}`,
+  };
+  if (row.status === 'published' || row.status === 'yanked' || row.status === 'deprecated') {
+    links.download = downloadUrl(config, row.namespace, row.extension_id, row.version);
+  }
+  // Only a version the server still holds the source tarball for can be asked
+  // for one, and a private or rejected one is not even asked.
+  if (row.source_path)
+    links.source = sourceUrl(config, row.namespace, row.extension_id, row.version);
+  return links;
+}
+
 export function versionToObject(row, config) {
   const out = {
     namespace: row.namespace,
@@ -112,6 +136,7 @@ export function versionToObject(row, config) {
     }
     out.dist = dist;
   }
+  out._links = versionLinks(config, row);
   return out;
 }
 

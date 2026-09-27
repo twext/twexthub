@@ -1001,6 +1001,43 @@ paths:
     parameters:
       - $ref: '#/components/parameters/NamespacePath'
       - $ref: '#/components/parameters/ExtensionIdPath'
+    get:
+      summary: List an extension's versions
+      operationId: listExtensionVersions
+      tags: [Open]
+      security: []
+      description: >
+        Every version of the extension the caller may read, highest SemVer
+        first, so the first entry is the one a range resolution returns.
+        Yanked versions are excluded, and a version the caller cannot read is
+        left out of the list rather than turning the whole response into a
+        `403` — a range that selects nothing readable is an empty list, not a
+        `404`.
+      parameters:
+        - name: range
+          in: query
+          schema: { type: string }
+          description: >
+            A SemVer range such as `^1.2` or `>=2.0.0 <3`. Omit it for every
+            readable version. A prerelease satisfies a range only when the
+            range names one or is `*`.
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: The matching versions, highest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/VersionInfo' }
+                  pagination: { $ref: '#/components/schemas/CursorPage' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
     post:
       summary: Publish a new version from source
       operationId: publishVersion
@@ -1060,39 +1097,6 @@ paths:
               schema: { $ref: '#/components/schemas/Problem' }
         '422':
           description: Invalid tarball, invalid manifest, or a failed build (the response carries `buildLog` and `buildError`)
-          content:
-            application/problem+json:
-              schema: { $ref: '#/components/schemas/Problem' }
-
-  /@{namespace}/{id}/versions/resolve:
-    parameters:
-      - $ref: '#/components/parameters/NamespacePath'
-      - $ref: '#/components/parameters/ExtensionIdPath'
-    get:
-      summary: Resolve a SemVer range to a concrete version
-      operationId: resolveVersionRange
-      tags: [Open]
-      security: []
-      description: Returns the newest published (or deprecated) version satisfying the range; yanked versions are excluded.
-      parameters:
-        - name: range
-          in: query
-          required: true
-          schema: { type: string }
-          description: A SemVer range such as `^1.2` or `>=2.0.0 <3`.
-      responses:
-        '200':
-          description: The matching version
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/VersionInfo' }
-        '404':
-          description: No published version satisfies the range
-          content:
-            application/problem+json:
-              schema: { $ref: '#/components/schemas/Problem' }
-        '422':
-          description: The range is not valid SemVer
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }

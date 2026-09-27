@@ -40,6 +40,7 @@ import { compileProject } from '../compiler.js';
 import { totalDownloads, hashDownloadAddress } from '../metrics.js';
 import { makeWebhooks, WebhookInputError } from '../webhooks.js';
 import { audit, auditSoon } from '../audit.js';
+import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
 
 export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
   const router = Router();
@@ -124,38 +125,59 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     return await loadVersion(namespace, id, tagRow.version);
   }
 
-  router.get('/@:namespace/:id/versions/resolve', async (req, res) => {
+  // A range is a filter on the collection, not a lookup of its own: the list is
+  // every version the caller can see that satisfies it, highest SemVer first, so
+  // the first entry is the one a "resolve" would have picked.
+  router.get('/@:namespace/:id/versions', async (req, res) => {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
-    const range = typeof req.query.range === 'string' ? req.query.range.trim() : '';
-    if (!range || !semver.validRange(range)) {
+    const { range } = req.query;
+    if (range !== undefined && (typeof range !== 'string' || !semver.validRange(range.trim()))) {
       throw fieldErrors([{ field: 'range', message: 'Must be a valid SemVer range.' }]);
     }
+    const limit = parseLimit(config, req.query.limit);
+    const cursor = decodeCursor(req.query.cursor, { o: 'int' });
+    const offset = cursor ? cursor.o - 1 : 0;
+
     // No extension-level gate here: a namespace whose newest version is private
     // can still have public versions, and the per-row check below is the
-    // stricter one — it reads the visibility of the version actually returned.
+    // stricter one — it reads the visibility of the versions actually returned.
     const rows = await sql`
       SELECT * FROM versions
       WHERE namespace = ${namespace} AND extension_id = ${id}
         AND status IN ('published', 'deprecated')
     `;
-    const candidates = rows
+    const matches = rows
       .map((row) => ({ row, coerced: semver.valid(row.version) }))
       .filter(
         (entry) =>
-          entry.coerced && semver.satisfies(entry.coerced, range, { includePrerelease: true }),
+          entry.coerced &&
+          (range === undefined ||
+            semver.satisfies(entry.coerced, range.trim(), { includePrerelease: true })),
       );
-    // The range may land on a version the caller cannot see, so the choice is
-    // made among the versions they can: a private one is skipped rather than
-    // handed over, and an older public one in range still answers.
+    // A range can land on versions the caller cannot see, so the list is built
+    // from the ones they can: a private one is skipped rather than handed over,
+    // and an older public one in range still appears.
     const readable = [];
-    for (const entry of candidates) {
+    for (const entry of matches) {
       if (await canSee(req.auth?.user, entry.row)) readable.push(entry);
     }
-    const best = maxVersionBySemver(readable.map((entry) => entry.coerced));
-    const match = readable.find((entry) => entry.coerced === best);
-    if (!match) throw notFound('No published version satisfies that range.');
-    res.json(versionToObject(match.row, config));
+    // SemVer order is not something Postgres can sort, and a dist-tag or a
+    // build-metadata string would sort wrong as text, so the ordering happens
+    // here over the versions already filtered.
+    readable.sort((a, b) => semver.rcompare(a.coerced, b.coerced));
+
+    const page = readable.slice(offset, offset + limit);
+    const nextOffset = offset + page.length;
+    const hasMore = nextOffset < readable.length;
+
+    res.json({
+      data: page.map((entry) => versionToObject(entry.row, config)),
+      pagination: {
+        nextCursor: hasMore ? encodeCursor({ o: nextOffset + 1 }) : null,
+        hasMore,
+      },
+    });
   });
 
   router.post(

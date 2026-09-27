@@ -77,7 +77,8 @@ test('private extensions are hidden from public surfaces but visible to the owne
     .expect(404);
   await request(app).get(`/v1/@${ns}/secret`).expect(404);
   await request(app).get(`/v1/@${ns}/secret/versions/1.0.0`).expect(404);
-  await request(app).get(`/v1/@${ns}/secret/versions/resolve?range=^1.0`).expect(404);
+  const secretVersions = await request(app).get(`/v1/@${ns}/secret/versions`).expect(200);
+  assert.deepEqual(secretVersions.body.data, []);
   await request(app).get(`/v1/@${ns}/secret/versions/1.0.0/download`).expect(404);
   await request(app).get(`/v1/@${ns}/secret/versions/1.0.0/source`).expect(401);
   await request(app).get(`/v1/@${ns}/secret/tags`).expect(404);
@@ -172,25 +173,32 @@ test('a semver range never resolves to a version the caller cannot see', async (
     .expect(200);
   await publishProject(app, ns, 'secret', owner.token, { version: '2.0.0', code: '// public' });
 
-  // The extension-level check passes on the public 2.0.0, so the range has to be
-  // narrowed to what the caller may read before the best match is chosen.
-  const anon = await request(app).get(`/v1/@${ns}/secret/versions/resolve?range=1.0.0`);
-  assert.equal(anon.status, 404);
-  const wide = await request(app).get(`/v1/@${ns}/secret/versions/resolve?range=^1.0.0`);
-  assert.equal(wide.status, 404, 'no readable version satisfies the range');
+  // The extension-level check passes on the public 2.0.0, so the list has to be
+  // narrowed to what the caller may read before anything is handed over.
+  const anon = await request(app).get(`/v1/@${ns}/secret/versions?range=1.0.0`).expect(200);
+  assert.deepEqual(anon.body.data, []);
+  // The range holds the private 1.0.0 and the public 2.0.0 outside it, so
+  // nothing readable is left.
+  const wide = await request(app).get(`/v1/@${ns}/secret/versions?range=1.x`);
+  assert.equal(wide.status, 200);
+  assert.deepEqual(wide.body.data, []);
+  const everything = await request(app).get(`/v1/@${ns}/secret/versions?range=*`);
+  assert.deepEqual(
+    everything.body.data.map((v) => v.version),
+    ['2.0.0'],
+    'only the public version is readable anonymously',
+  );
 
   // A range covering the public version still answers, and the owner, who may
   // read 1.0.0, gets it when they ask for it.
-  const publicRange = await request(app)
-    .get(`/v1/@${ns}/secret/versions/resolve?range=2.0.0`)
-    .expect(200);
-  assert.equal(publicRange.body.version, '2.0.0');
+  const publicRange = await request(app).get(`/v1/@${ns}/secret/versions?range=2.0.0`).expect(200);
+  assert.equal(publicRange.body.data[0].version, '2.0.0');
   const asOwner = await request(app)
-    .get(`/v1/@${ns}/secret/versions/resolve?range=1.0.0`)
+    .get(`/v1/@${ns}/secret/versions?range=1.0.0`)
     .set(bearer(owner.token))
     .expect(200);
-  assert.equal(asOwner.body.version, '1.0.0');
-  assert.equal(asOwner.body.visibility, 'private');
+  assert.equal(asOwner.body.data[0].version, '1.0.0');
+  assert.equal(asOwner.body.data[0].visibility, 'private');
 });
 
 test('a private version does not hide the public one before it', async () => {
@@ -210,18 +218,19 @@ test('a private version does not hide the public one before it', async () => {
 
   // The newest row is private, which used to make the whole endpoint answer
   // 404 — including for a range that only the public version satisfies.
-  const anon = await request(app).get(`/v1/@${ns}/later/versions/resolve?range=1.0.0`).expect(200);
-  assert.equal(anon.body.version, '1.0.0');
-  assert.equal(anon.body.visibility, 'public');
+  const anon = await request(app).get(`/v1/@${ns}/later/versions?range=1.0.0`).expect(200);
+  assert.equal(anon.body.data[0].version, '1.0.0');
+  assert.equal(anon.body.data[0].visibility, 'public');
 
-  // The private one is still only returned to someone who may read it.
+  // The private one is still only listed for someone who may read it.
   const asOwner = await request(app)
-    .get(`/v1/@${ns}/later/versions/resolve?range=2.0.0`)
+    .get(`/v1/@${ns}/later/versions?range=2.0.0`)
     .set(bearer(owner.token))
     .expect(200);
-  assert.equal(asOwner.body.version, '2.0.0');
-  const denied = await request(app).get(`/v1/@${ns}/later/versions/resolve?range=2.0.0`);
-  assert.equal(denied.status, 404);
+  assert.equal(asOwner.body.data[0].version, '2.0.0');
+  const denied = await request(app).get(`/v1/@${ns}/later/versions?range=2.0.0`);
+  assert.equal(denied.status, 200);
+  assert.deepEqual(denied.body.data, []);
 });
 
 test('private downloads do not consume anonymous trending slots', async () => {

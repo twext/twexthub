@@ -130,11 +130,14 @@ the ceiling is not a substitute for a sensible source image.
 
 ## Compiler
 
-| Key                  | Default | Environment                    | Purpose                                                         |
-| -------------------- | ------- | ------------------------------ | --------------------------------------------------------------- |
-| `compiler.command`   | —       | `TWEXTHUB_COMPILER`            | Node.js script to run instead of the bundled `@twext/twext` CLI |
-| `compiler.timeoutMs` | `30000` | `TWEXTHUB_COMPILER_TIMEOUT_MS` | Wall-clock limit for one build; the child is SIGKILLed past it  |
-| `compiler.memoryMb`  | `192`   | `TWEXTHUB_COMPILER_MEMORY_MB`  | V8 old-generation heap cap for the build child process          |
+| Key                       | Default | Environment                          | Purpose                                                         |
+| ------------------------- | ------- | ------------------------------------ | --------------------------------------------------------------- |
+| `compiler.command`        | —       | `TWEXTHUB_COMPILER`                  | Node.js script to run instead of the bundled `@twext/twext` CLI |
+| `compiler.timeoutMs`      | `30000` | `TWEXTHUB_COMPILER_TIMEOUT_MS`       | Wall-clock limit for one build; the child is SIGKILLed past it  |
+| `compiler.memoryMb`       | `192`   | `TWEXTHUB_COMPILER_MEMORY_MB`        | V8 old-generation heap cap for the build child process          |
+| `compiler.addressSpaceMb` | `1536`  | `TWEXTHUB_COMPILER_ADDRESS_SPACE_MB` | Process-wide virtual address-space limit for one build          |
+
+The address-space limit uses the Linux shell's `ulimit -v` before it starts Node. It includes V8, native allocations, mapped files, and reserved virtual memory. Node reserves substantially more address space than its resident memory use, so the default is larger than the V8 heap cap. A build fails if the shell cannot set the limit; it never runs without one. Raise both limits if a larger heap is needed. Hosts must provide `/bin/sh` with `ulimit -v` support (the supplied Alpine image does).
 
 ## Logging
 
@@ -172,7 +175,7 @@ data/
 │   └── <xx>/
 │       └── <rest-of-digest>     # uploaded source tarballs, keyed by SHA-256 (durable)
 ├── tmp/                         # build sandboxes and in-flight uploads
-└── quarantine/                  # deleted accounts awaiting final purge
+└── quarantine/                  # scratch space from older account deletes
 ```
 
 `blobs/` and `sources/` hold durable, content-addressed content; both must be preserved. `tmp/` and `quarantine/` are swept of anything older than an hour on boot.

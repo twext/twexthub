@@ -258,6 +258,67 @@ test('the compiler child gets an allowlist, not the server environment', () => {
   assert.deepEqual(Object.keys(env).sort(), ['HOME', 'NO_COLOR', 'PATH']);
 });
 
+test('the build address-space limit also bounds native Buffer allocations', async (t) => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'twext-memory-'));
+  t.after(() => fs.rmSync(projectDir, { recursive: true, force: true }));
+  const script = path.join(projectDir, 'allocate.mjs');
+  fs.writeFileSync(script, 'Buffer.allocUnsafe(2 * 1024 * 1024 * 1024);\n');
+
+  const result = await compileProject(
+    { compiler: { command: script, addressSpaceMb: 1536 } },
+    projectDir,
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.log, /Failed to allocate memory|ERR_MEMORY_ALLOCATION_FAILED/);
+});
+
+test('the configured address-space cap is applied to the compiler process', async (t) => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'twext-memory-'));
+  t.after(() => fs.rmSync(projectDir, { recursive: true, force: true }));
+  const script = path.join(projectDir, 'compiler.mjs');
+  fs.writeFileSync(
+    script,
+    "import fs from 'node:fs'; import path from 'node:path'; const out = process.argv.at(-1); fs.mkdirSync(path.dirname(out), { recursive: true }); fs.writeFileSync(out, 'ok');\n",
+  );
+
+  const normal = await compileProject(
+    { compiler: { command: script, addressSpaceMb: 1536 } },
+    projectDir,
+  );
+  assert.equal(normal.ok, true);
+  const constrained = await compileProject(
+    { compiler: { command: script, addressSpaceMb: 512 } },
+    projectDir,
+  );
+  assert.equal(constrained.ok, false);
+  assert.match(constrained.log, /out of memory|memory allocation/i);
+});
+
+test('a missing memory-limit facility fails before the compiler starts', async (t) => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'twext-memory-'));
+  t.after(() => fs.rmSync(projectDir, { recursive: true, force: true }));
+  const marker = path.join(projectDir, 'started');
+  const script = path.join(projectDir, 'compiler.mjs');
+  const limitShell = path.join(projectDir, 'no-limit.sh');
+  fs.writeFileSync(
+    script,
+    `import fs from 'node:fs'; fs.writeFileSync(${JSON.stringify(marker)}, 'yes');\n`,
+  );
+  fs.writeFileSync(
+    limitShell,
+    '#!/bin/sh\nscript=$2\nshift 3\nulimit() { echo "ulimit unavailable" >&2; return 1; }\neval "$script"\n',
+    { mode: 0o755 },
+  );
+
+  const result = await compileProject({ compiler: { command: script } }, projectDir, {
+    limitShell,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /Could not enforce the compiler address-space limit/);
+  assert.match(result.log, /ulimit unavailable/);
+  assert.equal(fs.existsSync(marker), false);
+});
+
 test('a build that floods its output cannot grow the log without bound', async () => {
   // The compiler command is a script inside the project directory, which is the
   // only place the sandbox lets the child read from.

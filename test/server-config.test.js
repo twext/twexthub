@@ -345,6 +345,7 @@ describe('editable settings', () => {
       'limits.maxProfileImageBytes',
       'compiler.timeoutMs',
       'compiler.memoryMb',
+      'compiler.addressSpaceMb',
     ]) {
       assert.equal(
         EDITABLE_SETTINGS.find((s) => s.key === key).restartRequired,

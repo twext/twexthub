@@ -46,10 +46,10 @@ Both sessions and automation tokens can read the mailbox. There is no admin over
 ## Marking notifications read
 
 ```sh
-curl -X POST -H 'Authorization: Bearer <token>' \
+curl -X PATCH -H 'Authorization: Bearer <token>' \
   -H 'Content-Type: application/json' \
   -d '{"ids":["12","13"]}' \
-  https://hub.example.com/v1/notifications/read
+  https://hub.example.com/v1/notifications
 ```
 
 Send either `ids` (up to 100) or `all: true`, never both. The call is idempotent: ids that were already read or belong to another account are ignored, and the response reports only newly read rows as `updated`.

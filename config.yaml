@@ -25,3 +25,4 @@ limits:
 compiler:
   timeoutMs: 30000
   memoryMb: 192
+  addressSpaceMb: 1536

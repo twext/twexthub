@@ -524,13 +524,17 @@ export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
         // The row is already gone, so no user can still point at these digests.
         ...profileDigests.map((digest) => removeProfileImageBlob(sql, config, digest)),
       ]);
+    } catch (error) {
+      console.error(`blob cleanup deferred for ${target.namespace}: ${error.message}`);
+    }
+    try {
       await Promise.all(
         [...new Set(owned.map((row) => row.source_digest).filter(Boolean))].map((digest) =>
           removeSourceIfUnused(sql, config, digest),
         ),
       );
     } catch (error) {
-      console.error(`blob cleanup deferred for ${target.namespace}: ${error.message}`);
+      console.error(`source cleanup deferred for ${target.namespace}: ${error.message}`);
     }
     res.status(204).end();
   });

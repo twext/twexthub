@@ -51,23 +51,39 @@ function capLog(text, dropped) {
 }
 
 // Compile an extracted project in place. Runs `twext build` in a child process
-// with filesystem, memory, and wall-time limits; returns the compiled bytes and
+// with filesystem, address-space, and wall-time limits; returns the compiled bytes and
 // the build log. `outFile` is forced so a twext.yml with outputPath cannot move
 // the build outside the sandbox directory.
-export function compileProject(config, projectDir, { outFile = null } = {}) {
+export function compileProject(
+  config,
+  projectDir,
+  { outFile = null, limitShell = '/bin/sh' } = {},
+) {
   return new Promise((resolve) => {
     const cli = compilerCommand(config);
     const output = outFile ?? path.join(projectDir, 'dist', 'extension.js');
     const memoryMb = config.compiler?.memoryMb ?? 192;
+    const addressSpaceMb = config.compiler?.addressSpaceMb ?? 1536;
     const timeoutMs = config.compiler?.timeoutMs ?? 30_000;
+
+    if (
+      !Number.isSafeInteger(addressSpaceMb) ||
+      addressSpaceMb < 1 ||
+      !Number.isSafeInteger(addressSpaceMb * 1024)
+    ) {
+      resolve({
+        ok: false,
+        error: 'Invalid compiler address-space limit.',
+        log: '',
+        durationMs: 0,
+      });
+      return;
+    }
 
     // The permission model denies reads outside the project and the registry's
     // own dependencies. Node's model does not gate outbound sockets, so egress
     // isolation is left to the deployment boundary (see docs/hosting.md).
     const args = [
-      // V8's heap cap is the only memory bound a spawn can carry: resourceLimits
-      // is a fork() option and spawn drops it, so buffers outside the old space
-      // are left to whatever limit the host or container sets.
       `--max-old-space-size=${memoryMb}`,
       '--permission',
       `--allow-fs-read=${projectDir}`,
@@ -102,14 +118,28 @@ export function compileProject(config, projectDir, { outFile = null } = {}) {
     const log = () => capLog(`${stdout}${stderr ? `\n${stderr}` : ''}`.trim(), dropped);
     let started = Date.now();
 
-    const child = spawn(process.execPath, args, {
-      cwd: projectDir,
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: timeoutMs,
-      killSignal: 'SIGKILL',
-      windowsHide: true,
-    });
+    // The shell applies RLIMIT_AS before exec. If it cannot set the limit, it
+    // exits 125 without starting Node. The shell is replaced by the compiler,
+    // so the timeout kills the process whose memory is restricted.
+    const child = spawn(
+      limitShell,
+      [
+        '-c',
+        'ulimit -v "$1" || exit 125\n[ "$(ulimit -v)" = "$1" ] || exit 125\nshift\nexec "$@"',
+        'twexthub-build',
+        String(addressSpaceMb * 1024),
+        process.execPath,
+        ...args,
+      ],
+      {
+        cwd: projectDir,
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: timeoutMs,
+        killSignal: 'SIGKILL',
+        windowsHide: true,
+      },
+    );
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk) => {
@@ -128,9 +158,12 @@ export function compileProject(config, projectDir, { outFile = null } = {}) {
     });
     child.on('close', async (code, signal) => {
       if (code !== 0 || (signal && signal !== 'SIGTERM')) {
-        const reason = signal
-          ? `Terminated by ${signal}${signal === 'SIGKILL' ? ' (timed out or out of memory)' : ''}.`
-          : `Compiler exited with code ${code}.`;
+        const reason =
+          code === 125
+            ? 'Could not enforce the compiler address-space limit.'
+            : signal
+              ? `Terminated by ${signal}${signal === 'SIGKILL' ? ' (timed out or out of memory)' : ''}.`
+              : `Compiler exited with code ${code}.`;
         resolve({
           ok: false,
           error: reason,

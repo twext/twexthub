@@ -1,46 +1,138 @@
-import { mkdir, rename, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { rm } from 'node:fs/promises';
 import path from 'node:path';
-import { Router } from 'express';
+import express, { Router } from 'express';
 import { hashPassword, verifyPassword } from '../password.js';
 import { requireSession } from '../auth.js';
-import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
-import { fieldErrors, forbidden, notFound } from '../errors.js';
-import { isValidNamespace } from '../util.js';
-import { userToObject } from '../serialize.js';
+import { removeBlobIfUnused } from '../blobs.js';
+import {
+  MAX_PROFILE_IMAGE_BYTES,
+  profileImagePointer,
+  removeProfileImageBlob,
+  resolveProfileImage,
+  storeProfileImage,
+} from '../profile-images.js';
+import { removeSourceIfUnused } from '../sources.js';
+import { decodeCursor, keysetPage, parseDir, parseLimit } from '../pagination.js';
+import { conflict, fieldErrors, forbidden, HttpError, notFound } from '../errors.js';
+import { isValidNamespace, normalizeApiRoot } from '../util.js';
+import { sessionToObject, userToObject } from '../serialize.js';
 import { notifyUser, roleChangedMessage, tokensRevokedMessage } from '../notify.js';
-import { requireObjectBody } from './shared.js';
+import { createSession, requireObjectBody } from './shared.js';
+import { audit } from '../audit.js';
 
-export function makeUsersRouter({ sql, config, termsGate }) {
+// A bare /^https?:\/\// prefix accepts "https://" with no host and anything the
+// URL parser would reject, so parse it and check what came back.
+function isHttpUrl(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  return parsed.hostname.length > 0;
+}
+
+export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
   const router = Router();
+  const scrypt = config.auth.scrypt;
+  const sessionTtlMs = config.auth.sessionTtlDays * 86_400_000;
+
+  // Creating the account is the same act as signing in, so a new user arrives
+  // with a session already: the response is the user, the session that was
+  // opened for it, and the token to use for both.
+  router.post('/', async (req, res) => {
+    requireObjectBody(req);
+    const { namespace, password, displayName } = req.body;
+
+    const errors = [];
+    if (typeof namespace !== 'string' || !isValidNamespace(namespace)) {
+      errors.push({
+        field: 'namespace',
+        message: 'Must be lowercase letters, digits and hyphens; no leading/trailing hyphen.',
+      });
+    }
+    if (typeof password !== 'string') {
+      errors.push({ field: 'password', message: 'Password is required.' });
+    } else if (password.length < 8) {
+      errors.push({ field: 'password', message: 'Password must be at least 8 characters.' });
+    }
+    if (displayName !== undefined && typeof displayName !== 'string') {
+      errors.push({ field: 'displayName', message: 'Must be a string.' });
+    } else if (displayName !== undefined && displayName.length > 80) {
+      errors.push({
+        field: 'displayName',
+        message: 'Display name must be at most 80 characters.',
+      });
+    }
+    if (errors.length > 0) throw fieldErrors(errors);
+
+    const effectiveDisplayName =
+      typeof displayName === 'string' && displayName.length > 0 ? displayName : namespace;
+
+    await rateLimiter.signupCheck(`signup:${req.ip}`);
+    const passwordHash = await hashPassword(password, scrypt);
+
+    let user;
+    let created;
+    try {
+      await sql.begin(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(hashtext('signup-bootstrap'))`;
+        const [{ count }] = await tx`SELECT count(*)::int AS count FROM users`;
+        const role = count === 0 ? 'admin' : 'normal';
+        [user] = await tx`
+          INSERT INTO users (namespace, display_name, password_hash, role)
+          VALUES (${namespace}, ${effectiveDisplayName}, ${passwordHash}, ${role})
+          RETURNING *
+        `;
+        created = await createSession(tx, user.id, sessionTtlMs);
+      });
+    } catch (error) {
+      if (error.code === '23505') throw conflict('That namespace is already taken.');
+      throw error;
+    }
+
+    const root = normalizeApiRoot(config.apiRoot);
+    res
+      .location(`${root ? `/${root}` : ''}/users/${user.namespace}`)
+      .status(201)
+      .json({
+        user: userToObject(user, config),
+        session: sessionToObject(created.session),
+        token: created.token,
+      });
+  });
 
   function serializePublicUser(row, req) {
     const isOwner = req.auth?.user.namespace === row.namespace;
     const isAdmin = req.auth?.user.role === 'admin';
-    if (isOwner || isAdmin) return userToObject(row);
-    const { role: _role, termsAcceptedVersion: _terms, ...rest } = userToObject(row);
+    if (isOwner || isAdmin) return userToObject(row, config);
+    const { role: _role, termsAcceptedVersion: _terms, ...rest } = userToObject(row, config);
     return rest;
   }
 
   router.get('/', async (req, res) => {
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor, { i: 'int' });
+    const back = parseDir(req.query.dir);
 
     const rows = await sql`
       SELECT * FROM users
-      ${cursor ? sql`WHERE id < ${cursor.i}` : sql``}
-      ORDER BY id DESC
+      ${cursor ? (back ? sql`WHERE id > ${cursor.i}` : sql`WHERE id < ${cursor.i}`) : sql``}
+      ORDER BY id ${back ? sql`ASC` : sql`DESC`}
       LIMIT ${limit + 1}
     `;
 
-    const hasMore = rows.length > limit;
-    const page = hasMore ? rows.slice(0, limit) : rows;
-    const last = page[page.length - 1];
-    const nextCursor = hasMore && last ? encodeCursor({ i: Number(last.id) }) : null;
-
-    res.json({
-      data: page.map((user) => serializePublicUser(user, req)),
-      pagination: { nextCursor, hasMore },
-    });
+    res.json(
+      keysetPage(req, rows, {
+        limit,
+        back,
+        cursor,
+        serialize: (user) => serializePublicUser(user, req),
+        keyOf: (user) => ({ i: Number(user.id) }),
+      }),
+    );
   });
 
   router.get('/:namespace', async (req, res) => {
@@ -50,21 +142,181 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     res.json(serializePublicUser(user, req));
   });
 
-  function skipTermsForPasswordOnly(req, res, next) {
-    const { displayName, password, role } = req.body ?? {};
-    if (password !== undefined && displayName === undefined && role === undefined) return next();
-    return termsGate(req, res, next);
+  // One endpoint per image kind serves all three states in priority order: an
+  // uploaded image is streamed from the blob store, an external reference is
+  // redirected, and an avatar with neither falls back to the namespace
+  // identicon. Serving the upload here rather than publishing a blob URL keeps
+  // the URL stable across re-uploads, so an extension that cached it does not
+  // break when the picture changes.
+  const serveProfileImage = (kind, fallback) => async (req, res) => {
+    if (!isValidNamespace(req.params.namespace)) throw notFound();
+    const [user] = await sql`SELECT * FROM users WHERE namespace = ${req.params.namespace}`;
+    if (!user) throw notFound();
+    // The upload is tried first because an account can hold both, and the file
+    // it uploaded is the one the instance is responsible for serving.
+    const stored = await resolveProfileImage(config, user, kind);
+    if (stored) {
+      // A URL carrying the digest names the exact bytes, so it can be cached
+      // hard: a replacement upload is published under a new URL rather than
+      // served behind the old one. The path without a version is the same
+      // before and after a re-upload, so it revalidates instead, and a stale
+      // version is sent to the current one rather than answered with bytes the
+      // URL did not name.
+      const asked = typeof req.query.v === 'string' ? req.query.v : null;
+      if (asked !== null && asked !== stored.digest.slice(0, 16)) {
+        res.redirect(
+          302,
+          `${req.baseUrl}/${user.namespace}/${kind}?v=${stored.digest.slice(0, 16)}`,
+        );
+        return;
+      }
+      if (asked === null) {
+        res.set('Cache-Control', 'public, max-age=0, must-revalidate');
+        res.set('ETag', `"${stored.digest}"`);
+        if (req.headers['if-none-match'] === `"${stored.digest}"`) {
+          res.status(304).end();
+          return;
+        }
+      } else {
+        res.set('Cache-Control', 'public, max-age=31536000, immutable');
+      }
+      res.set('Content-Type', stored.contentType);
+      // The validator reads the leading signature only, so an upload can carry
+      // anything after it. These bytes are served from the API origin, and
+      // nosniff is what keeps a browser from reading past the declared type.
+      res.set('X-Content-Type-Options', 'nosniff');
+      if (stored.expectedSize !== null && stored.expectedSize !== stored.size) {
+        // The row and the file disagree. Serving a truncated image is worse than
+        // reporting the damage, so fail loudly instead of caching it.
+        throw new HttpError(500, {
+          title: 'Internal Server Error',
+          detail: `Stored ${kind} image does not match its recorded size.`,
+        });
+      }
+      res.set('Content-Length', String(stored.size));
+      res.sendFile(stored.abs);
+      return;
+    }
+    const external = kind === 'avatar' ? user.avatar_url : user.banner_url;
+    if (external) {
+      res.redirect(external);
+      return;
+    }
+    if (!fallback) throw notFound('No banner has been set.');
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.type('image/svg+xml').send(identiconSvg(user.namespace));
+  };
+
+  router.get('/:namespace/avatar', serveProfileImage('avatar', true));
+  router.get('/:namespace/banner', serveProfileImage('banner', false));
+
+  // Raw bodies rather than multipart: the account uploads one file, the file is
+  // the entire payload, and parsing multipart here would mean accepting a
+  // second content type that carries no extra meaning for this endpoint.
+  const uploadProfileImage = (kind) => [
+    requireSession,
+    express.raw({
+      type: ['image/*', 'application/octet-stream'],
+      // The ceiling, not the limit: the parser is built once, so it reads up to
+      // the largest body any configuration allows and validateProfileImage
+      // applies the configured limit on the request that arrives.
+      limit: MAX_PROFILE_IMAGE_BYTES,
+    }),
+    async (req, res) => {
+      const target = await loadUserOr404(sql, req.params.namespace);
+      if (req.auth.user.namespace !== target.namespace) {
+        throw forbidden('You can only change your own profile images.');
+      }
+      const declared = req.get('content-type');
+      const stored = await storeProfileImage(sql, config, target, kind, req.body, declared);
+      // The replaced image is only unlinked after the new pointer is committed,
+      // and only when nothing else references those bytes.
+      if (stored.previous && stored.previous !== stored.digest) {
+        await removeProfileImageBlob(sql, config, stored.previous);
+      }
+      const [updated] = await sql`SELECT * FROM users WHERE id = ${target.id}`;
+      res.json(userToObject(updated, config));
+    },
+  ];
+
+  router.put('/:namespace/avatar', ...uploadProfileImage('avatar'));
+  router.put('/:namespace/banner', ...uploadProfileImage('banner'));
+
+  // Removes an upload. An external reference, if the account has one, becomes
+  // the image again; otherwise the profile falls back to the identicon for an
+  // avatar and to no banner at all.
+  const deleteProfileImage = (kind) => [
+    requireSession,
+    async (req, res) => {
+      const target = await loadUserOr404(sql, req.params.namespace);
+      if (req.auth.user.namespace !== target.namespace) {
+        throw forbidden('You can only change your own profile images.');
+      }
+      const { digest, updates } = profileImagePointer(target, kind);
+      const [updated] = await sql`
+        UPDATE users
+        SET ${sql(updates)}
+        WHERE id = ${target.id}
+        RETURNING *
+      `;
+      if (digest) await removeProfileImageBlob(sql, config, digest);
+      res.json(userToObject(updated, config));
+    },
+  ];
+
+  router.delete('/:namespace/avatar', ...deleteProfileImage('avatar'));
+  router.delete('/:namespace/banner', ...deleteProfileImage('banner'));
+
+  // A pure password change stays reachable when the terms have moved on, so an
+  // account can still be secured. The old check read "any profile field is
+  // present" and so was always false next to a password, which meant a password
+  // field alone waved the whole request through: attaching one smuggled a
+  // profile or role edit past the gate too. Only the fields that are themselves
+  // gated or ungated alike are exempt: a password change has to work before the
+  // terms are accepted (it is the way out of a locked account), and so does the
+  // acceptance itself.
+  function skipTermsForAcceptance(req, res, next) {
+    const {
+      password,
+      currentPassword: _currentPassword,
+      termsAcceptedVersion,
+      ...rest
+    } = req.body ?? {};
+    const onlyUngated =
+      (password !== undefined || termsAcceptedVersion !== undefined) &&
+      Object.values(rest).every((value) => value === undefined);
+    return onlyUngated ? next() : termsGate(req, res, next);
   }
 
-  router.patch('/:namespace', requireSession, skipTermsForPasswordOnly, async (req, res) => {
+  router.patch('/:namespace', requireSession, skipTermsForAcceptance, async (req, res) => {
     const target = await loadUserOr404(sql, req.params.namespace);
     if (req.auth.user.namespace !== target.namespace && req.auth.user.role !== 'admin') {
       throw forbidden('Only an admin can update another account.');
     }
     requireObjectBody(req);
 
-    const { displayName, password, role } = req.body;
-    if (displayName === undefined && password === undefined && role === undefined) {
+    const {
+      displayName,
+      password,
+      role,
+      bio,
+      website,
+      github,
+      avatarUrl,
+      bannerUrl,
+      termsAcceptedVersion,
+    } = req.body;
+    if (
+      displayName === undefined &&
+      password === undefined &&
+      role === undefined &&
+      bio === undefined &&
+      website === undefined &&
+      github === undefined &&
+      avatarUrl === undefined &&
+      bannerUrl === undefined &&
+      termsAcceptedVersion === undefined
+    ) {
       throw fieldErrors([{ field: 'body', message: 'Provide at least one field to update.' }]);
     }
 
@@ -77,6 +329,60 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     }
     if (role !== undefined && role !== 'admin' && role !== 'normal') {
       errors.push({ field: 'role', message: 'Role must be "admin" or "normal".' });
+    }
+    if (bio !== undefined && bio !== null && (typeof bio !== 'string' || bio.length > 280)) {
+      errors.push({
+        field: 'bio',
+        message: 'Must be a string of at most 280 characters, or null.',
+      });
+    }
+    for (const [field, value] of [
+      ['website', website],
+      ['avatarUrl', avatarUrl],
+      ['bannerUrl', bannerUrl],
+    ]) {
+      if (value === undefined || value === null) continue;
+      if (typeof value !== 'string' || value.length > 400 || !isHttpUrl(value)) {
+        errors.push({
+          field,
+          message: 'Must be an http(s) URL of at most 400 characters, or null to clear.',
+        });
+      }
+    }
+    if (github !== undefined && github !== null) {
+      if (
+        typeof github !== 'string' ||
+        !/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/.test(github)
+      ) {
+        errors.push({
+          field: 'github',
+          message: 'Must be a GitHub username, or null to clear.',
+        });
+      }
+    }
+    // The client sends back the version it actually read, so an acceptance
+    // cannot be recorded against text the account never saw. A stale one means
+    // the terms changed since: the client has to read them again. Only an
+    // integer or a digit-only string can name a version -- String() would
+    // otherwise coerce one into shape from, say, an array ["1"] -- and the row
+    // records the server's own current version rather than the spelling that
+    // arrived.
+    let currentTermsVersion = null;
+    if (termsAcceptedVersion !== undefined) {
+      const wellFormed =
+        (typeof termsAcceptedVersion === 'number' && Number.isInteger(termsAcceptedVersion)) ||
+        (typeof termsAcceptedVersion === 'string' && /^\d+$/.test(termsAcceptedVersion));
+      const [terms] = await sql`SELECT version FROM legal_documents WHERE kind = 'terms'`;
+      if (!terms) {
+        throw notFound('There are no terms to accept yet.');
+      }
+      currentTermsVersion = Number(terms.version);
+      if (!wellFormed || String(termsAcceptedVersion) !== String(currentTermsVersion)) {
+        errors.push({
+          field: 'termsAcceptedVersion',
+          message: `Must be the current terms version ${currentTermsVersion}. Read GET /v1/terms to see it.`,
+        });
+      }
     }
     if (errors.length > 0) throw fieldErrors(errors);
 
@@ -93,6 +399,34 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     if (role !== undefined) {
       patch.role = role;
       columns.push('role');
+    }
+    if (bio !== undefined) {
+      patch.bio = bio ?? '';
+      columns.push('bio');
+    }
+    if (website !== undefined) {
+      patch.website = website;
+      columns.push('website');
+    }
+    if (github !== undefined) {
+      patch.github = github;
+      columns.push('github');
+    }
+    // A URL is recorded whether or not the account also has an upload. The
+    // upload stays the face of the profile and this is the fallback, so
+    // clearing the link later never silently discards a file the account
+    // still serves, and uploading a file never discards a link.
+    if (avatarUrl !== undefined) {
+      patch.avatar_url = avatarUrl;
+      columns.push('avatar_url');
+    }
+    if (bannerUrl !== undefined) {
+      patch.banner_url = bannerUrl;
+      columns.push('banner_url');
+    }
+    if (termsAcceptedVersion !== undefined) {
+      patch.terms_accepted_version = currentTermsVersion;
+      columns.push('terms_accepted_version');
     }
     if (password !== undefined) {
       if (req.auth.user.role !== 'admin') {
@@ -129,12 +463,22 @@ export function makeUsersRouter({ sql, config, termsGate }) {
       }
       if (role !== undefined) {
         await notifyUser(tx, target.id, 'role.changed', roleChangedMessage(role), { role });
+        await audit(
+          tx,
+          req.auth.user,
+          'role.change',
+          { namespace: target.namespace },
+          {
+            role,
+            previousRole: target.role,
+          },
+        );
       }
       return tx`SELECT * FROM users WHERE id = ${target.id}`;
     });
     if (!updated) throw notFound();
 
-    res.json(userToObject(updated));
+    res.json(userToObject(updated, config));
   });
 
   router.delete('/:namespace', requireSession, async (req, res) => {
@@ -142,40 +486,55 @@ export function makeUsersRouter({ sql, config, termsGate }) {
     if (req.auth.user.namespace !== target.namespace && req.auth.user.role !== 'admin') {
       throw forbidden('Only an admin can delete another account.');
     }
-    // Quarantine the account's blobs before committing the row delete: if the
-    // DELETE fails the directory is restored, and after commit a failed purge
-    // is left in quarantine for the boot-time sweep instead of orphaning data.
-    const blobsDir = path.join(config.dataDir, 'blobs', target.namespace);
-    const quarantineDir = path.join(config.dataDir, 'quarantine');
-    const parked = path.join(quarantineDir, `${target.namespace}-${Date.now()}`);
-    let parkedPath = null;
-    try {
-      await mkdir(quarantineDir, { recursive: true });
-      await rename(blobsDir, parked);
-      parkedPath = parked;
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-    }
+    // Blobs and sources are content-addressed under blobs/<xx>/<rest> and
+    // sources/<xx>/<rest>, not under a per-namespace directory, so the digests
+    // have to be read before the DELETE: it cascades the version rows away and
+    // they are the only record of which files this account put on disk.
+    const owned = await sql`
+      SELECT DISTINCT blob_digest, blob_path, source_digest
+      FROM versions
+      WHERE owner_id = ${target.id}
+    `;
+    // Uploaded images are named by the users row itself, so they have to be
+    // read before the DELETE takes it away.
+    const profileDigests = [target.avatar_blob_digest, target.banner_blob_digest].filter(Boolean);
+    await sql`DELETE FROM users WHERE id = ${target.id}`;
 
+    // Only after the commit: a failed DELETE leaves the rows, and the keeper
+    // check keeps any digest another account's version still references.
+    // A cleanup failure costs disk, not correctness -- the boot-time sweep in
+    // db.js collects whatever is left unreferenced.
+    // blob_path is set on digest-backed rows too, so the legacy unlink is
+    // mutually exclusive with the digest path: doing both would delete a file
+    // the keeper check had just decided to keep.
+    const legacyPaths = [
+      ...new Set(
+        owned
+          .filter((row) => !row.blob_digest)
+          .map((row) => row.blob_path)
+          .filter(Boolean),
+      ),
+    ];
     try {
-      await sql`DELETE FROM users WHERE id = ${target.id}`;
+      await Promise.all([
+        ...owned
+          .map((row) => (row.blob_digest ? removeBlobIfUnused(sql, config, row.blob_digest) : null))
+          .filter(Boolean),
+        ...legacyPaths.map((rel) => rm(path.join(config.dataDir, rel), { force: true })),
+        // The row is already gone, so no user can still point at these digests.
+        ...profileDigests.map((digest) => removeProfileImageBlob(sql, config, digest)),
+      ]);
     } catch (error) {
-      if (parkedPath) {
-        try {
-          await rename(parked, blobsDir);
-        } catch {
-          // leave in quarantine for the boot-time sweep
-        }
-      }
-      throw error;
+      console.error(`blob cleanup deferred for ${target.namespace}: ${error.message}`);
     }
-
-    if (parkedPath) {
-      try {
-        await rm(parked, { recursive: true, force: true });
-      } catch (error) {
-        console.error(`quarantine cleanup deferred for ${target.namespace}: ${error.message}`);
-      }
+    try {
+      await Promise.all(
+        [...new Set(owned.map((row) => row.source_digest).filter(Boolean))].map((digest) =>
+          removeSourceIfUnused(sql, config, digest),
+        ),
+      );
+    } catch (error) {
+      console.error(`source cleanup deferred for ${target.namespace}: ${error.message}`);
     }
     res.status(204).end();
   });
@@ -188,4 +547,31 @@ async function loadUserOr404(sql, namespace) {
   const [user] = await sql`SELECT * FROM users WHERE namespace = ${namespace}`;
   if (!user) throw notFound();
   return user;
+}
+
+// 8x8 horizontally-mirrored identicon: the left 4 columns are decided by the
+// namespace's SHA-256, then mirrored. Two of the hash bytes pick one of six
+// hue-rotated foreground colors on a fixed light background.
+function identiconSvg(namespace) {
+  const hash = createHash('sha256').update(namespace).digest();
+  const cells = [];
+  for (let y = 0; y < 8; y += 1) {
+    const left = [];
+    for (let x = 0; x < 4; x += 1) {
+      left.push(hash[y * 4 + x] % 2 === 1);
+    }
+    cells.push([...left, ...left.toReversed()]);
+  }
+  const hue = hash[31] % 360;
+  const rect = [];
+  for (let y = 0; y < 8; y += 1) {
+    for (let x = 0; x < 8; x += 1) {
+      if (cells[y][x]) rect.push(`<rect x="${x * 12}" y="${y * 12}" width="12" height="12"/>`);
+    }
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96">
+  <rect width="96" height="96" fill="hsl(${hue}, 18%, 92%)"/>
+  <g fill="hsl(${hue}, 55%, 45%)">${rect.join('')}</g>
+</svg>
+`;
 }

@@ -25,7 +25,7 @@ Admins act with a session token. To get one for scripting the queue:
 ```sh
 curl -X POST -H 'Content-Type: application/json' \
   -d '{"namespace":"alice","password":"…"}' \
-  https://hub.example.com/v0/auth/login
+  https://hub.example.com/v1/sessions
 ```
 
 The response includes `token`; every admin endpoint below takes it as `Authorization: Bearer <token>`. Automation tokens are rejected by admin endpoints.
@@ -34,11 +34,11 @@ The response includes `token`; every admin endpoint below takes it as `Authoriza
 
 A submitted version moves `staging → pending → published`, or `pending → rejected`. A published version can later be `yanked`.
 
-- The first publish from an owner is held in `pending` until an admin approves it.
-- Once an owner has any published version, every later publish skips review and goes straight to `published`.
-- An owner can have only one version in the queue (`staging` or `pending`) at a time. To let a publisher correct and resubmit, reject the queued version — the rejection stores a reason and frees the slot.
+- The namespace account's first publish is held in `pending` until an admin approves it, including a publish submitted by a co-owner.
+- Once the namespace has a published version, later publishes to it skip review and go straight to `published`.
+- A publishing account can have only one version in the queue (`staging` or `pending`) at a time. To let a publisher correct and resubmit, reject the queued version — the rejection stores a reason and frees the slot.
 
-Rejected, staging, and pending versions are neither listed publicly nor downloadable.
+Rejected and staging versions are neither listed publicly nor downloadable. Pending versions are available to an admin with a session token for review.
 
 ## Reviewing the queue
 
@@ -46,10 +46,10 @@ List submissions, oldest first:
 
 ```sh
 curl -H 'Authorization: Bearer <session-token>' \
-  'https://hub.example.com/v0/versions?status=pending'
+  'https://hub.example.com/v1/versions?status=pending'
 ```
 
-Returns the pending versions with namespace, id, version, name, license, description, and timestamps. The list is paginated with `?limit` and `?cursor`.
+Returns the pending versions with namespace, id, version, name, license, description, build log, source URL, and timestamps. The list is paginated with `?limit` and `?cursor`.
 
 Approve:
 
@@ -57,7 +57,7 @@ Approve:
 curl -X PATCH -H 'Authorization: Bearer <session-token>' \
   -H 'Content-Type: application/json' \
   -d '{"status":"approved"}' \
-  https://hub.example.com/v0/@alice/myext/versions/1.0.0
+  https://hub.example.com/v1/@alice/myext/versions/1.0.0
 ```
 
 Reject — a reason is required:
@@ -66,32 +66,32 @@ Reject — a reason is required:
 curl -X PATCH -H 'Authorization: Bearer <session-token>' \
   -H 'Content-Type: application/json' \
   -d '{"status":"rejected","reason":"The block ID collides with an existing extension."}' \
-  https://hub.example.com/v0/@alice/myext/versions/1.0.0
+  https://hub.example.com/v1/@alice/myext/versions/1.0.0
 ```
 
-Approving publishes the version, sets its `publishedAt`, and marks the owner as established so their next publish skips the queue.
+Approving publishes the version, sets its `publishedAt`, and marks the namespace account as established so its next publish skips the queue, including one submitted by a co-owner.
 
-The version address is `@<namespace>/<id>/versions/<version>`, under your `apiRoot` (default `/v0`).
+The version address is `@<namespace>/<id>/versions/<version>`, under your `apiRoot` (default `/v1`).
 
 ## Terms and privacy
 
 The registry can carry terms of service and a privacy policy. Neither exists until you publish it — the public endpoints return 404 beforehand.
 
-- `PATCH /v0/admin/terms` with `{"body":"…"}` publishes the terms; `PATCH /v0/admin/privacy` does the same for privacy. Each update bumps the document version. On a fresh registry the first call creates the document.
-- A terms bump forces every publisher to accept the new version before publishing again; the publish gate and other write endpoints reject them until `POST /v0/terms/accept`. Existing published versions keep serving.
-- The current documents are public at `GET /v0/terms` and `GET /v0/privacy`.
+- `PATCH /v1/admin/terms` with `{"body":"…"}` publishes the terms; `PATCH /v1/admin/privacy` does the same for privacy. Each update bumps the document version. On a fresh registry the first call creates the document.
+- A terms bump forces every publisher to accept the new version before publishing again; the publish gate and other write endpoints reject them until the account patches itself with the new `termsAcceptedVersion`. Existing published versions keep serving.
+- The current documents are public at `GET /v1/terms` and `GET /v1/privacy`.
 
-Order matters when bootstrapping: create the terms document first, then accept it, then create the privacy document — approving a later terms bump requires having accepted the current one.
+Order matters when bootstrapping: create the terms document first, then accept it with `PATCH /v1/users/{namespace}`, then create the privacy document — approving a later terms bump requires having accepted the current one.
 
 ## Accounts and roles
 
 Roles are `admin` and `normal`. Only admins change roles or act on other accounts.
 
-- `PATCH /v0/users/:namespace` updates `displayName`, `role`, or `password` — self-service for your own password, or anything as admin for another account.
+- `PATCH /v1/users/:namespace` updates `displayName`, `role`, or `password` — self-service for your own password, or anything as admin for another account.
 - Resetting a password revokes every session and automation token on that account.
-- `DELETE /v0/users/:namespace` deletes the account, its versions, and its blobs. Published extensions disappear from the registry; the blob directory is quarantined and purged.
+- `DELETE /v1/users/:namespace` deletes the account and its versions. Unreferenced blobs and source tarballs are removed after the database delete; shared content remains available to other accounts.
 
-Sessions and automation tokens can be listed and revoked per account under `/v0/sessions` and `/v0/tokens`.
+Sessions and automation tokens can be listed and revoked per account under `/v1/sessions` and `/v1/tokens`.
 
 ## Automation tokens and CI
 

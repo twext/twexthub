@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../auth.js';
-import { fieldErrors, HttpError } from '../errors.js';
-import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
+import { fieldErrors, HttpError, notFound } from '../errors.js';
+import { decodeCursor, keysetPage, parseDir, parseLimit } from '../pagination.js';
 import { notificationToObject } from '../serialize.js';
 import { requireObjectBody } from './shared.js';
 
@@ -14,6 +14,7 @@ export function makeNotificationsRouter({ sql, config }) {
   router.get('/', guard, async (req, res) => {
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor, { i: 'int' });
+    const back = parseDir(req.query.dir);
     const { unread } = req.query;
     if (unread !== undefined && unread !== 'true') {
       throw new HttpError(400, { title: 'Bad Request', detail: 'Invalid unread.' });
@@ -23,15 +24,10 @@ export function makeNotificationsRouter({ sql, config }) {
       SELECT * FROM notifications
       WHERE user_id = ${req.auth.user.id}
         ${unread === 'true' ? sql`AND read_at IS NULL` : sql``}
-        ${cursor ? sql`AND id < ${cursor.i}` : sql``}
-      ORDER BY id DESC
+        ${cursor ? (back ? sql`AND id > ${cursor.i}` : sql`AND id < ${cursor.i}`) : sql``}
+      ORDER BY id ${back ? sql`ASC` : sql`DESC`}
       LIMIT ${limit + 1}
     `;
-
-    const hasMore = rows.length > limit;
-    const page = hasMore ? rows.slice(0, limit) : rows;
-    const last = page[page.length - 1];
-    const nextCursor = hasMore && last ? encodeCursor({ i: Number(last.id) }) : null;
 
     const [counts] = await sql`
       SELECT
@@ -41,14 +37,22 @@ export function makeNotificationsRouter({ sql, config }) {
       WHERE user_id = ${req.auth.user.id}
     `;
 
-    res.json({
-      data: page.map(notificationToObject),
-      unreadCount: Number(counts.unread),
-      pagination: { nextCursor, hasMore },
-    });
+    res.json(
+      keysetPage(req, rows, {
+        limit,
+        back,
+        cursor,
+        serialize: notificationToObject,
+        keyOf: (row) => ({ i: Number(row.id) }),
+        extra: { unreadCount: Number(counts.unread) },
+      }),
+    );
   });
 
-  router.post('/read', guard, async (req, res) => {
+  // Read state is a property of the notification, so it is patched on the
+  // resource: the collection form for a client's whole mailbox or a chosen set,
+  // and the single form for the one it just rendered.
+  router.patch('/', guard, async (req, res) => {
     requireObjectBody(req);
     const { ids, all } = req.body;
     if ((ids === undefined) === (all === undefined)) {
@@ -88,6 +92,18 @@ export function makeNotificationsRouter({ sql, config }) {
       RETURNING id
     `;
     res.json({ updated: updated.count });
+  });
+
+  router.patch('/:id', guard, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) throw notFound();
+    const [row] = await sql`
+      UPDATE notifications SET read_at = now()
+      WHERE id = ${id} AND user_id = ${req.auth.user.id}
+      RETURNING *
+    `;
+    if (!row) throw notFound();
+    res.json(notificationToObject(row));
   });
 
   return router;

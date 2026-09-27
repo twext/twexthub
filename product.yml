@@ -1,5 +1,5 @@
 name: 'TwextHub'
-version: '0.4.0'
+version: '1.0.0'
 tagline: 'A lightweight registry of Twext-compiled extensions ("Twexts") for use in TurboWarp'
 author: 'Twext Team'
 homepage: 'https://github.com/twext/twexthub'
@@ -10,5 +10,5 @@ symbols:
   bullet: '•'
 defaults:
   configFilename: 'config.yaml'
-  apiRoot: '/v0'
+  apiRoot: '/v1'
   fallbackColor: '#0070F3'

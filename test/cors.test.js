@@ -7,7 +7,7 @@ import request from 'supertest';
 import express from 'express';
 import { boot } from './helpers.mjs';
 import { makeCors } from '../src/cors.js';
-import { loadConfig } from '../src/config.js';
+import { DEFAULTS, loadConfig } from '../src/config.js';
 
 let app;
 before(async () => {
@@ -18,14 +18,14 @@ after(async () => {
 });
 
 test('cross-origin reads are allowed with the wildcard by default', async () => {
-  const res = await request(app).get('/v0/meta').set('Origin', 'https://example.com');
+  const res = await request(app).get('/v1/meta').set('Origin', 'https://example.com');
   assert.equal(res.status, 200);
   assert.equal(res.headers['access-control-allow-origin'], '*');
 });
 
 test('preflight requests get the allow headers', async () => {
   const res = await request(app)
-    .options('/v0/extensions')
+    .options('/v1/extensions')
     .set('Origin', 'https://example.com')
     .set('Access-Control-Request-Method', 'GET');
   assert.equal(res.status, 204);
@@ -36,7 +36,7 @@ test('preflight requests get the allow headers', async () => {
 });
 
 test('requests without an Origin get no CORS headers', async () => {
-  const res = await request(app).get('/v0/meta');
+  const res = await request(app).get('/v1/meta');
   assert.equal(res.status, 200);
   assert.equal(res.headers['access-control-allow-origin'], undefined);
 });
@@ -91,6 +91,30 @@ test('loadConfig reads cors.allowedOrigins from the config file', () => {
   );
   const config = loadConfig(file);
   assert.deepEqual(config.cors.allowedOrigins, ['https://a.example', 'https://b.example']);
+});
+
+// The docs offer `null` as the way to switch a rate-limit bucket off, and the
+// config file is where an operator reaches for it. The merge used to read a null
+// as "not set" and hand back the default, so the line that was supposed to turn
+// the bucket off left it running.
+test('loadConfig keeps the null that switches a rate-limit bucket off', () => {
+  const file = tempConfig(
+    [
+      'database:',
+      '  url: postgres://u@localhost:5432/db',
+      'rateLimits:',
+      '  publishPerWindow: null',
+      '  downloadsPerIpPerWindow: null',
+      'pagination:',
+      '  maxLimit: null',
+    ].join('\n'),
+  );
+  const config = loadConfig(file);
+  assert.equal(config.rateLimits.publishPerWindow, null);
+  assert.equal(config.rateLimits.downloadsPerIpPerWindow, null);
+  // Every other key still reads a null as "not set". That is what keeps a
+  // mistyped quota from blanking itself.
+  assert.equal(config.pagination.maxLimit, DEFAULTS.pagination.maxLimit);
 });
 
 test('TWEXTHUB_CORS_ALLOWED_ORIGINS parses as a list or a wildcard', () => {

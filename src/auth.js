@@ -53,7 +53,8 @@ function shouldTouchLastUsed(lastUsedAt) {
 async function lookupToken(sql, hash) {
   const [session] = await sql`
     SELECT s.id AS token_id, s.expires_at, s.last_used_at,
-      u.id, u.namespace, u.display_name, u.role, u.has_published, u.terms_accepted_version, u.created_at
+      u.id, u.namespace, u.display_name, u.role, u.has_published, u.terms_accepted_version, u.created_at,
+      u.bio, u.website, u.github, u.avatar_url, u.banner_url, u.avatar_blob_digest, u.banner_blob_digest
     FROM sessions s
     JOIN users u ON u.id = s.user_id
     WHERE s.token_hash = ${hash}
@@ -71,7 +72,8 @@ async function lookupToken(sql, hash) {
 
   const [token] = await sql`
     SELECT t.id AS token_id, t.expires_at, t.last_used_at, t.scopes,
-      u.id, u.namespace, u.display_name, u.role, u.has_published, u.terms_accepted_version, u.created_at
+      u.id, u.namespace, u.display_name, u.role, u.has_published, u.terms_accepted_version, u.created_at,
+      u.bio, u.website, u.github, u.avatar_url, u.banner_url, u.avatar_blob_digest, u.banner_blob_digest
     FROM automation_tokens t
     JOIN users u ON u.id = t.user_id
     WHERE t.token_hash = ${hash}
@@ -90,6 +92,25 @@ async function lookupToken(sql, hash) {
 export function requireAuth(req, res, next) {
   if (!req.auth) throw unauthorized();
   next();
+}
+
+// Owners and admins see everything; a private extension is additionally
+// visible to accounts holding an explicit access grant. Shared by the detail,
+// download and blob routes so they cannot drift apart.
+export async function canSee(sql, user, row) {
+  if (row.visibility !== 'private') return true;
+  if (!user) return false;
+  if (user.role === 'admin' || user.namespace === row.namespace) return true;
+  const [ownerRow] = await sql`
+    SELECT 1 FROM extension_owners
+    WHERE owner_id = ${user.id} AND namespace = ${row.namespace} AND extension_id = ${row.extension_id}
+  `;
+  if (ownerRow) return true;
+  const [grant] = await sql`
+    SELECT 1 FROM extension_access
+    WHERE user_id = ${user.id} AND namespace = ${row.namespace} AND extension_id = ${row.extension_id}
+  `;
+  return Boolean(grant);
 }
 
 export function requireSession(req, res, next) {

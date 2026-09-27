@@ -24,6 +24,8 @@ export class HttpError extends Error {
     };
     if (this.detail) body.detail = this.detail;
     if (this.errors) body.errors = this.errors;
+    if (this.buildLog) body.buildLog = this.buildLog;
+    if (this.buildError) body.buildError = this.buildError;
     return body;
   }
 }
@@ -35,6 +37,7 @@ const defaultTitles = {
   404: 'Not Found',
   409: 'Conflict',
   413: 'Payload Too Large',
+  415: 'Unsupported Media Type',
   422: 'Unprocessable Entity',
   429: 'Too Many Requests',
   500: 'Internal Server Error',
@@ -62,6 +65,14 @@ export function notFound(detail = 'Not found.') {
 
 export function conflict(detail = 'Resource already exists.') {
   return new HttpError(409, { title: 'Conflict', detail });
+}
+
+export function payloadTooLarge(detail = 'Request body is too large.') {
+  return new HttpError(413, { title: 'Payload Too Large', detail });
+}
+
+export function unsupportedMediaType(detail = 'Unsupported media type.') {
+  return new HttpError(415, { title: 'Unsupported Media Type', detail });
 }
 
 export function tooManyRequests(retryAfterSeconds) {

@@ -454,6 +454,10 @@ paths:
         type past it. SVG is not accepted: it is a document that can run script
         in the origin that serves it.
 
+        A stored avatar is at most 2000x2000. Anything larger is scaled down
+        and keeps its aspect ratio; a smaller one is stored as sent. Nothing is
+        ever enlarged, so cropping is left to whatever displays the image.
+
         An external avatar URL, if the account has one, is kept as the fallback,
         and the avatarUrl in the response becomes this canonical path so the URL
         stays stable across later replacements.
@@ -537,6 +541,12 @@ paths:
       description: >
         Replaces the banner with the uploaded image, under the same format and
         body rules as the avatar upload.
+
+        A stored banner is exactly 3000x1000. The upload is cropped to that
+        3:1 ratio from the centre and scaled to it, so every client can lay the
+        same banner out the same way. A banner already at 3000x1000 is stored
+        untouched, and one too small to fill the box is left at its own size
+        rather than blown up.
       requestBody:
         required: true
         content:

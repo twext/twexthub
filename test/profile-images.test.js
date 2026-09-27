@@ -1,47 +1,43 @@
 import { test, before, beforeEach, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { rm, utimes } from 'node:fs/promises';
+import { rm, readFile, utimes } from 'node:fs/promises';
 import request from 'supertest';
+import sharp from 'sharp';
 import { blobPathFor } from '../src/blobs.js';
 import { gcBlobs } from '../src/maintenance.js';
 import { sniffImageType, supportedImageTypes } from '../src/image-sniff.js';
 import { boot, bearer, resetDb, signupAndAccept, uniqNs } from './helpers.mjs';
 
-// Real signature bytes rather than a fixture file: the endpoints sniff the
-// upload, so a test that sent a placeholder string would exercise the rejection
-// path and pass for the wrong reason.
-function pngBytes(extra = 0) {
-  return Buffer.concat([
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    Buffer.from([0x00, 0x00, 0x00, 0x0d]),
-    Buffer.from('IHDR'),
-    Buffer.alloc(13),
-    Buffer.alloc(extra, 0x5a),
-  ]);
-}
+// Real images rather than signature bytes on their own: an upload is decoded
+// before it is stored, so a fixture the decoder rejects would exercise the
+// rejection path and pass for the wrong reason. Trailing bytes after the last
+// chunk are still how a fixture reaches an exact size -- a decoder ignores them
+// and the byte limit does not.
+const [TINY_PNG, TINY_GIF, TINY_JPEG] = await Promise.all([
+  sharp({
+    create: {
+      width: 8,
+      height: 8,
+      channels: 3,
+      noise: { type: 'gaussian', mean: 128, sigma: 40 },
+    },
+  })
+    .png()
+    .toBuffer(),
+  sharp({ create: { width: 8, height: 8, channels: 3, background: { r: 1, g: 2, b: 3 } } })
+    .gif()
+    .toBuffer(),
+  sharp({ create: { width: 8, height: 8, channels: 3, background: { r: 9, g: 8, b: 7 } } })
+    .jpeg()
+    .toBuffer(),
+]);
 
-const gifBytes = () => Buffer.from('GIF89a\0\0\0\0\0\0\0\0', 'latin1');
-const jpegBytes = () =>
-  Buffer.from([
-    0xff,
-    0xd8,
-    0xff,
-    0xe0,
-    0,
-    16,
-    ...Buffer.from('JFIF\0'),
-    0,
-    1,
-    1,
-    0,
-    0,
-    1,
-    0,
-    1,
-    0,
-    0,
-  ]);
+function pngBytes(extra = 0) {
+  return Buffer.concat([TINY_PNG, Buffer.alloc(extra, 0x5a)]);
+}
+const gifBytes = () => TINY_GIF;
+const jpegBytes = () => TINY_JPEG;
 
 let app;
 let sql;
@@ -125,7 +121,7 @@ describe('uploading a profile image', () => {
     const [row] = await sql`SELECT * FROM users WHERE namespace = ${ns}`;
     assert.match(row.avatar_blob_digest, /^[0-9a-f]{64}$/);
     assert.equal(row.avatar_content_type, 'image/png');
-    assert.equal(row.avatar_bytes, 29);
+    assert.equal(row.avatar_bytes, TINY_PNG.length);
     assert.ok(existsSync(blobPathFor(config.dataDir, row.avatar_blob_digest)));
   });
 
@@ -236,6 +232,124 @@ describe('upload validation', () => {
     } finally {
       config.limits.maxProfileImageBytes = before;
     }
+  });
+});
+
+describe('stored size', () => {
+  // This suite booted with a 4 KiB ceiling so the over-limit case stays cheap,
+  // and the real targets are bigger in bytes than that, so these raise it for
+  // the length of one upload.
+  const withCeiling = async (run) => {
+    const before = config.limits.maxProfileImageBytes;
+    config.limits.maxProfileImageBytes = 16 * 1024 * 1024;
+    try {
+      await run();
+    } finally {
+      config.limits.maxProfileImageBytes = before;
+    }
+  };
+
+  const solidPng = (width, height) =>
+    sharp({ create: { width, height, channels: 3, background: { r: 20, g: 90, b: 160 } } })
+      .png()
+      .toBuffer();
+
+  // What ended up on disk, rather than what was sent: the point of these is the
+  // stored copy, and reading it back is the only way to see what was kept.
+  const storedMeta = async (ns, kind) => {
+    const [row] = await sql`SELECT * FROM users WHERE namespace = ${ns}`;
+    const bytes = await readFile(blobPathFor(config.dataDir, row[`${kind}_blob_digest`]));
+    return { ...(await sharp(bytes).metadata()), bytes: bytes.length };
+  };
+
+  test('scales a large avatar down to 2000px, keeping its shape', async () => {
+    const ns = await account();
+    await withCeiling(async () => {
+      const res = await put(ns, 'avatar', await solidPng(5000, 1200), 'image/png');
+      assert.equal(res.status, 200);
+    });
+    const meta = await storedMeta(ns, 'avatar');
+    assert.deepEqual([meta.width, meta.height], [2000, 480]);
+  });
+
+  test('leaves an avatar that already fits exactly as it was sent', async () => {
+    const ns = await account();
+    const bytes = await solidPng(400, 300);
+    await withCeiling(async () => {
+      assert.equal((await put(ns, 'avatar', bytes, 'image/png')).status, 200);
+    });
+    // Not merely the same dimensions: the same file, so the bytes are not spent
+    // re-encoding an image that needed nothing.
+    assert.equal((await storedMeta(ns, 'avatar')).bytes, bytes.length);
+  });
+
+  test('crops a banner to 3:1 and scales it to 3000x1000', async () => {
+    const ns = await account();
+    await withCeiling(async () => {
+      const res = await put(ns, 'banner', await solidPng(4000, 4000), 'image/png');
+      assert.equal(res.status, 200);
+    });
+    const meta = await storedMeta(ns, 'banner');
+    assert.deepEqual([meta.width, meta.height], [3000, 1000]);
+  });
+
+  test('does not enlarge a banner that is smaller than the target', async () => {
+    const ns = await account();
+    const bytes = await solidPng(300, 100);
+    await withCeiling(async () => {
+      assert.equal((await put(ns, 'banner', bytes, 'image/png')).status, 200);
+    });
+    const meta = await storedMeta(ns, 'banner');
+    assert.deepEqual([meta.width, meta.height], [300, 100]);
+    assert.equal(meta.bytes, bytes.length);
+  });
+
+  test('keeps every frame of an animated GIF it has to scale', async () => {
+    const ns = await account();
+    const frame = (r) =>
+      sharp({ create: { width: 2400, height: 2400, channels: 3, background: { r, g: 0, b: 0 } } })
+        .png()
+        .toBuffer();
+    const animated = await sharp([await frame(200), await frame(100), await frame(50)], {
+      join: { animated: true },
+    })
+      .gif()
+      .toBuffer();
+    assert.equal((await sharp(animated).metadata()).pages, 3);
+
+    await withCeiling(async () => {
+      const res = await put(ns, 'avatar', animated, 'image/gif');
+      assert.equal(res.status, 200);
+    });
+    // A resize without the animated option keeps the first frame and drops the
+    // rest, so the page count is the assertion that matters here.
+    const stored = await readFile(
+      blobPathFor(config.dataDir, (await avatarDigest(ns))[0].avatar_blob_digest),
+    );
+    const meta = await sharp(stored).metadata();
+    assert.equal(meta.pages, 3);
+    assert.equal(meta.width, 2000);
+  });
+
+  test('reports the type of the bytes it kept, after re-encoding them', async () => {
+    const ns = await account();
+    await withCeiling(async () => {
+      const res = await put(ns, 'avatar', await solidPng(4000, 4000), 'image/png');
+      assert.equal(res.status, 200);
+    });
+    const [row] = await sql`SELECT * FROM users WHERE namespace = ${ns}`;
+    // The re-encode is a new file, so the type and the byte count have to
+    // describe that one rather than what the client sent.
+    assert.equal(row.avatar_content_type, 'image/png');
+    assert.equal(row.avatar_bytes, (await storedMeta(ns, 'avatar')).bytes);
+  });
+
+  test('refuses a signed file that no decoder can read', async () => {
+    const ns = await account();
+    // The signature is a real PNG header, so the type check passes and the
+    // stored-pixel bound would otherwise be the decoder's to enforce.
+    const res = await put(ns, 'avatar', TINY_PNG.subarray(0, 20), 'image/png');
+    assert.equal(res.status, 415);
   });
 });
 
@@ -430,11 +544,27 @@ describe('removing a profile image', () => {
   // The blob is content-addressed, so an avatar and a banner holding the same
   // bytes are one file on disk. Dropping one of them has to leave the other
   // serving, which means the release cannot skip the account it just wrote.
+  // The two kinds are scaled to different sizes, so a shared digest is not
+  // something the upload path can be relied on to produce and is set directly.
+  const pointBannerAtAvatar = async (ns) => {
+    const [row] = await sql`
+      SELECT avatar_blob_digest AS digest, avatar_bytes AS bytes
+      FROM users WHERE namespace = ${ns}
+    `;
+    await sql`
+      UPDATE users
+      SET banner_blob_digest = ${row.digest}, banner_content_type = 'image/png',
+          banner_bytes = ${row.bytes}
+      WHERE namespace = ${ns}
+    `;
+  };
+
   test('keeps the bytes the account still points at with its other image', async () => {
     const ns = await account();
     const shared = pngBytes(5);
     await put(ns, 'avatar', shared, 'image/png');
     await put(ns, 'banner', shared, 'image/png');
+    await pointBannerAtAvatar(ns);
     const [row] = await avatarDigest(ns);
     const stored = blobPathFor(config.dataDir, row.avatar_blob_digest);
 
@@ -454,6 +584,7 @@ describe('removing a profile image', () => {
     const shared = pngBytes(5);
     await put(ns, 'avatar', shared, 'image/png');
     await put(ns, 'banner', shared, 'image/png');
+    await pointBannerAtAvatar(ns);
     const [row] = await avatarDigest(ns);
     const stored = blobPathFor(config.dataDir, row.avatar_blob_digest);
 
@@ -471,6 +602,7 @@ describe('removing a profile image', () => {
     const shared = pngBytes(5);
     await put(ns, 'avatar', shared, 'image/png');
     await put(ns, 'banner', shared, 'image/png');
+    await pointBannerAtAvatar(ns);
     const [row] = await avatarDigest(ns);
     const stored = blobPathFor(config.dataDir, row.avatar_blob_digest);
 

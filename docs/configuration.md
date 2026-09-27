@@ -102,6 +102,12 @@ On top of those buckets, a coarse per-IP middleware (`express-rate-limit`) caps 
 
 Publishing a version charges its blob bytes **and** the retained source tarball to the namespace account's running total. Deleting the extension refunds every byte it charged. An admin can override an account's cumulative quota with `PATCH /v1/admin/users/:namespace/quota`; a `null` `maxBlobBytes` resets it to the configured default.
 
+`limits.maxProfileImageBytes` bounds the request, not the stored image. A
+stored avatar is at most 2000x2000 and keeps its aspect ratio, and a stored
+banner is exactly 3000x1000, cropped to 3:1 from the centre. An upload over
+either target is scaled down on the way in, and nothing is ever enlarged, so
+the ceiling is not a substitute for a sensible source image.
+
 ## Compiler
 
 | Key                  | Default | Environment                    | Purpose                                                         |

@@ -329,7 +329,6 @@ test('delivery posts the signed payload and records status', async () => {
     const result = await attemptDelivery(
       sql,
       { ...(await claimOne(delivery.id)), url },
-      Date.now(),
       toLoopbackReceiver,
     );
     assert.equal(result.ok, true);
@@ -382,7 +381,6 @@ test('a delivery connects to the address it validated, not the hostname', async 
     const result = await attemptDelivery(
       sql,
       { ...(await claimOne(delivery.id)), url },
-      Date.now(),
       toLoopbackReceiver,
     );
     assert.equal(result.ok, true);
@@ -443,6 +441,47 @@ test('failed deliveries retry with backoff then mark failed', async () => {
 
   const [hook] = await sql`SELECT last_delivery_status FROM webhooks WHERE id = ${webhookId}`;
   assert.equal(hook.last_delivery_status, 'error');
+});
+
+test('the retry delay is measured from the end of the attempt, not the claim', async () => {
+  // The claim's clock is taken before the attempt, and an attempt can take up to
+  // DELIVERY_TIMEOUT_MS. Stamping the deadline from the claim meant a slow first
+  // attempt wrote a retry date that had already passed, so the row was due again
+  // the moment it landed and the backoff bought nothing.
+  const { ns } = await makeOwner();
+  const webhookId = await insertWebhook(ns, 'https://172.31.255.7/hook', ['version.published']);
+  const [delivery] = await sql`
+    INSERT INTO webhook_deliveries (webhook_id, event, payload, body, signature)
+    VALUES (${webhookId}, 'version.published', ${sql.json({ hello: 'world' })}, '{}', 'sig')
+    RETURNING id
+  `;
+
+  // A long-failing attempt, the way a destination that stops answering looks.
+  const claimed = await claimOne(delivery.id);
+  const startedAt = Date.now();
+  const result = await attemptDelivery(sql, claimed, async () => {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    throw new Error('receiver is gone');
+  });
+  const completedAt = Date.now();
+  assert.equal(result.ok, false);
+  assert.ok(
+    completedAt - startedAt >= 400,
+    'the attempt has to take real time for the two clocks to differ',
+  );
+
+  // RETRY_DELAYS_MS[1]: the first retry waits 5s. The tolerance only has to
+  // cover the round trip that writes the row, and stays well under the 400ms
+  // the attempt took, so a deadline measured from the claim (which would land
+  // 5s after it) cannot pass.
+  const [after] =
+    await sql`SELECT next_attempt_at FROM webhook_deliveries WHERE id = ${delivery.id}`;
+  const deadline = new Date(after.next_attempt_at).getTime();
+  assert.ok(deadline >= completedAt + 5000 - 100, 'the wait starts when the attempt ended');
+  assert.ok(
+    deadline >= startedAt + 5200,
+    'a deadline measured from the claim would land inside the attempt',
+  );
 });
 
 test('deleting a webhook removes its pending deliveries', async () => {
@@ -584,7 +623,7 @@ test('a stale attempt cannot overwrite a delivery another worker has taken', asy
             WHERE id = ${delivery.id}`;
 
   // The stale holder now reports failure; it must not be recorded.
-  const result = await attemptDelivery(sql, claimed, Date.now(), async () => {
+  const result = await attemptDelivery(sql, claimed, async () => {
     throw new Error('receiver is gone');
   });
   assert.equal(result.ok, false);

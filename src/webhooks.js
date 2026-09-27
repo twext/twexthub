@@ -310,9 +310,9 @@ export async function deliverDue(sql) {
     const claimedAt = Date.now();
     const [delivery] = await claimDue(sql, claimedAt, 1);
     if (!delivery) break;
-    // The claim's clock, so the retry delay is measured from the moment this
-    // attempt started being owed.
-    results.push(await attemptDelivery(sql, delivery, claimedAt));
+    // The attempt stamps its own retry deadline off the clock when it finishes,
+    // so the claim time is not carried into it.
+    results.push(await attemptDelivery(sql, delivery));
   }
   return results;
 }
@@ -357,12 +357,7 @@ function postToTarget(target, delivery) {
 
 // `resolveTarget` is a seam for the test receiver, which listens on loopback;
 // the worker always resolves and validates for real.
-export async function attemptDelivery(
-  sql,
-  delivery,
-  now = Date.now(),
-  resolveTarget = resolvePublicWebhookTarget,
-) {
+export async function attemptDelivery(sql, delivery, resolveTarget = resolvePublicWebhookTarget) {
   const attempt = delivery.attempt + 1;
   let error = null;
   let ok = false;
@@ -380,6 +375,13 @@ export async function attemptDelivery(
 
   const retrying = !ok && attempt < delivery.max_attempts;
   const delay = ok ? 0 : (RETRY_DELAYS_MS[attempt] ?? RETRY_DELAYS_MS.at(-1));
+  // Read the clock here, where the attempt is over, rather than reusing the
+  // claim's: the delay is a wait that starts when the attempt ends. An attempt
+  // can take up to DELIVERY_TIMEOUT_MS, so a deadline measured from the claim
+  // lands before a slow attempt has finished -- a first retry waits 5s while the
+  // attempt before it may have spent 10s, which leaves the row already due the
+  // moment it is written and spends the backoff on nothing.
+  const completedAt = Date.now();
   // Only the claim holder writes the outcome. The lease deadline the claim
   // stamped is the holder's proof: if the lease ran out and a peer re-claimed
   // the row, its deadline has moved on, so a late result from the original
@@ -389,7 +391,7 @@ export async function attemptDelivery(
     SET status = ${ok ? 'delivered' : retrying ? 'retrying' : 'failed'},
         attempt = ${attempt},
         last_error = ${ok ? null : error},
-        next_attempt_at = ${retrying ? new Date(now + delay).toISOString() : null},
+        next_attempt_at = ${retrying ? new Date(completedAt + delay).toISOString() : null},
         updated_at = now()
     WHERE id = ${delivery.id}
       AND status = 'delivering'

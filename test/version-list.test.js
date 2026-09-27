@@ -48,8 +48,8 @@ test('the version list is highest-first and range filters it', async () => {
     all.body.data.map((v) => v.version),
     ['2.0.0', '1.9.9', '1.2.0', '1.0.0'],
   );
-  assert.equal(all.body.pagination.hasMore, false);
-  assert.equal(all.body.pagination.nextCursor, null);
+  assert.equal(all.body._links.next, null);
+  assert.equal(all.body._links.prev, null);
 
   for (const [range, expected] of [
     ['^1.2', ['1.9.9', '1.2.0']],
@@ -145,10 +145,10 @@ test('a range that matches nothing is an empty list, and a bad range is a 422', 
   const missing = await request(app).get(`/v1/@${ns}/ranger/versions`).query({ range: '^99.0.0' });
   assert.equal(missing.status, 200);
   assert.deepEqual(missing.body.data, []);
-  assert.equal(missing.body.pagination.hasMore, false);
+  assert.equal(missing.body._links.next, null);
 });
 
-test('the list pages with a cursor', async () => {
+test('the list pages by following its own links', async () => {
   const { ns } = await makeSetup();
 
   const first = await request(app).get(`/v1/@${ns}/ranger/versions?limit=2`).expect(200);
@@ -156,18 +156,25 @@ test('the list pages with a cursor', async () => {
     first.body.data.map((v) => v.version),
     ['2.0.0', '1.9.9'],
   );
-  assert.equal(first.body.pagination.hasMore, true);
+  assert.ok(first.body._links.next);
+  assert.equal(first.body._links.prev, null);
 
-  const second = await request(app)
-    .get(`/v1/@${ns}/ranger/versions?limit=2`)
-    .query({ cursor: first.body.pagination.nextCursor })
-    .expect(200);
+  const second = await request(app).get(first.body._links.next).expect(200);
   assert.deepEqual(
     second.body.data.map((v) => v.version),
     ['1.2.0', '1.0.0'],
   );
-  assert.equal(second.body.pagination.hasMore, false);
-  assert.equal(second.body.pagination.nextCursor, null);
+  assert.equal(second.body._links.next, null);
+
+  // The last page can reach back, and the page before it points forward at the
+  // one it was reached from.
+  const back = await request(app).get(second.body._links.prev).expect(200);
+  assert.deepEqual(
+    back.body.data.map((v) => v.version),
+    ['2.0.0', '1.9.9'],
+  );
+  assert.equal(back.body._links.next, second.body._links.self);
+  assert.equal(back.body._links.prev, null);
 
   const bad = await request(app)
     .get(`/v1/@${ns}/ranger/versions`)

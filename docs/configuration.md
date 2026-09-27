@@ -91,6 +91,26 @@ On top of those buckets, a coarse per-IP middleware (`express-rate-limit`) caps 
 | `pagination.defaultLimit` | `20`    | `TWEXTHUB_PAGINATION_DEFAULT_LIMIT` | Page size when none is given                 |
 | `pagination.maxLimit`     | `50`    | `TWEXTHUB_PAGINATION_MAX_LIMIT`     | Upper bound on `limit` for any list endpoint |
 
+Every list endpoint answers with `data` and `_links`, and each link is a
+complete URL for the page it names:
+
+```json
+{
+  "data": [{ "namespace": "twext", "...": "..." }],
+  "_links": {
+    "self": "/v1/users?limit=2",
+    "next": "/v1/users?limit=2&cursor=eyJpIjo0Mn0",
+    "prev": null
+  }
+}
+```
+
+A client never builds a cursor or reads a page count: it follows `next` until
+`next` is `null`, and `prev` walks the same list back the way it came, so a
+client that only knows the last page it was sent can still reach the first.
+`self` is the request as it was made, filters and all, which is what a client
+caches against.
+
 ## Limits
 
 | Key                           | Default    | Environment                        | Purpose                                                                                                                                    |

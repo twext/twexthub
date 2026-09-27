@@ -1,7 +1,15 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
+import {
+  boot,
+  resetDb,
+  bearer,
+  uniqNs,
+  signupAndAccept,
+  publishProject,
+  followPages,
+} from './helpers.mjs';
 
 let app;
 let sql;
@@ -115,18 +123,9 @@ test('unknown sort values are rejected with 400', async () => {
 test('paginating with sort=name walks every page', async () => {
   await seedExtensions();
 
-  const seen = [];
-  let cursor = null;
-  let guard = 0;
-  do {
-    const url =
-      '/v1/extensions?sort=name&limit=2' + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
-    const r = await request(app).get(url).expect(200);
-    for (const e of r.body.data) seen.push(`${e.namespace}/${e.id}`);
-    cursor = r.body.pagination.nextCursor;
-    guard += 1;
-    assert.ok(guard < 10, 'pagination did not terminate');
-  } while (cursor);
+  const { rows } = await followPages(app, '/v1/extensions?sort=name&limit=2');
+  const seen = rows.map((e) => `${e.namespace}/${e.id}`);
+  assert.ok(seen.length > 2, 'expected more than one page');
   assert.equal(new Set(seen).size, seen.length, 'no duplicates across pages');
 });
 
@@ -137,20 +136,11 @@ test('paginating with sort=downloads walks every page', async () => {
   const { aggregateDayLoader } = await import('../src/metrics.js');
   await aggregateDayLoader(sql)(new Date());
 
-  const seen = [];
-  let cursor = null;
-  let guard = 0;
-  do {
-    const url =
-      '/v1/extensions?sort=downloads&limit=2' +
-      (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
-    const r = await request(app).get(url).expect(200);
-    for (const e of r.body.data) seen.push(e.id);
-    cursor = r.body.pagination.nextCursor;
-    guard += 1;
-    assert.ok(guard < 10, 'pagination did not terminate');
-  } while (cursor);
-  assert.deepEqual(seen, ['zoo', 'minterm', 'alpaca']);
+  const { rows } = await followPages(app, '/v1/extensions?sort=downloads&limit=2');
+  assert.deepEqual(
+    rows.map((e) => e.id),
+    ['zoo', 'minterm', 'alpaca'],
+  );
 });
 
 test('paginating a tied sort key keeps every row', async () => {
@@ -158,19 +148,8 @@ test('paginating a tied sort key keeps every row', async () => {
   // and the (namespace, id) tiebreaker alone orders the result.
   const { ns } = await seedExtensions();
 
-  const seen = [];
-  let cursor = null;
-  let guard = 0;
-  do {
-    const url =
-      '/v1/extensions?sort=downloads&limit=1' +
-      (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
-    const r = await request(app).get(url).expect(200);
-    for (const e of r.body.data.filter((e) => e.namespace === ns)) seen.push(e.id);
-    cursor = r.body.pagination.nextCursor;
-    guard += 1;
-    assert.ok(guard < 10, 'pagination did not terminate');
-  } while (cursor);
+  const { rows } = await followPages(app, '/v1/extensions?sort=downloads&limit=1');
+  const seen = rows.filter((e) => e.namespace === ns).map((e) => e.id);
   assert.deepEqual(seen, ['alpaca', 'minterm', 'zoo']);
 });
 

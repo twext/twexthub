@@ -486,17 +486,14 @@ test('admins can read and tune per-account quota, and only admins view the audit
   assert.equal(roleChange.detail.role, 'admin');
   assert.equal(roleChange.detail.previousRole, 'normal');
 
-  // Pagination walks the cursor without repeating rows.
+  // Pagination follows its own links without repeating rows.
   const page1 = await request(app)
     .get('/v1/admin/audit?limit=2')
     .set(bearer(admin.token))
     .expect(200);
   assert.equal(page1.body.data.length, 2);
-  assert.ok(page1.body.pagination.hasMore);
-  const page2 = await request(app)
-    .get(`/v1/admin/audit?limit=2&cursor=${page1.body.pagination.nextCursor}`)
-    .set(bearer(admin.token))
-    .expect(200);
+  assert.ok(page1.body._links.next);
+  const page2 = await request(app).get(page1.body._links.next).set(bearer(admin.token)).expect(200);
   assert.equal(page2.body.data.length, 2);
   const seen = new Set([...page1.body.data, ...page2.body.data].map((e) => e.id));
   assert.equal(seen.size, 4);

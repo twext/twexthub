@@ -40,7 +40,7 @@ import { compileProject } from '../compiler.js';
 import { totalDownloads, hashDownloadAddress } from '../metrics.js';
 import { makeWebhooks, WebhookInputError } from '../webhooks.js';
 import { audit, auditSoon } from '../audit.js';
-import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
+import { decodeCursor, offsetPage, parseLimit } from '../pagination.js';
 
 export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
   const router = Router();
@@ -137,6 +137,10 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     }
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor, { o: 'int' });
+    // This list is sorted and filtered in memory, so the cursor is an offset
+    // into the result rather than a key to compare against. Paging is still
+    // link-driven: `offsetPage` points at the neighbouring offsets, and a
+    // `dir` on the request is meaningless here and ignored.
     const offset = cursor ? cursor.o - 1 : 0;
 
     // No extension-level gate here: a namespace whose newest version is private
@@ -167,17 +171,14 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     // here over the versions already filtered.
     readable.sort((a, b) => semver.rcompare(a.coerced, b.coerced));
 
-    const page = readable.slice(offset, offset + limit);
-    const nextOffset = offset + page.length;
-    const hasMore = nextOffset < readable.length;
-
-    res.json({
-      data: page.map((entry) => versionToObject(entry.row, config)),
-      pagination: {
-        nextCursor: hasMore ? encodeCursor({ o: nextOffset + 1 }) : null,
-        hasMore,
-      },
-    });
+    res.json(
+      offsetPage(req, readable.slice(offset, offset + limit), {
+        limit,
+        offset,
+        total: readable.length,
+        serialize: (entry) => versionToObject(entry.row, config),
+      }),
+    );
   });
 
   router.post(

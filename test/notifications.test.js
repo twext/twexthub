@@ -56,7 +56,7 @@ test('lists notifications newest first, unreadCount included', async () => {
   const ids = r.body.data.map((n) => n.id);
   assert.deepEqual(ids, [String(newest.id), String(oldest.id), String(maintenance.id)]);
   assert.equal(r.body.unreadCount, 2);
-  assert.equal(r.body.pagination.hasMore, false);
+  assert.equal(r.body._links.next, null);
 
   const rejected = r.body.data.find((n) => n.kind === 'review.rejected');
   assert.equal(rejected.read, false);
@@ -103,28 +103,42 @@ test('pagination walks newest to oldest', async () => {
 
   const page1 = await request(app).get('/v1/notifications?limit=2').set(bearer(token)).expect(200);
   assert.equal(page1.body.data.length, 2);
-  assert.equal(page1.body.pagination.hasMore, true);
-  assert.ok(page1.body.pagination.nextCursor);
+  assert.ok(page1.body._links.next);
+  assert.equal(page1.body._links.prev, null);
 
-  const page2 = await request(app)
-    .get(`/v1/notifications?limit=2&cursor=${page1.body.pagination.nextCursor}`)
-    .set(bearer(token))
-    .expect(200);
+  const page2 = await request(app).get(page1.body._links.next).set(bearer(token)).expect(200);
   assert.equal(page2.body.data.length, 2);
-  assert.equal(page2.body.pagination.hasMore, true);
+  assert.ok(page2.body._links.next);
 
-  const page3 = await request(app)
-    .get(`/v1/notifications?limit=2&cursor=${page2.body.pagination.nextCursor}`)
-    .set(bearer(token))
-    .expect(200);
+  const page3 = await request(app).get(page2.body._links.next).set(bearer(token)).expect(200);
   assert.equal(page3.body.data.length, 1);
-  assert.equal(page3.body.pagination.hasMore, false);
+  assert.equal(page3.body._links.next, null);
 
   const all = [...page1.body.data, ...page2.body.data, ...page3.body.data];
   assert.deepEqual(
     all.map((n) => n.message),
     ['note 4', 'note 3', 'note 2', 'note 1', 'note 0'],
   );
+
+  // Each page can be undone, and following prev all the way out rebuilds the
+  // walk in reverse without repeating or dropping a row.
+  const backwards = [...page3.body.data];
+  let link = page3.body._links.prev;
+  while (link) {
+    const page = await request(app).get(link).set(bearer(token)).expect(200);
+    backwards.unshift(...page.body.data);
+    link = page.body._links.prev;
+  }
+  assert.deepEqual(
+    backwards.map((n) => n.message),
+    ['note 4', 'note 3', 'note 2', 'note 1', 'note 0'],
+  );
+
+  // A page reached by going back points forward at the page it came from, so
+  // the two links close the same loop the forward walk opened.
+  const before = await request(app).get(page2.body._links.prev).set(bearer(token)).expect(200);
+  assert.equal(before._links, undefined);
+  assert.equal(before.body._links.next, page2.body._links.self);
 });
 
 test('automation tokens can list notifications', async () => {
@@ -266,7 +280,7 @@ test('the 200-row prune keeps the newest per-user rows', async () => {
 
   const r = await request(app).get('/v1/notifications?limit=50').set(bearer(token)).expect(200);
   assert.equal(r.body.data.length, 50);
-  assert.equal(r.body.pagination.hasMore, true);
+  assert.ok(r.body._links.next);
 
   const [count] = await sql`
     SELECT COUNT(*) AS count FROM notifications

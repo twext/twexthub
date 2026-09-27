@@ -70,6 +70,24 @@ export async function resetDb() {
   `;
 }
 
+// Walk a collection the way a client that has never seen this API would: hand
+// each response's own `next` link straight back until it stops offering one.
+// `pages` is here so a caller can assert on the shape of the pages themselves,
+// not only on everything they add up to.
+export async function followPages(app, startUrl, headers = {}) {
+  const rows = [];
+  const pages = [];
+  let url = startUrl;
+  while (url) {
+    const r = await request(app).get(url).set(headers).expect(200);
+    rows.push(...r.body.data);
+    pages.push(r.body);
+    url = r.body._links.next;
+    if (pages.length > 200) throw new Error('pagination did not terminate');
+  }
+  return { rows, pages };
+}
+
 export function bearer(token) {
   return { Authorization: 'Bearer ' + token };
 }

@@ -1,7 +1,15 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
+import {
+  boot,
+  resetDb,
+  bearer,
+  uniqNs,
+  signupAndAccept,
+  publishProject,
+  followPages,
+} from './helpers.mjs';
 
 let app;
 before(async () => {
@@ -65,7 +73,7 @@ test('extensions lists published extensions, newest first, latest version each',
   assert.deepEqual(Object.keys(byId).sort(), ['alpha', 'beta']);
   assert.equal(byId.alpha, '1.1.0');
   assert.equal(byId.beta, '1.0.0');
-  assert.equal(r.body.pagination.hasMore, false);
+  assert.equal(r.body._links.next, null);
 });
 
 test('search filters by name/id/namespace', async () => {
@@ -109,21 +117,23 @@ test('extensions pagination cursor walks all pages', async () => {
     await publish(owner.token, ns, 'ext' + i, '1.0.0');
   }
 
-  const seen = [];
-  let cursor = null;
-  let guard = 0;
-  do {
-    const url = '/v1/extensions?limit=2' + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
-    const r = await request(app).get(url).expect(200);
-    assert.ok(r.body.data.length <= 2);
-    for (const e of r.body.data) seen.push(e.id);
-    cursor = r.body.pagination.nextCursor;
-    guard += 1;
-    assert.ok(guard < 10, 'pagination did not terminate');
-  } while (cursor);
+  const { rows, pages } = await followPages(app, '/v1/extensions?limit=2');
 
+  const seen = rows.map((e) => e.id);
   assert.equal(seen.length, 5);
   assert.equal(new Set(seen).size, 5);
+  assert.ok(
+    pages.every((p) => p.data.length <= 2),
+    'a page went over the limit',
+  );
+  // The head of the list has nowhere before it and the tail nowhere after it.
+  assert.equal(pages[0]._links.prev, null);
+  assert.equal(pages.at(-1)._links.next, null);
+  assert.ok(
+    pages.slice(1).every((p) => p._links.prev !== null),
+    'a page past the first should offer a way back',
+  );
+  assert.equal(pages[0]._links.self, '/v1/extensions?limit=2');
 });
 
 test('stats reports published count, pending, and authors', async () => {

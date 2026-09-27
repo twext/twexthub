@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { requireAdmin } from '../auth.js';
-import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
+import { decodeCursor, keysetPage, pageLinks, parseDir, parseLimit } from '../pagination.js';
 import { HttpError, notFound } from '../errors.js';
 import { foldText, isValidExtensionId, isValidNamespace } from '../util.js';
 import { trendingExtensions, totalDownloads } from '../metrics.js';
@@ -44,17 +44,23 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
   // against the tuple would drag the sort key's direction onto the
   // tiebreaker, skipping or repeating rows whenever the sort key ties, so the
   // two are compared separately.
-  function cursorCondition(cursor, sort) {
+  function cursorCondition(cursor, sort, back) {
     if (!cursor) return sql``;
     // downloads is a joined aggregate, not a column of the versions subquery.
     const col =
       sort === 'downloads' ? sql`COALESCE(d.total, 0)::bigint` : sql('s.' + SORT_COLUMNS[sort]);
     const key = sql`${cursor.k}::${sql(SORT_TYPES[sort])}`;
-    const after = sort === 'name' ? sql`${col} > ${key}` : sql`${col} < ${key}`;
+    // The name sort reads A→Z and everything else reads newest-first, so which
+    // side of the cursor the next rows fall on depends on the sort. The
+    // (namespace, id) tiebreaker ascends in the forward direction whatever the
+    // sort key does, and only reverses when the whole page does.
+    const ascending = sort === 'name';
+    const after = ascending !== back ? sql`${col} > ${key}` : sql`${col} < ${key}`;
+    const tie = back ? sql`<` : sql`>`;
     return sql`
       AND (${after}
         OR (${col} = ${key}
-          AND (s.namespace, s.extension_id) > (${cursor.ns}, ${cursor.id})))
+          AND (s.namespace, s.extension_id) ${tie} (${cursor.ns}, ${cursor.id})))
     `;
   }
 
@@ -63,6 +69,13 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     updated: sql`s.updated_at DESC, s.namespace ASC, s.extension_id ASC`,
     downloads: sql`downloads DESC, s.namespace ASC, s.extension_id ASC`,
     name: sql`s.name ASC, s.namespace ASC, s.extension_id ASC`,
+  };
+
+  const SORT_ORDER_BACK = {
+    recent: sql`s.published_at ASC, s.namespace DESC, s.extension_id DESC`,
+    updated: sql`s.updated_at ASC, s.namespace DESC, s.extension_id DESC`,
+    downloads: sql`downloads ASC, s.namespace DESC, s.extension_id DESC`,
+    name: sql`s.name DESC, s.namespace DESC, s.extension_id DESC`,
   };
 
   // Anonymous and unprivileged callers never see private extensions; owners
@@ -84,6 +97,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
   }
 
   async function listLatestVersions({
+    req,
     limit,
     cursor,
     sort = 'recent',
@@ -91,6 +105,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     searchFilter = sql``,
     user = null,
   }) {
+    const back = parseDir(req.query.dir);
     const rows = await sql`
       SELECT s.*, COALESCE(d.total, 0)::bigint AS downloads FROM (
         SELECT v.*,
@@ -114,31 +129,33 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
         ${visibilityFilter(user)}
         ${license ? sql`AND s.license = ${license}` : sql``}
         ${searchFilter}
-        ${cursorCondition(cursor, sort)}
-      ORDER BY ${SORT_ORDER[sort]}
+        ${cursorCondition(cursor, sort, back)}
+      ORDER BY ${back ? SORT_ORDER_BACK[sort] : SORT_ORDER[sort]}
       LIMIT ${limit + 1}
     `;
-    const hasMore = rows.length > limit;
-    const page = hasMore ? rows.slice(0, limit) : rows;
-    const last = page[page.length - 1];
-    const sortKey =
-      sort === 'downloads'
-        ? String(Number(last?.downloads ?? 0))
-        : sort === 'name'
-          ? last?.name
-          : (sort === 'recent' ? last?.published_at : last?.updated_at)?.toISOString();
-    const nextCursor = hasMore
-      ? encodeCursor({ k: sortKey, ns: last.namespace, id: last.extension_id })
-      : null;
 
-    return {
-      data: page.map((row) => {
+    const sortKeyOf = (row) => ({
+      k:
+        sort === 'downloads'
+          ? String(Number(row.downloads ?? 0))
+          : sort === 'name'
+            ? row.name
+            : (sort === 'recent' ? row.published_at : row.updated_at).toISOString(),
+      ns: row.namespace,
+      id: row.extension_id,
+    });
+
+    return keysetPage(req, rows, {
+      limit,
+      back,
+      cursor,
+      keyOf: sortKeyOf,
+      serialize: (row) => {
         const summary = extensionSummaryFromRow(row);
         summary.downloads = Number(row.downloads ?? 0);
         return summary;
-      }),
-      pagination: { nextCursor, hasMore },
-    };
+      },
+    });
   }
 
   function parseSort(raw) {
@@ -162,7 +179,14 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
         : null;
     const cursor = decodeCursor(req.query.cursor, { k: 'string', ns: 'string', id: 'string' });
     res.json(
-      await listLatestVersions({ limit, cursor, sort, license, user: req.auth?.user ?? null }),
+      await listLatestVersions({
+        req,
+        limit,
+        cursor,
+        sort,
+        license,
+        user: req.auth?.user ?? null,
+      }),
     );
   });
 
@@ -175,7 +199,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     const user = req.auth?.user ?? null;
     const trending = await trendingExtensions(sql, { limit, visibility: visibilityFilter(user) });
     if (trending.length === 0) {
-      return res.json({ data: [], pagination: { nextCursor: null, hasMore: false } });
+      return res.json({ data: [], _links: pageLinks(req) });
     }
     const t = trending;
     // Trending is a flat (namespace, id) list, so the pair has to be joined as a
@@ -206,7 +230,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
         return summary;
       })
       .sort((a, b) => Number(b.downloads) - Number(a.downloads));
-    res.json({ data: page, pagination: { nextCursor: null, hasMore: false } });
+    res.json({ data: page, _links: pageLinks(req) });
   });
 
   router.get('/search', async (req, res) => {
@@ -224,6 +248,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
       : sql``;
     res.json(
       await listLatestVersions({
+        req,
         limit,
         cursor,
         sort,
@@ -658,33 +683,41 @@ ${entries}
       });
     }
     const limit = parseLimit(config, req.query.limit);
-    const cursor = decodeCursor(req.query.cursor, { c: 'timestamp', i: 'int' });
+    const cursor = decodeCursor(req.query.cursor, { c: 'micros', i: 'int' });
+    const back = parseDir(req.query.dir);
+    const ahead = back ? sql`<` : sql`>`;
 
+    // created_at is keyed on as whole microseconds and compared as whole
+    // microseconds, so the boundary is exact. A cursor carrying the column as a
+    // timestamp would be rounded to milliseconds somewhere in the round trip and
+    // the queue would hand the same version out on two pages. The cost is that
+    // the range itself is an expression and so cannot be index-seeked; the
+    // ordering stays on the timestamptz, and the pending set is small enough
+    // that the filter is not worth an approximate boundary.
+    const key = sql`((extract(epoch from created_at) * 1000000)::bigint)`;
     const rows = await sql`
-      SELECT * FROM versions
+      SELECT *, (${key})::text AS created_key
+      FROM versions
       WHERE status = 'pending'
         ${
           cursor
-            ? sql`AND (created_at > ${cursor.c}::timestamptz
-              OR (created_at = ${cursor.c}::timestamptz AND id > ${cursor.i}))`
+            ? sql`AND (${key} ${ahead} ${cursor.c}::bigint
+              OR (${key} = ${cursor.c}::bigint AND id ${ahead} ${cursor.i}))`
             : sql``
         }
-      ORDER BY created_at ASC, id ASC
+      ORDER BY created_at ${back ? sql`DESC` : sql`ASC`}, id ${back ? sql`DESC` : sql`ASC`}
       LIMIT ${limit + 1}
     `;
 
-    const hasMore = rows.length > limit;
-    const page = hasMore ? rows.slice(0, limit) : rows;
-    const last = page[page.length - 1];
-    const nextCursor =
-      hasMore && last
-        ? encodeCursor({ c: last.created_at.toISOString(), i: Number(last.id) })
-        : null;
-
-    res.json({
-      data: page.map((row) => pendingVersionToObject(row, config)),
-      pagination: { nextCursor, hasMore },
-    });
+    res.json(
+      keysetPage(req, rows, {
+        limit,
+        back,
+        cursor,
+        serialize: (row) => pendingVersionToObject(row, config),
+        keyOf: (row) => ({ c: row.created_key, i: Number(row.id) }),
+      }),
+    );
   });
 
   return router;

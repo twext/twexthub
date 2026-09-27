@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { requireSession } from '../auth.js';
 import { hashPassword, verifyPassword } from '../password.js';
 import { forbidden, notFound, unauthorized } from '../errors.js';
-import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
+import { decodeCursor, keysetPage, parseDir, parseLimit } from '../pagination.js';
 import { isValidNamespace, normalizeApiRoot } from '../util.js';
 import { sessionToObject, userToObject } from '../serialize.js';
 import { createSession, requireObjectBody, resolveTargetUser } from './shared.js';
@@ -60,24 +60,25 @@ export function makeSessionsRouter({ sql, config, termsGate, rateLimiter }) {
     const user = await resolveTargetUser(sql, req);
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor, { i: 'int' });
+    const back = parseDir(req.query.dir);
 
     const rows = await sql`
       SELECT * FROM sessions
       WHERE user_id = ${user.id}
-        ${cursor ? sql`AND id < ${cursor.i}` : sql``}
-      ORDER BY id DESC
+        ${cursor ? (back ? sql`AND id > ${cursor.i}` : sql`AND id < ${cursor.i}`) : sql``}
+      ORDER BY id ${back ? sql`ASC` : sql`DESC`}
       LIMIT ${limit + 1}
     `;
 
-    const hasMore = rows.length > limit;
-    const page = hasMore ? rows.slice(0, limit) : rows;
-    const last = page[page.length - 1];
-    const nextCursor = hasMore && last ? encodeCursor({ i: Number(last.id) }) : null;
-
-    res.json({
-      data: page.map(sessionToObject),
-      pagination: { nextCursor, hasMore },
-    });
+    res.json(
+      keysetPage(req, rows, {
+        limit,
+        back,
+        cursor,
+        serialize: sessionToObject,
+        keyOf: (row) => ({ i: Number(row.id) }),
+      }),
+    );
   });
 
   // `current` is the session making the request, so a client that never kept its

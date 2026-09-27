@@ -566,7 +566,12 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         RETURNING *
       `;
       if (rows[0]) {
-        await tx`UPDATE users SET has_published = true WHERE id = ${row.owner_id}`;
+        // The gate that decides whether a version needs review reads
+        // has_published from the namespace account (finalStatus, and the boot
+        // reconcile in db.js), and owner_id holds the delegated publisher rather
+        // than the namespace, so the flag has to be set by namespace here or a
+        // co-owner's first approval would leave the namespace in review forever.
+        await tx`UPDATE users SET has_published = true WHERE namespace = ${row.namespace}`;
         await notifyUser(
           tx,
           row.owner_id,

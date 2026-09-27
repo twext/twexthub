@@ -128,3 +128,57 @@ test('the namespace account is a permanent owner', async () => {
   const list = await request(app).get(`/v1/@${ns}/hello/owners`).expect(200);
   assert.ok(list.body.data.some((u) => u.namespace === ns));
 });
+
+test("a co-owner's approval trusts the namespace, not the co-owner", async () => {
+  const admin = await signupAndAccept(app, uniqNs());
+  const ownerA = await signupAndAccept(app, uniqNs());
+  const coowner = await signupAndAccept(app, uniqNs());
+  const ns = ownerA.user.namespace;
+
+  const hasPublished = async (namespace) => {
+    const [row] = await sql`SELECT has_published FROM users WHERE namespace = ${namespace}`;
+    return row.has_published;
+  };
+
+  // The namespace has never had a version approved, so its first publish waits
+  // for review. The version row is enough for ownerA to hand out ownership.
+  const first = await publishProject(app, ns, 'hello', ownerA.token, { code: '// hello@1.0.0' });
+  assert.equal(first.body.status, 'pending');
+  assert.equal(await hasPublished(ns), false);
+
+  await request(app)
+    .put(`/v1/@${ns}/hello/owners/${coowner.user.namespace}`)
+    .set(bearer(ownerA.token))
+    .expect(204);
+
+  // The co-owner publishes into the namespace as a separate publisher, so their
+  // version reaches review too and owner_id on that row is the co-owner.
+  const staged = await publishProject(app, ns, 'hello', coowner.token, {
+    version: '2.0.0',
+    code: '// hello@2.0.0',
+  });
+  assert.equal(staged.body.status, 'pending');
+  await request(app)
+    .patch(`/v1/@${ns}/hello/versions/2.0.0`)
+    .set(bearer(admin.token))
+    .send({ status: 'approved' })
+    .expect(200);
+
+  assert.equal(await hasPublished(ns), true);
+  assert.equal(await hasPublished(coowner.user.namespace), false);
+
+  // The namespace skips review from here, and the co-owner's own namespace does
+  // not inherit the trust granted in someone else's.
+  const trusted = await publishProject(app, ns, 'hello', coowner.token, {
+    version: '3.0.0',
+    code: '// hello@3.0.0',
+  });
+  assert.equal(trusted.body.status, 'published');
+
+  const own = await publishProject(app, coowner.user.namespace, 'own', coowner.token, {
+    version: '1.0.0',
+    code: '// own@1.0.0',
+  });
+  assert.equal(own.body.status, 'pending');
+  await request(app).get(`/v1/@${coowner.user.namespace}/own/versions/1.0.0`).expect(404);
+});

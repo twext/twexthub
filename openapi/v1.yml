@@ -1163,6 +1163,85 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
 
+  /@{namespace}/{id}/access:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+    get:
+      summary: List an extension's access grants
+      operationId: listExtensionAccess
+      tags: [Userspace]
+      description: >
+        Owner or admin; requires the `publish` scope. Grants in the order they
+        were made.
+
+        A grant is what lets another account read a private version through
+        `GET /@{namespace}/{id}`, its `/versions/{version}` metadata, and
+        `/download`. Grants only mean something on a private extension, but they
+        are recorded on any extension, so flipping one to private later keeps
+        the grants it already had.
+      responses:
+        '200':
+          description: The accounts this extension has been shared with
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required: [namespace, display_name, created_at]
+                      properties:
+                        namespace: { $ref: '#/components/schemas/Namespace' }
+                        display_name: { type: string }
+                        created_at:
+                          { type: string, format: date-time, description: When the grant was made. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /@{namespace}/{id}/access/{granteeNamespace}:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+      - name: granteeNamespace
+        in: path
+        required: true
+        schema: { $ref: '#/components/schemas/Namespace' }
+    put:
+      summary: Grant an account access to an extension
+      operationId: grantExtensionAccess
+      tags: [Userspace]
+      description: >
+        Owner or admin. Idempotent: granting an account that already has access
+        is the same 204 as granting it for the first time. 404 when the
+        extension has no version yet or the grantee is not an account.
+
+        The namespace account always has access to its own extension, so
+        granting it to itself is refused with a `422` rather than stored as a
+        row that grants nothing.
+      responses:
+        '204': { description: Access granted (idempotent) }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+    delete:
+      summary: Revoke an account's access to an extension
+      operationId: revokeExtensionAccess
+      tags: [Userspace]
+      description: >
+        Owner or admin. 404 when that account has no grant, so a revoked grant
+        is not stored as a tombstone.
+      responses:
+        '204': { description: Access revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /@{namespace}/{id}/webhooks:
     parameters:
       - $ref: '#/components/parameters/NamespacePath'

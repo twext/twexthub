@@ -4,7 +4,7 @@ import { renderRegistryMetrics } from '../observability.js';
 import { fieldErrors, notFound } from '../errors.js';
 import { legalDocumentToObject } from '../serialize.js';
 import { notifyUsersMatching, termsBumpedMessage } from '../notify.js';
-import { audit, auditRowToObject, auditSoon } from '../audit.js';
+import { audit, auditRowToObject } from '../audit.js';
 import {
   applyServerConfig,
   configStorage,
@@ -66,7 +66,12 @@ export function makeAdminRouter({ sql, config, termsGate }) {
     });
 
     if (Object.keys(result.changes).length) {
-      await auditSoon(sql, req.auth.user, 'config.update', {}, { changed: result.changes });
+      // Awaited, unlike the post-commit actions elsewhere. applyServerConfig has
+      // already rewritten the file and the live config, and a file write cannot
+      // be rolled back, so this row is the only record that the change happened.
+      // Awaiting it does not make the two atomic; it makes a failed write reach
+      // the admin instead of leaving an unlogged change behind a 200.
+      await audit(sql, req.auth.user, 'config.update', {}, { changed: result.changes });
     }
     res.json({
       changed: result.changes,

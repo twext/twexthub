@@ -427,13 +427,12 @@ describe('PUT /admin/config', () => {
       .send({ settings: { 'pagination.maxLimit': 60 } })
       .expect(200);
 
-    let row;
-    for (let attempt = 0; attempt < 40 && !row; attempt += 1) {
-      [row] = await sql`
-        SELECT action, detail FROM audit_log WHERE action = 'config.update'
-      `;
-      if (!row) await new Promise((resolve) => setTimeout(resolve, 25));
-    }
+    // Read without waiting: the route awaits this write, so the row is committed
+    // by the time the response lands. A fire-and-forget audit would leave the
+    // read to race the insert.
+    const [row] = await sql`
+      SELECT action, detail FROM audit_log WHERE action = 'config.update'
+    `;
     assert.ok(row, 'expected a config.update audit row');
     assert.equal(row.detail.changed['pagination.maxLimit'].after, 60);
   });

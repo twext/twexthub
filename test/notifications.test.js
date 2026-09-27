@@ -147,7 +147,7 @@ test('mark-read with ids only touches the caller’s rows', async () => {
   await seedNotification(theirs.user.namespace, 'broadcast', 'theirs');
 
   const r = await request(app)
-    .post('/v1/notifications/read')
+    .patch('/v1/notifications')
     .set(bearer(mine.token))
     .send({ ids: [a.id, b.id] })
     .expect(200);
@@ -168,21 +168,21 @@ test('mark-read is idempotent and reports only newly read rows', async () => {
   const b = await seedNotification(user.namespace, 'broadcast', 'b');
 
   const first = await request(app)
-    .post('/v1/notifications/read')
+    .patch('/v1/notifications')
     .set(bearer(token))
     .send({ ids: [a.id] })
     .expect(200);
   assert.equal(first.body.updated, 1);
 
   const again = await request(app)
-    .post('/v1/notifications/read')
+    .patch('/v1/notifications')
     .set(bearer(token))
     .send({ ids: [a.id] })
     .expect(200);
   assert.equal(again.body.updated, 0);
 
   const rest = await request(app)
-    .post('/v1/notifications/read')
+    .patch('/v1/notifications')
     .set(bearer(token))
     .send({ ids: [String(a.id), b.id] })
     .expect(200);
@@ -195,7 +195,7 @@ test('mark-read with all clears the mailbox', async () => {
   await seedNotification(user.namespace, 'broadcast', 'b');
 
   const r = await request(app)
-    .post('/v1/notifications/read')
+    .patch('/v1/notifications')
     .set(bearer(token))
     .send({ all: true })
     .expect(200);
@@ -211,32 +211,32 @@ test('mark-read rejects unknown fields and invalid ids', async () => {
   const n = await seedNotification(user.namespace, 'broadcast', 'a');
 
   const both = await request(app)
-    .post('/v1/notifications/read')
+    .patch('/v1/notifications')
     .set(bearer(token))
     .send({ ids: [n.id], all: true })
     .expect(422);
   assert.ok(both.body.errors.some((e) => e.field === 'ids'));
 
   const neither = await request(app)
-    .post('/v1/notifications/read')
+    .patch('/v1/notifications')
     .set(bearer(token))
     .send({})
     .expect(422);
 
   const notArray = await request(app)
-    .post('/v1/notifications/read')
+    .patch('/v1/notifications')
     .set(bearer(token))
     .send({ ids: n.id })
     .expect(422);
 
   const zero = await request(app)
-    .post('/v1/notifications/read')
+    .patch('/v1/notifications')
     .set(bearer(token))
     .send({ ids: [0, -3, 1.5] })
     .expect(422);
 
   const allFalse = await request(app)
-    .post('/v1/notifications/read')
+    .patch('/v1/notifications')
     .set(bearer(token))
     .send({ all: false })
     .expect(422);
@@ -251,7 +251,7 @@ test('mark-read caps ids at 100', async () => {
   const { token } = await signupAndAccept(app, uniqNs());
   const ids = Array.from({ length: 101 }, (_, i) => i + 1);
   const r = await request(app)
-    .post('/v1/notifications/read')
+    .patch('/v1/notifications')
     .set(bearer(token))
     .send({ ids })
     .expect(422);
@@ -277,7 +277,41 @@ test('the 200-row prune keeps the newest per-user rows', async () => {
 });
 
 test('mark-read requires auth', async () => {
-  await request(app).post('/v1/notifications/read').send({ all: true }).expect(401);
+  await request(app).patch('/v1/notifications').send({ all: true }).expect(401);
+});
+
+test('one notification is patched on its own resource', async () => {
+  const { user, token } = await signupAndAccept(app, uniqNs());
+  await seedNotification(user.namespace, 'broadcast', 'only mine');
+  const other = await signupAndAccept(app, uniqNs());
+  await seedNotification(other.user.namespace, 'broadcast', 'someone else');
+
+  const before = await request(app).get('/v1/notifications').set(bearer(token)).expect(200);
+  const id = before.body.data[0].id;
+  assert.equal(before.body.data[0].read, false);
+
+  const patched = await request(app)
+    .patch(`/v1/notifications/${id}`)
+    .set(bearer(token))
+    .expect(200);
+  assert.equal(patched.body.id, id);
+  assert.equal(patched.body.read, true);
+  assert.equal(patched.body.message, 'only mine');
+
+  // Idempotent: patching again reports read, and the mailbox still shows it once.
+  const again = await request(app).patch(`/v1/notifications/${id}`).set(bearer(token)).expect(200);
+  assert.equal(again.body.read, true);
+  const after = await request(app).get('/v1/notifications').set(bearer(token)).expect(200);
+  assert.equal(after.body.unreadCount, 0);
+
+  // Another account's notification is a 404, so this does not confirm it exists.
+  const [theirs] = await sql`
+    SELECT id FROM notifications
+    WHERE user_id = (SELECT id FROM users WHERE namespace = ${other.user.namespace})
+  `;
+  await request(app).patch(`/v1/notifications/${theirs.id}`).set(bearer(token)).expect(404);
+  await request(app).patch('/v1/notifications/abc').set(bearer(token)).expect(404);
+  await request(app).patch('/v1/notifications/999999').set(bearer(token)).expect(404);
 });
 
 // ---- emit points

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { requireAuth } from '../auth.js';
-import { fieldErrors, HttpError } from '../errors.js';
+import { fieldErrors, HttpError, notFound } from '../errors.js';
 import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
 import { notificationToObject } from '../serialize.js';
 import { requireObjectBody } from './shared.js';
@@ -48,7 +48,10 @@ export function makeNotificationsRouter({ sql, config }) {
     });
   });
 
-  router.post('/read', guard, async (req, res) => {
+  // Read state is a property of the notification, so it is patched on the
+  // resource: the collection form for a client's whole mailbox or a chosen set,
+  // and the single form for the one it just rendered.
+  router.patch('/', guard, async (req, res) => {
     requireObjectBody(req);
     const { ids, all } = req.body;
     if ((ids === undefined) === (all === undefined)) {
@@ -88,6 +91,18 @@ export function makeNotificationsRouter({ sql, config }) {
       RETURNING id
     `;
     res.json({ updated: updated.count });
+  });
+
+  router.patch('/:id', guard, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) throw notFound();
+    const [row] = await sql`
+      UPDATE notifications SET read_at = now()
+      WHERE id = ${id} AND user_id = ${req.auth.user.id}
+      RETURNING *
+    `;
+    if (!row) throw notFound();
+    res.json(notificationToObject(row));
   });
 
   return router;

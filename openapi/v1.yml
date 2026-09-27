@@ -621,16 +621,16 @@ paths:
                   pagination: { $ref: '#/components/schemas/CursorPage' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
-
-  /notifications/read:
-    post:
+    patch:
       summary: Mark notifications as read
       operationId: markNotificationsRead
       tags: [Userspace]
       description: >
-        Send either `ids` (up to 100) or `all: true` — never both. Ids that
-        were already read, or belong to another account, are ignored, so the
-        call is idempotent and `updated` counts only newly read rows.
+        Read state is a property of the notification, so it is patched on the
+        collection. Send either `ids` (up to 100) or `all: true` — never both.
+        Ids that were already read, or belong to another account, are ignored, so
+        the call is idempotent and `updated` counts only newly read rows. To mark
+        exactly one, use `PATCH /notifications/{id}`.
       requestBody:
         required: true
         content:
@@ -662,6 +662,26 @@ paths:
                   updated: { type: integer }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /notifications/{id}:
+    parameters:
+      - $ref: '#/components/parameters/NotificationId'
+    patch:
+      summary: Mark one notification as read
+      operationId: markNotificationRead
+      tags: [Userspace]
+      description: >
+        Marks a single notification read and returns it. A notification that
+        belongs to another account is a `404`, so the call does not reveal that
+        it exists.
+      responses:
+        '200':
+          description: The updated notification
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Notification' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   # ---------------------------------------------------------- Discovery
   /extensions:
@@ -1366,19 +1386,40 @@ paths:
               schema: { $ref: '#/components/schemas/VersionInfo' }
         '404': { $ref: '#/components/responses/NotFound' }
     patch:
-      summary: Approve or reject a version
+      summary: Review or deprecate a version
       operationId: reviewVersion
-      tags: [Adminspace]
+      tags: [Userspace, Adminspace]
+      description: >
+        A version has one PATCH. Send `status` to decide a pending review, or
+        `deprecationMessage` to deprecate; sending both, or neither, is a `422`
+        because the body has to say which edit it is.
+
+        `status` is admin-only, session-only, and applies to a `pending` version.
+        `deprecationMessage` is open to the owner or an admin and requires the
+        `publish` scope (sessions satisfy this implicitly). A non-null message
+        marks the version `deprecated` — still listable and downloadable, but
+        flagged — and `null` clears the deprecation. Yanked versions cannot be
+        deprecated.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [status]
-              properties:
-                status: { type: string, enum: [approved, rejected] }
-                reason: { type: string, description: Required when rejecting. }
+              oneOf:
+                - type: object
+                  required: [status]
+                  properties:
+                    status: { type: string, enum: [approved, rejected] }
+                    reason: { type: string, description: Required when rejecting. }
+                - type: object
+                  required: [deprecationMessage]
+                  properties:
+                    deprecationMessage:
+                      {
+                        type: ['string', 'null'],
+                        description: 'A non-empty string to set, or null to clear.',
+                      }
       responses:
         '200':
           description: Updated
@@ -1403,43 +1444,6 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
-
-  /@{namespace}/{id}/versions/{version}/deprecate:
-    parameters:
-      - $ref: '#/components/parameters/NamespacePath'
-      - $ref: '#/components/parameters/ExtensionIdPath'
-      - $ref: '#/components/parameters/VersionPath'
-    patch:
-      summary: Deprecate or undeprecate a version
-      operationId: deprecateVersion
-      tags: [Userspace]
-      description: >
-        Owner or admin; requires the `publish` scope. A non-null `message`
-        marks the version `deprecated` (still listable and downloadable, but
-        flagged); `null` clears the deprecation. Yanked versions cannot be
-        deprecated.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [message]
-              properties:
-                message:
-                  {
-                    type: ['string', 'null'],
-                    description: 'A non-empty string to set, or null to clear.',
-                  }
-      responses:
-        '200':
-          description: Updated version
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/VersionInfo' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
-        '422': { $ref: '#/components/responses/UnprocessableEntity' }
 
   /@{namespace}/{id}/versions/{version}/source:
     parameters:
@@ -1842,6 +1846,12 @@ components:
       schema:
         type: string
         description: SemVer string, a dist-tag name, or the literal `latest`.
+    NotificationId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[0-9]+$' }
+      description: Notification id, as a string so it survives a JSON parser that keeps numbers exact.
     Sort:
       name: sort
       in: query

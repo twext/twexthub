@@ -812,8 +812,8 @@ paths:
       security: []
       description: >
         One flat list rather than a page through the registry: there is no
-        cursor, so `nextCursor` is always `null` and `hasMore` always `false`.
-        An extension with no downloads in the window is not ranked at all.
+        cursor, so `_links.next` is always `null`. An extension with no
+        downloads in the window is not ranked at all.
       parameters:
         - name: limit
           in: query

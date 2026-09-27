@@ -8,11 +8,6 @@ const CURSOR_KEY_TYPES = {
     else return null;
     return Number.isSafeInteger(n) && n > 0 ? n : null;
   },
-  timestamp: (value) => {
-    if (typeof value !== 'string') return null;
-    const ms = Date.parse(value);
-    return Number.isNaN(ms) ? null : new Date(ms).toISOString();
-  },
   string: (value) => (typeof value === 'string' && value.length > 0 ? value : null),
   // Whole microseconds since the epoch, as a timestamptz cursor has to be
   // counted. A cursor cannot carry the column as a timestamp string or a Date:

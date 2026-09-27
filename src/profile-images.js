@@ -131,9 +131,12 @@ export async function resolveProfileImage(config, user, kind) {
 }
 
 /**
- * Clears the account's pointer to an uploaded image and returns the digest that
- * may now be collectable. The row update is committed by the caller; this only
- * computes what to do afterwards.
+ * Describes what dropping a kind's upload pointer means for the account: the
+ * columns to null, and the digest that may now be collectable.
+ *
+ * This computes nothing and writes nothing. The caller commits the row with
+ * `updates` and only then releases the bytes, so the unlink never runs for a
+ * pointer that is still set.
  */
 export function profileImagePointer(user, kind) {
   const columns = PROFILE_IMAGES[kind];
@@ -184,24 +187,4 @@ export async function removeProfileImageBlob(sql, config, digest) {
       throw error;
     }
   });
-}
-
-/**
- * Queues the UPDATE fragment that drops a kind's upload pointer, and returns the
- * digest it freed so the caller can release the bytes after the row commits.
- *
- * A no-op when the account has no upload, so a request that never touched an
- * upload does not write three NULL columns for nothing.
- */
-export function clearProfileImagePointer(patch, columns, user, kind) {
-  const image = PROFILE_IMAGES[kind];
-  const digest = user[image.digestColumn];
-  if (!digest) return [];
-  patch[image.digestColumn] = null;
-  columns.push(image.digestColumn);
-  patch[image.typeColumn] = null;
-  columns.push(image.typeColumn);
-  patch[image.bytesColumn] = null;
-  columns.push(image.bytesColumn);
-  return [digest];
 }

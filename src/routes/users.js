@@ -7,7 +7,6 @@ import { requireSession } from '../auth.js';
 import { removeBlobIfUnused } from '../blobs.js';
 import {
   MAX_PROFILE_IMAGE_BYTES,
-  PROFILE_IMAGES,
   profileImagePointer,
   removeProfileImageBlob,
   resolveProfileImage,
@@ -185,13 +184,10 @@ export function makeUsersRouter({ sql, config, termsGate }) {
       if (req.auth.user.namespace !== target.namespace) {
         throw forbidden('You can only change your own profile images.');
       }
-      const { digest } = profileImagePointer(target, kind);
-      const columns = PROFILE_IMAGES[kind];
+      const { digest, updates } = profileImagePointer(target, kind);
       const [updated] = await sql`
         UPDATE users
-        SET ${sql(columns.digestColumn)} = NULL,
-            ${sql(columns.typeColumn)} = NULL,
-            ${sql(columns.bytesColumn)} = NULL
+        SET ${sql(updates)}
         WHERE id = ${target.id}
         RETURNING *
       `;

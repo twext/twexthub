@@ -143,11 +143,18 @@ export function profileImagePointer(user, kind) {
  * Unlinks a profile image's bytes once nothing points at them.
  *
  * The blob store is shared with version uploads and is content-addressed, so a
- * digest can be referenced by a version row, by another account's avatar, or by
- * both. removeBlobIfUnused only knows about versions, so this check spans every
- * table that can name a digest before deleting anything.
+ * digest can be referenced by a version row, by an account's avatar, by that
+ * same account's banner, or by all of them. removeBlobIfUnused only knows about
+ * versions, so this check spans every table that can name a digest before
+ * deleting anything.
+ *
+ * Callers run this after the pointer update has committed, so the account that
+ * just dropped its avatar no longer names those bytes in that column. Excluding
+ * its row would also hide the other column on the same account, which is how an
+ * avatar and a banner that share bytes would end up with the file unlinked under
+ * the banner.
  */
-export async function removeProfileImageBlob(sql, config, digest, exceptUserId = null) {
+export async function removeProfileImageBlob(sql, config, digest) {
   if (!digest) return false;
   return sql.begin(async (tx) => {
     await tx`SELECT pg_advisory_xact_lock(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
@@ -155,10 +162,9 @@ export async function removeProfileImageBlob(sql, config, digest, exceptUserId =
       SELECT 1 FROM versions WHERE blob_digest = ${digest} LIMIT 1
     `;
     if (version) return false;
-    const exclude = exceptUserId === null ? tx`` : tx`AND id != ${exceptUserId}`;
     const [user] = await tx`
       SELECT 1 FROM users
-      WHERE (avatar_blob_digest = ${digest} OR banner_blob_digest = ${digest}) ${exclude}
+      WHERE avatar_blob_digest = ${digest} OR banner_blob_digest = ${digest}
       LIMIT 1
     `;
     if (user) return false;

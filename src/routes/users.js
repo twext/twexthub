@@ -158,7 +158,7 @@ export function makeUsersRouter({ sql, config, termsGate }) {
         // The replaced image is only unlinked after the new pointer is
         // committed, and only when nothing else references those bytes.
         if (stored.previous && stored.previous !== stored.digest) {
-          await removeProfileImageBlob(sql, config, stored.previous, target.id);
+          await removeProfileImageBlob(sql, config, stored.previous);
         }
         const [updated] = await sql`SELECT * FROM users WHERE id = ${target.id}`;
         res.json(userToObject(updated, config));
@@ -196,7 +196,7 @@ export function makeUsersRouter({ sql, config, termsGate }) {
         WHERE id = ${target.id}
         RETURNING *
       `;
-      if (digest) await removeProfileImageBlob(sql, config, digest, target.id);
+      if (digest) await removeProfileImageBlob(sql, config, digest);
       res.json(userToObject(updated, config));
     },
   ];

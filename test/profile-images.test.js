@@ -390,6 +390,64 @@ describe('removing a profile image', () => {
       .set(bearer(tokens.get(other)));
     assert.equal(res.status, 403);
   });
+
+  // The blob is content-addressed, so an avatar and a banner holding the same
+  // bytes are one file on disk. Dropping one of them has to leave the other
+  // serving, which means the release cannot skip the account it just wrote.
+  test('keeps the bytes the account still points at with its other image', async () => {
+    const ns = await account();
+    const shared = pngBytes(5);
+    await put(ns, 'avatar', shared, 'image/png');
+    await put(ns, 'banner', shared, 'image/png');
+    const [row] = await avatarDigest(ns);
+    const stored = blobPathFor(config.dataDir, row.avatar_blob_digest);
+
+    await request(app)
+      .delete(`/v1/users/${ns}/avatar`)
+      .set(bearer(tokens.get(ns)))
+      .expect(200);
+
+    assert.ok(existsSync(stored));
+    const served = await request(app).get(`/v1/users/${ns}/banner`);
+    assert.equal(served.status, 200);
+    assert.equal(Buffer.compare(served.body, shared), 0);
+  });
+
+  test('keeps the bytes a replacement shares with the account other image', async () => {
+    const ns = await account();
+    const shared = pngBytes(5);
+    await put(ns, 'avatar', shared, 'image/png');
+    await put(ns, 'banner', shared, 'image/png');
+    const [row] = await avatarDigest(ns);
+    const stored = blobPathFor(config.dataDir, row.avatar_blob_digest);
+
+    // Replacing the avatar releases the digest it used to name, and the banner
+    // still names it.
+    const replacement = await put(ns, 'avatar', pngBytes(7), 'image/png');
+    assert.equal(replacement.status, 200);
+    assert.ok(existsSync(stored));
+    const served = await request(app).get(`/v1/users/${ns}/banner`);
+    assert.equal(Buffer.compare(served.body, shared), 0);
+  });
+
+  test('frees the bytes once neither image names them', async () => {
+    const ns = await account();
+    const shared = pngBytes(5);
+    await put(ns, 'avatar', shared, 'image/png');
+    await put(ns, 'banner', shared, 'image/png');
+    const [row] = await avatarDigest(ns);
+    const stored = blobPathFor(config.dataDir, row.avatar_blob_digest);
+
+    const del = (kind) =>
+      request(app)
+        .delete(`/v1/users/${ns}/${kind}`)
+        .set(bearer(tokens.get(ns)))
+        .expect(200);
+    await del('avatar');
+    assert.ok(existsSync(stored));
+    await del('banner');
+    assert.ok(!existsSync(stored));
+  });
 });
 
 describe('swapping one image source for another', () => {

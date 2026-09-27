@@ -95,7 +95,7 @@ export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
 
     const root = normalizeApiRoot(config.apiRoot);
     res
-      .location(`/${root}/users/${user.namespace}`)
+      .location(`${root ? `/${root}` : ''}/users/${user.namespace}`)
       .status(201)
       .json({
         user: userToObject(user, config),
@@ -362,19 +362,25 @@ export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
     }
     // The client sends back the version it actually read, so an acceptance
     // cannot be recorded against text the account never saw. A stale one means
-    // the terms changed since: the client has to read them again. The version
-    // is an integer in the documents but a string in the users row, so both
-    // spellings are compared as text.
+    // the terms changed since: the client has to read them again. Only an
+    // integer or a digit-only string can name a version -- String() would
+    // otherwise coerce one into shape from, say, an array ["1"] -- and the row
+    // records the server's own current version rather than the spelling that
+    // arrived.
+    let currentTermsVersion = null;
     if (termsAcceptedVersion !== undefined) {
+      const wellFormed =
+        (typeof termsAcceptedVersion === 'number' && Number.isInteger(termsAcceptedVersion)) ||
+        (typeof termsAcceptedVersion === 'string' && /^\d+$/.test(termsAcceptedVersion));
       const [terms] = await sql`SELECT version FROM legal_documents WHERE kind = 'terms'`;
       if (!terms) {
         throw notFound('There are no terms to accept yet.');
       }
-      const current = String(terms.version);
-      if (String(termsAcceptedVersion) !== current) {
+      currentTermsVersion = Number(terms.version);
+      if (!wellFormed || String(termsAcceptedVersion) !== String(currentTermsVersion)) {
         errors.push({
           field: 'termsAcceptedVersion',
-          message: `Must be the current terms version ${current}. Read GET /v1/terms to see it.`,
+          message: `Must be the current terms version ${currentTermsVersion}. Read GET /v1/terms to see it.`,
         });
       }
     }
@@ -419,7 +425,7 @@ export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
       columns.push('banner_url');
     }
     if (termsAcceptedVersion !== undefined) {
-      patch.terms_accepted_version = termsAcceptedVersion;
+      patch.terms_accepted_version = currentTermsVersion;
       columns.push('terms_accepted_version');
     }
     if (password !== undefined) {

@@ -77,6 +77,20 @@ export function makeConfig(overrides = {}) {
 // password, deadlocked migration — is left exactly as the driver reported it.
 const CONNECTION_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNRESET']);
 
+// The connection-check fallback interpolates the URL into its message, so
+// strip the password first: a database URL pasted into the environment should
+// not print its credentials into the test output. A URL that will not parse is
+// shown as it is -- there is nothing in it to extract.
+function redactDatabaseUrl(url) {
+  try {
+    const parsed = new URL(url);
+    parsed.password = '';
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
 function describeBootFailure(error, url) {
   const shown = (() => {
     try {
@@ -133,7 +147,7 @@ export async function checkTestDatabase(url = TEST_DATABASE_URL) {
   } catch (error) {
     const hint =
       describeBootFailure(error, url) ??
-      `the test database at ${url} rejected the connection check.`;
+      `the test database at ${redactDatabaseUrl(url)} rejected the connection check.`;
     throw new Error(hint, { cause: error });
   } finally {
     await probe.end({ timeout: 5 });

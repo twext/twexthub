@@ -25,14 +25,23 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
   // needs both a WHERE condition and an ORDER BY on the same columns. Sorting
   // is descending except for name, which reads naturally A→Z.
   const SORT_COLUMNS = {
-    recent: 'published_at',
-    updated: 'updated_at',
     downloads: 'downloads',
     name: 'name',
   };
+  // recent and updated are keyed on whole microseconds of the timestamp, not
+  // the timestamp itself. A Date keeps only milliseconds, so a key built from
+  // the ISO string rounds the boundary: rows published within the same
+  // millisecond as the cursor are skipped going forward and repeated going
+  // back. The same trade the admin queue's cursor makes -- the boundary
+  // becomes an expression that cannot be index-seeked, while the ordering
+  // below stays on the timestamptz.
+  const TIMESTAMP_SORT_KEYS = {
+    recent: sql`((extract(epoch from s.published_at) * 1000000)::bigint)`,
+    updated: sql`((extract(epoch from s.updated_at) * 1000000)::bigint)`,
+  };
   const SORT_TYPES = {
-    recent: 'timestamptz',
-    updated: 'timestamptz',
+    recent: 'int8',
+    updated: 'int8',
     // int8 rather than the bigint alias: the cast is emitted as a quoted type
     // name, and only int8 is a real entry in pg_type.
     downloads: 'int8',
@@ -46,9 +55,12 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
   // two are compared separately.
   function cursorCondition(cursor, sort, back) {
     if (!cursor) return sql``;
-    // downloads is a joined aggregate, not a column of the versions subquery.
+    // downloads is a joined aggregate, not a column of the versions subquery,
+    // and the timestamp sorts compare their whole-microsecond keys.
     const col =
-      sort === 'downloads' ? sql`COALESCE(d.total, 0)::bigint` : sql('s.' + SORT_COLUMNS[sort]);
+      sort === 'downloads'
+        ? sql`COALESCE(d.total, 0)::bigint`
+        : (TIMESTAMP_SORT_KEYS[sort] ?? sql('s.' + SORT_COLUMNS[sort]));
     const key = sql`${cursor.k}::${sql(SORT_TYPES[sort])}`;
     // The name sort reads A→Z and everything else reads newest-first, so which
     // side of the cursor the next rows fall on depends on the sort. The
@@ -107,7 +119,10 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
   }) {
     const back = parseDir(req.query.dir);
     const rows = await sql`
-      SELECT s.*, COALESCE(d.total, 0)::bigint AS downloads FROM (
+      SELECT s.*, COALESCE(d.total, 0)::bigint AS downloads,
+        ${TIMESTAMP_SORT_KEYS.recent}::text AS published_key,
+        ${TIMESTAMP_SORT_KEYS.updated}::text AS updated_key
+      FROM (
         SELECT v.*,
           row_number() OVER (
             PARTITION BY namespace, extension_id
@@ -134,13 +149,17 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
       LIMIT ${limit + 1}
     `;
 
+    // The timestamp keys come off the query as exact microsecond text, never
+    // through a Date, which would round them back to milliseconds.
     const sortKeyOf = (row) => ({
       k:
         sort === 'downloads'
           ? String(Number(row.downloads ?? 0))
           : sort === 'name'
             ? row.name
-            : (sort === 'recent' ? row.published_at : row.updated_at).toISOString(),
+            : sort === 'recent'
+              ? row.published_key
+              : row.updated_key,
       ns: row.namespace,
       id: row.extension_id,
     });
@@ -177,7 +196,14 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
       typeof req.query.license === 'string' && req.query.license.length > 0
         ? req.query.license
         : null;
-    const cursor = decodeCursor(req.query.cursor, { k: 'string', ns: 'string', id: 'string' });
+    const cursor = decodeCursor(req.query.cursor, {
+      // recent and updated cursors carry whole-microsecond keys, so they are
+      // validated as digit strings rather than free text: a hand-made cursor
+      // that cannot cast to int8 is a 400 here, not a Postgres error.
+      k: sort === 'recent' || sort === 'updated' ? 'micros' : 'string',
+      ns: 'string',
+      id: 'string',
+    });
     res.json(
       await listLatestVersions({
         req,
@@ -242,7 +268,14 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
       typeof req.query.license === 'string' && req.query.license.length > 0
         ? req.query.license
         : null;
-    const cursor = decodeCursor(req.query.cursor, { k: 'string', ns: 'string', id: 'string' });
+    const cursor = decodeCursor(req.query.cursor, {
+      // recent and updated cursors carry whole-microsecond keys, so they are
+      // validated as digit strings rather than free text: a hand-made cursor
+      // that cannot cast to int8 is a 400 here, not a Postgres error.
+      k: sort === 'recent' || sort === 'updated' ? 'micros' : 'string',
+      ns: 'string',
+      id: 'string',
+    });
     const searchFilter = folded
       ? sql`AND search_text LIKE ${'%' + escapeLike(folded) + '%'}`
       : sql``;

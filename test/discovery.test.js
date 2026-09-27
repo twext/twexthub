@@ -136,6 +136,51 @@ test('extensions pagination cursor walks all pages', async () => {
   assert.equal(pages[0]._links.self, '/v1/extensions?limit=2');
 });
 
+// The recent and updated sorts key their cursors on whole microseconds, so a
+// page and its neighbours can share a millisecond of publish time without the
+// cursor rounding one of them away: walking one row at a time has to visit
+// every extension exactly once, in both directions.
+test('recent and updated cursors survive same-millisecond publishes', async () => {
+  const admin = await signupAndAccept(app, uniqNs());
+  const owner = await signupAndAccept(app, uniqNs());
+  const ns = owner.user.namespace;
+
+  await publish(owner.token, ns, 'ext0', '1.0.0');
+  await approvePending(admin.token, ns, 'ext0');
+  // Published back to back inside the same clock tick: under a
+  // millisecond-precision cursor this ordering ties and pages skip or repeat
+  // rows.
+  for (let i = 1; i < 5; i += 1) {
+    await publish(owner.token, ns, 'ext' + i, '1.0.0');
+  }
+
+  for (const sort of ['recent', 'updated']) {
+    const { rows, pages } = await followPages(app, `/v1/extensions?sort=${sort}&limit=1`);
+    const seen = rows.map((e) => e.id);
+    assert.equal(new Set(seen).size, seen.length, `${sort}: an id repeated across pages`);
+    assert.equal(seen.length, 5, `${sort}: a page walked over or under the set`);
+    assert.ok(
+      pages.slice(1).every((p) => p._links.prev !== null),
+      `${sort}: a page past the first should offer a way back`,
+    );
+
+    // Back down the same list via each page's own prev link: the union of the
+    // two walks is the whole set and no id is visited twice.
+    const backwards = [...pages.at(-1).data];
+    let link = pages.at(-1)._links.prev;
+    while (link) {
+      const page = await request(app).get(link).expect(200);
+      backwards.unshift(...page.body.data);
+      link = page.body._links.prev;
+    }
+    assert.deepEqual(
+      backwards.map((e) => e.id),
+      seen,
+      `${sort}: the backward walk is the forward walk in reverse`,
+    );
+  }
+});
+
 test('stats reports published count, pending, and authors', async () => {
   const admin = await signupAndAccept(app, uniqNs());
   const owner = await signupAndAccept(app, uniqNs());

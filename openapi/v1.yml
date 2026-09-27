@@ -1866,7 +1866,7 @@ components:
     Dir:
       name: dir
       in: query
-      schema: { type: string, enum: [back], default: forward }
+      schema: { type: string, enum: [back] }
       description: >
         Set to `back` to page towards the rows before the cursor. The server only
         looks for a cursor from a list sorted the other way round; anything else

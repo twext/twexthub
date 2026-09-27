@@ -40,9 +40,9 @@ test('deprecating flags a version but keeps it listable and downloadable', async
   await publish(ownerNs, ownerToken, '2.0.0');
 
   const upgrade = await request(app)
-    .patch(`/v1/@${ownerNs}/hello/versions/2.0.0/deprecate`)
+    .patch(`/v1/@${ownerNs}/hello/versions/2.0.0`)
     .set(bearer(ownerToken))
-    .send({ message: 'Use the rewritten API surface.' })
+    .send({ deprecationMessage: 'Use the rewritten API surface.' })
     .expect(200);
   assert.equal(upgrade.body.status, 'deprecated');
   assert.equal(upgrade.body.deprecation, 'Use the rewritten API surface.');
@@ -67,9 +67,9 @@ test('deprecating flags a version but keeps it listable and downloadable', async
 
   // clearing the deprecation restores published state
   const cleared = await request(app)
-    .patch(`/v1/@${ownerNs}/hello/versions/2.0.0/deprecate`)
+    .patch(`/v1/@${ownerNs}/hello/versions/2.0.0`)
     .set(bearer(ownerToken))
-    .send({ message: null })
+    .send({ deprecationMessage: null })
     .expect(200);
   assert.equal(cleared.body.status, 'published');
   assert.ok(!('deprecation' in cleared.body));
@@ -87,15 +87,41 @@ test('non-owners cannot deprecate; admin can', async () => {
   await publish(ownerNs, ownerToken, '2.0.0');
 
   const denied = await request(app)
-    .patch(`/v1/@${ownerNs}/hello/versions/2.0.0/deprecate`)
+    .patch(`/v1/@${ownerNs}/hello/versions/2.0.0`)
     .set(bearer(outside.token))
-    .send({ message: 'no' });
+    .send({ deprecationMessage: 'no' });
   assert.equal(denied.status, 403);
 
   const asAdmin = await request(app)
-    .patch(`/v1/@${ownerNs}/hello/versions/2.0.0/deprecate`)
+    .patch(`/v1/@${ownerNs}/hello/versions/2.0.0`)
     .set(bearer(adminToken))
-    .send({ message: 'Admin says so.' })
+    .send({ deprecationMessage: 'Admin says so.' })
     .expect(200);
   assert.equal(asAdmin.body.status, 'deprecated');
+});
+
+test('the version PATCH refuses an ambiguous or empty body', async () => {
+  const { adminToken, ownerToken, ownerNs } = await makeAdminAndOwner();
+  await publish(ownerNs, ownerToken, '1.0.0');
+  await approve(adminToken, ownerNs, '1.0.0');
+
+  const both = await request(app)
+    .patch(`/v1/@${ownerNs}/hello/versions/1.0.0`)
+    .set(bearer(adminToken))
+    .send({ status: 'approved', deprecationMessage: 'no longer current' });
+  assert.equal(both.status, 422);
+  assert.equal(both.body.errors[0].field, 'status');
+
+  const neither = await request(app)
+    .patch(`/v1/@${ownerNs}/hello/versions/1.0.0`)
+    .set(bearer(adminToken))
+    .send({});
+  assert.equal(neither.status, 422);
+
+  const blank = await request(app)
+    .patch(`/v1/@${ownerNs}/hello/versions/1.0.0`)
+    .set(bearer(ownerToken))
+    .send({ deprecationMessage: '   ' });
+  assert.equal(blank.status, 422);
+  assert.equal(blank.body.errors[0].field, 'deprecationMessage');
 });

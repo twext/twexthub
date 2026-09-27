@@ -76,9 +76,9 @@ test('resolve prefers strictly-published over deprecated', async () => {
     }
   }
   await request(app)
-    .patch(`/v1/@${ons}/dep/versions/1.1.0/deprecate`)
+    .patch(`/v1/@${ons}/dep/versions/1.1.0`)
     .set(bearer(owner.token))
-    .send({ message: 'broken' })
+    .send({ deprecationMessage: 'broken' })
     .expect(200);
 
   // 1.1.0 is deprecated but still in the pool; the highest in range wins and

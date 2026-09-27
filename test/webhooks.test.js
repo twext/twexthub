@@ -203,9 +203,9 @@ test('registry events schedule deliveries for subscribed hooks', async () => {
     code: '// hooked@2.0.0',
   });
   await request(app)
-    .patch(`/v1/@${ns}/hooked/versions/2.0.0/deprecate`)
+    .patch(`/v1/@${ns}/hooked/versions/2.0.0`)
     .set(bearer(owner.token))
-    .send({ message: 'old' })
+    .send({ deprecationMessage: 'old' })
     .expect(200);
   await request(app)
     .delete(`/v1/@${ns}/hooked/versions/2.0.0`)

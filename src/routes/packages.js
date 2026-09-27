@@ -446,75 +446,62 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     res.json(versionToObject(row, config));
   });
 
-  router.patch(
-    '/@:namespace/:id/versions/:version/deprecate',
-    requireAuth,
-    termsGate,
-    requireScope('publish'),
-    async (req, res) => {
-      const { namespace, id, version } = req.params;
-      if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
-      requireObjectBody(req);
-      const message = req.body.message;
-      // `message` is required by the spec: an explicit null clears the notice,
-      // anything else has to be a real string. Omitting it used to fall through
-      // and deprecate with a NULL notice.
-      if (message !== null && (typeof message !== 'string' || message.trim().length === 0)) {
-        throw fieldErrors([
-          { field: 'message', message: 'Must be a non-empty string, or null to clear.' },
-        ]);
-      }
-      const [row] = await sql`
-        SELECT * FROM versions
-        WHERE namespace = ${namespace} AND extension_id = ${id} AND version = ${version}
-      `;
-      if (!row || (row.status !== 'published' && row.status !== 'deprecated')) throw notFound();
-      const canManage = await isExtensionOwner(req.auth.user, namespace, id);
-      if (!canManage) {
-        throw forbidden('Only an owner or an admin can deprecate this version.');
-      }
-      const [updated] = await sql`
+  // A deprecation and a moderation decision are both edits to the version's own
+  // fields, so they share the one PATCH on the version and the body says which
+  // of the two it is.
+  async function deprecateVersion(req, res, message) {
+    if (!req.auth.scopes.includes('publish')) {
+      throw forbidden('This token is missing the required "publish" scope.');
+    }
+    const { namespace, id, version } = req.params;
+    if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    const [row] = await sql`
+      SELECT * FROM versions
+      WHERE namespace = ${namespace} AND extension_id = ${id} AND version = ${version}
+    `;
+    if (!row || (row.status !== 'published' && row.status !== 'deprecated')) throw notFound();
+    const canManage = await isExtensionOwner(req.auth.user, namespace, id);
+    if (!canManage) {
+      throw forbidden('Only an owner or an admin can deprecate this version.');
+    }
+    const [updated] = await sql`
         UPDATE versions
         SET status = ${message === null ? 'published' : 'deprecated'},
             deprecation_message = ${message ?? null}
         WHERE id = ${row.id}
         RETURNING *
       `;
-      auditSoon(
-        sql,
-        req.auth.user,
-        message === null ? 'version.undeprecate' : 'version.deprecate',
-        { namespace, id, version: updated.version },
-        { message: message ?? null },
-      );
-      // A null message puts the version back, so it is not a deprecation.
-      if (message !== null) {
-        void webhooks.scheduleFor(namespace, id, 'version.deprecated', {
-          version: updated.version,
-          occurredAt: new Date().toISOString(),
-          actor: req.auth.user.namespace,
-        });
-      }
-      res.json(versionToObject(updated, config));
-    },
-  );
+    auditSoon(
+      sql,
+      req.auth.user,
+      message === null ? 'version.undeprecate' : 'version.deprecate',
+      { namespace, id, version: updated.version },
+      { message: message ?? null },
+    );
+    // A null message puts the version back, so it is not a deprecation.
+    if (message !== null) {
+      void webhooks.scheduleFor(namespace, id, 'version.deprecated', {
+        version: updated.version,
+        occurredAt: new Date().toISOString(),
+        actor: req.auth.user.namespace,
+      });
+    }
+    res.json(versionToObject(updated, config));
+  }
 
-  router.patch('/@:namespace/:id/versions/:version', requireAuth, termsGate, async (req, res) => {
+  async function reviewVersion(req, res, status) {
     if (req.auth.user.role !== 'admin') throw forbidden('Admin privileges are required.');
     if (req.auth.tokenType !== 'session') {
-      throw forbidden('Automation tokens cannot access this endpoint.');
+      throw forbidden('Automation tokens cannot review versions.');
     }
     const { namespace, id, version } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     const [row] = await sql`
-        SELECT * FROM versions
-        WHERE namespace = ${namespace} AND extension_id = ${id} AND version = ${version}
-          AND status = 'pending'
-      `;
+      SELECT * FROM versions
+      WHERE namespace = ${namespace} AND extension_id = ${id} AND version = ${version}
+        AND status = 'pending'
+    `;
     if (!row) throw notFound('No pending version matches that address.');
-
-    requireObjectBody(req);
-    const status = req.body.status;
     if (status !== 'approved' && status !== 'rejected') {
       throw fieldErrors([{ field: 'status', message: 'Must be "approved" or "rejected".' }]);
     }
@@ -592,6 +579,34 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
       actor: req.auth.user.namespace,
     });
     res.json(versionToObject(updated, config));
+  }
+
+  router.patch('/@:namespace/:id/versions/:version', requireAuth, termsGate, async (req, res) => {
+    requireObjectBody(req);
+    const { status, deprecationMessage } = req.body;
+    const reviewing = status !== undefined;
+    if (reviewing === (deprecationMessage !== undefined)) {
+      throw fieldErrors([
+        {
+          field: 'status',
+          message:
+            'Provide "status" to review or "deprecationMessage" to deprecate, not both or neither.',
+        },
+      ]);
+    }
+
+    if (reviewing) return reviewVersion(req, res, status);
+
+    const message = deprecationMessage;
+    // An explicit null clears the notice and puts the version back, anything
+    // else has to be a real string. Omitting it once fell through and
+    // deprecated with a NULL notice.
+    if (message !== null && (typeof message !== 'string' || message.trim().length === 0)) {
+      throw fieldErrors([
+        { field: 'deprecationMessage', message: 'Must be a non-empty string, or null to clear.' },
+      ]);
+    }
+    return deprecateVersion(req, res, message);
   });
 
   router.delete('/@:namespace/:id/versions/:version', yankChain, async (req, res) => {

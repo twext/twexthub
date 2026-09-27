@@ -445,7 +445,7 @@ paths:
     put:
       summary: Upload an account's avatar
       operationId: uploadUserAvatar
-      tags: [Account]
+      tags: [Userspace]
       description: >
         Replaces the avatar with the uploaded image. The request body is the
         image itself, not a multipart form. The server matches the bytes
@@ -485,7 +485,7 @@ paths:
     delete:
       summary: Remove an uploaded avatar
       operationId: deleteUserAvatar
-      tags: [Account]
+      tags: [Userspace]
       description: >
         Drops the uploaded avatar and its bytes. The account falls back to its
         external avatar URL, or to the identicon when it has none.
@@ -530,7 +530,7 @@ paths:
     put:
       summary: Upload an account's banner
       operationId: uploadUserBanner
-      tags: [Account]
+      tags: [Userspace]
       description: >
         Replaces the banner with the uploaded image, under the same format and
         body rules as the avatar upload.
@@ -562,7 +562,7 @@ paths:
     delete:
       summary: Remove an uploaded banner
       operationId: deleteUserBanner
-      tags: [Account]
+      tags: [Userspace]
       responses:
         '200':
           description: The updated account

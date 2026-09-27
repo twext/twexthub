@@ -254,6 +254,17 @@ describe('serving profile images', () => {
     assert.equal(Buffer.compare(res.body, bytes), 0);
   });
 
+  // The upload is served from the API origin, and the validator reads the
+  // leading signature only, so the response has to forbid content sniffing.
+  test('sends nosniff with the bytes', async () => {
+    const ns = await account();
+    await put(ns, 'avatar', pngBytes(), 'image/png');
+
+    const res = await request(app).get(`/v1/users/${ns}/avatar`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers['x-content-type-options'], 'nosniff');
+  });
+
   // The two paths have to be cached differently, because only one of them names
   // the bytes it serves. Caching the bare path hard is how a re-upload keeps
   // showing the old picture for a year.

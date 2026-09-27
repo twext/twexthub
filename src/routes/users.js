@@ -113,6 +113,10 @@ export function makeUsersRouter({ sql, config, termsGate }) {
         res.set('Cache-Control', 'public, max-age=31536000, immutable');
       }
       res.set('Content-Type', stored.contentType);
+      // The validator reads the leading signature only, so an upload can carry
+      // anything after it. These bytes are served from the API origin, and
+      // nosniff is what keeps a browser from reading past the declared type.
+      res.set('X-Content-Type-Options', 'nosniff');
       if (stored.expectedSize !== null && stored.expectedSize !== stored.size) {
         // The row and the file disagree. Serving a truncated image is worse than
         // reporting the damage, so fail loudly instead of caching it.

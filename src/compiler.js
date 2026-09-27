@@ -22,9 +22,17 @@ function validatedCompilerPath(command) {
 // resolved here: the child runs with the project as its cwd, and the read grant
 // below has to be absolute to reach a script outside that directory.
 export function compilerCommand(config) {
-  const custom = validatedCompilerPath(config.compiler?.command);
-  if (custom) return custom;
-  return path.join(HERE, '..', 'node_modules', '@twext', 'twext', 'src', 'cli.js');
+  const command = config.compiler?.command;
+  if (command == null) {
+    return path.join(HERE, '..', 'node_modules', '@twext', 'twext', 'src', 'cli.js');
+  }
+  const custom = validatedCompilerPath(command);
+  if (!custom) {
+    throw new Error(
+      'Invalid compiler.command: expected a non-empty .js, .mjs, or .cjs script path.',
+    );
+  }
+  return custom;
 }
 
 // Uploaded project code runs in this child, so it gets an allowlist rather than
@@ -71,7 +79,13 @@ export function compileProject(
   { outFile = null, limitShell = '/bin/sh' } = {},
 ) {
   return new Promise((resolve) => {
-    const cli = compilerCommand(config);
+    let cli;
+    try {
+      cli = compilerCommand(config);
+    } catch (error) {
+      resolve({ ok: false, error: error.message, log: '', durationMs: 0 });
+      return;
+    }
     const output = outFile ?? path.join(projectDir, 'dist', 'extension.js');
     const memoryMb = config.compiler?.memoryMb ?? 192;
     const addressSpaceMb = config.compiler?.addressSpaceMb ?? 1536;

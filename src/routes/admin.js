@@ -18,7 +18,7 @@ import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
 const BROADCAST_MAX_LENGTH = 280;
 import { requireObjectBody } from './shared.js';
 
-export function makeAdminRouter({ sql, config, termsGate }) {
+export function makeAdminRouter({ sql, config, termsGate, storageProbe = {} }) {
   const router = Router();
 
   router.get('/admin/metrics', requireAdmin, async (req, res) => {
@@ -31,7 +31,7 @@ export function makeAdminRouter({ sql, config, termsGate }) {
   // it. editable is false when the file cannot hold a change -- see
   // configStorage for why a file inside the container counts as read-only.
   router.get('/admin/config', requireAdmin, async (req, res) => {
-    const storage = configStorage(config.configPath ?? 'config.yaml');
+    const storage = configStorage(config.configPath ?? 'config.yaml', storageProbe);
     res.json({
       editable: storage.persistent,
       reason: storage.reason,
@@ -63,6 +63,7 @@ export function makeAdminRouter({ sql, config, termsGate }) {
       config,
       configPath: config.configPath ?? 'config.yaml',
       patch,
+      ...storageProbe,
     });
 
     if (Object.keys(result.changes).length) {

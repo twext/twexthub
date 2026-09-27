@@ -41,7 +41,7 @@ export function makeConfig(overrides = {}) {
   };
 }
 
-export async function boot(overrides = {}) {
+export async function boot(overrides = {}, appOptions = {}) {
   if (cached) {
     if (Object.keys(overrides).length > 0) {
       throw new Error(
@@ -51,7 +51,7 @@ export async function boot(overrides = {}) {
     return cached;
   }
   const config = makeConfig(overrides);
-  const { app, sql } = await bootstrap(config, { backgroundJobs: false });
+  const { app, sql } = await bootstrap(config, { backgroundJobs: false, ...appOptions });
   cached = { app, sql, config };
   return cached;
 }

@@ -13,13 +13,16 @@ import { makeWebhooks } from './webhooks.js';
 // which is the reverse of the order a TRUNCATE takes the same two tables in, so
 // resetDb and a background pass deadlock. Tests that want a job build it
 // themselves and drive it directly.
-export async function bootstrap(config = loadConfig(), { backgroundJobs = true } = {}) {
+export async function bootstrap(
+  config = loadConfig(),
+  { backgroundJobs = true, storageProbe } = {},
+) {
   ensureDataDirs(config.dataDir);
   const sql = createDb(config);
   try {
     await runMigrations(sql);
     await reconcileOnBoot(sql, config);
-    const { app, rateLimiter, telemetry } = createApp({ config, sql });
+    const { app, rateLimiter, telemetry } = createApp({ config, sql, storageProbe });
     if (!backgroundJobs) {
       return { app, sql, config, rateLimiter, telemetry };
     }

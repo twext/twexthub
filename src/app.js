@@ -56,7 +56,11 @@ export function createApp(opts = {}) {
 
   const rateLimiter = makeRateLimiter(sql, config);
   const termsGate = makeRequireTerms(sql);
-  const shared = { sql, config, rateLimiter, termsGate };
+  // How configStorage decides whether the config file survives a recreate. Left
+  // unset the route reads the real mount table; a test passes its own so the
+  // answer does not depend on where the checkout happens to be running.
+  const storageProbe = opts.storageProbe ?? {};
+  const shared = { sql, config, rateLimiter, termsGate, storageProbe };
 
   const apiRoot = normalizeApiRoot(config.apiRoot);
   const root = apiRoot ? `/${apiRoot}` : '';

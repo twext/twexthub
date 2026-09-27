@@ -25,9 +25,27 @@ limits:
   maxSourceBytes: 1048576
 `;
 
+// Mount tables are written by hand rather than read, so the test does not depend
+// on where the checkout happens to live or on whether the host has /tmp mounted.
+// A single mount at the root is what a container's own writable layer looks like
+// from inside; the second table adds a bind mount over the temp directory, which
+// is what an operator mounting the config into a volume gets.
+const CONTAINER_MOUNT = '1 0 0:1 / / rw,relatime - overlay overlay rw\n';
+const volumeMount = (dir) => `${CONTAINER_MOUNT}2 0 0:2 / ${dir} rw,relatime - ext4 /dev/sda1 rw\n`;
+
 before(async () => {
-  ({ app, sql, config } = await boot());
   configFile = path.join(mkdtempSync(path.join(tmpdir(), 'twexthub-config-')), 'config.yaml');
+  // The HTTP config tests go through the route, which asks configStorage about
+  // the real filesystem. Left to itself the answer depends on where the suite
+  // happens to run: inside a container the temp directory sits on the root
+  // overlay, and the route then answers 409 to a change that is safe to make
+  // here. A bind mount over the temp directory is what an operator mounting
+  // the config into a volume gets, so the probe says that instead of reading
+  // the host's mount table.
+  ({ app, sql, config } = await boot(
+    {},
+    { storageProbe: { mountInfo: volumeMount(dirname(configFile)), container: true } },
+  ));
   writeFileSync(configFile, CONFIG_YAML, 'utf8');
   originalConfigPath = config.configPath;
   config.configPath = configFile;
@@ -56,14 +74,6 @@ async function ordinary() {
   await sql`UPDATE users SET role = 'normal' WHERE namespace = ${account.user.namespace}`;
   return account;
 }
-
-// Mount tables are written by hand rather than read, so the test does not depend
-// on where the checkout happens to live or on whether the host has /tmp mounted.
-// A single mount at the root is what a container's own writable layer looks like
-// from inside; the second table adds a bind mount over the temp directory, which
-// is what an operator mounting the config into a volume gets.
-const CONTAINER_MOUNT = '1 0 0:1 / / rw,relatime - overlay overlay rw\n';
-const volumeMount = (dir) => `${CONTAINER_MOUNT}2 0 0:2 / ${dir} rw,relatime - ext4 /dev/sda1 rw\n`;
 
 describe('configStorage', () => {
   test('calls a file under the root mount read-only inside a container', () => {

@@ -215,6 +215,10 @@ export function makeWebhooks({ sql }) {
           // provider a URL points at.
           content: message,
           text: message,
+          // A namespace may be `everyone` or `here`, and the message opens with
+          // @namespace, so Discord would read one namespace as a mass ping. It
+          // honours an empty parse list, and Slack ignores the key.
+          allowed_mentions: { parse: [] },
         };
         // Sign these exact bytes and store them with the delivery: jsonb
         // round-trips reorder keys, so re-serializing at delivery time would

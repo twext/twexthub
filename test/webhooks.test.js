@@ -246,6 +246,13 @@ test('registry events schedule deliveries for subscribed hooks', async () => {
     assert.ok(wire.message, `${row.event} should carry a rendered line`);
     assert.equal(wire.content, wire.message, `${row.event} should carry a content alias`);
     assert.equal(wire.text, wire.message, `${row.event} should carry a text alias`);
+    // A namespace can be `everyone` or `here` and the line opens with
+    // @namespace, so the payload has to tell Discord not to read one as a ping.
+    assert.deepEqual(
+      wire.allowed_mentions,
+      { parse: [] },
+      `${row.event} should carry an empty mention parse list`,
+    );
   }
 });
 

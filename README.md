@@ -12,6 +12,7 @@
   - [Authors](#authors)
 - [Usage](#usage)
 - [Installation](#installation)
+  - [Development](#development)
   - [Running with Docker](#running-with-docker)
 - [Feedback and Contributing](#feedback-and-contributing)
 
@@ -63,6 +64,22 @@ Migrations in `migrations/*.sql` run in order on boot, or ahead of time with `np
 For production, set `publicBaseUrl` to the public URL of the instance (it's used to build download links) and run behind a TLS-terminating proxy.
 
 All API paths are served under `apiRoot` in `config.yaml` (default `/v1`), so `/v1/extensions`, `/ts/extensions`, or an empty prefix are all the same endpoint on a server with the matching `apiRoot`. Download links in API responses use the same prefix. The same value can be set with `TWEXTHUB_API_ROOT`.
+
+### Development
+
+The test suite talks to a Postgres database. CI runs one as a service (the same image, port, and credentials, defined in [.github/workflows/ci.yml](.github/workflows/ci.yml)); locally, `npm run test:setup` starts the equivalent container:
+
+```sh
+npm install
+npm run test:setup   # starts the test Postgres, creates the database
+npm test
+```
+
+`test:setup` is idempotent — the container and its data live in a named volume, so it is a one-time start per machine, and re-running it is harmless. `npm run test:teardown` stops the container (`down`, not `down -v`; the database survives until you say otherwise).
+
+Tests default to `postgres://postgres:postgres@localhost:5432/twexthub_test`. If your database lives elsewhere — a shared server, a non-Docker local install — point `TWEXTHUB_TEST_DATABASE_URL` at it instead; it is consumed by the test suite and CI only, and is not part of the server's configuration surface.
+
+Without the database, `npm test` fails fast with instructions rather than a driver stack trace.
 
 ### Running with Docker
 

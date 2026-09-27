@@ -4,6 +4,7 @@ import path from 'node:path';
 import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import request from 'supertest';
 import assert from 'node:assert/strict';
+import postgres from 'postgres';
 import { bootstrap } from '../src/server.js';
 import { createTarballBuffer } from '../src/tarball.js';
 
@@ -41,6 +42,76 @@ export function makeConfig(overrides = {}) {
   };
 }
 
+// postgres.js connects lazily, so a database that is not there does not fail
+// until bootstrap's first query, as a bare driver error. The two ways that
+// usually happens are worth instructions rather than a stack trace: the server
+// is not running, or the database has not been created. Everything else — bad
+// password, deadlocked migration — is left exactly as the driver reported it.
+const CONNECTION_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNRESET']);
+
+function describeBootFailure(error, url) {
+  const shown = (() => {
+    try {
+      const parsed = new URL(url);
+      parsed.password = '';
+      return parsed.toString();
+    } catch {
+      return 'the URL in TWEXTHUB_TEST_DATABASE_URL';
+    }
+  })();
+  const database = (() => {
+    try {
+      return new URL(url).pathname.slice(1);
+    } catch {
+      return 'twexthub_test';
+    }
+  })();
+
+  if (error?.code === '3D000') {
+    return (
+      `the test database "${database}" does not exist.\n\n` +
+      '`npm run test:setup` starts the test Postgres and creates it.'
+    );
+  }
+  // The driver wraps its connect errors; the code and message worth showing can
+  // sit one or two `cause`s down, and the top-level message can be empty.
+  const chain = [];
+  for (let e = error; e; e = e.cause) {
+    chain.push(e);
+    if (chain.length > 5) break;
+  }
+  const connectCode = chain.map((e) => e?.code).find((code) => CONNECTION_CODES.has(code));
+  if (connectCode) {
+    const detail = chain.map((e) => e?.message).find(Boolean) ?? connectCode;
+    return (
+      `the test database at ${shown} is not reachable (${detail}).\n\n` +
+      '`npm test` needs the Postgres container CI runs — `npm run test:setup`\n' +
+      'starts it. If your database lives elsewhere, point\n' +
+      'TWEXTHUB_TEST_DATABASE_URL at it.'
+    );
+  }
+  return null;
+}
+
+// One connection attempt, classified by describeBootFailure. `npm test` runs
+// this before the suite (see test/preflight.mjs) so a missing database is one
+// clear message and a stop, rather than every test file failing on its own
+// boot() with the same hint 200-odd times. boot() keeps its own rewrite as the
+// fallback for files run directly, which skip the preflight.
+export async function checkTestDatabase(url = TEST_DATABASE_URL) {
+  const probe = postgres(url, { max: 1, connect_timeout: 5, idle_timeout: 1 });
+  try {
+    await probe`SELECT 1`;
+  } catch (error) {
+    const hint =
+      describeBootFailure(error, url) ??
+      `the test database at ${url} rejected the connection check.`;
+    throw new Error(hint, { cause: error });
+  } finally {
+    await probe.end({ timeout: 5 });
+  }
+}
+
 export async function boot(overrides = {}, appOptions = {}) {
   if (cached) {
     if (Object.keys(overrides).length > 0) {
@@ -51,8 +122,15 @@ export async function boot(overrides = {}, appOptions = {}) {
     return cached;
   }
   const config = makeConfig(overrides);
-  const { app, sql } = await bootstrap(config, { backgroundJobs: false, ...appOptions });
-  cached = { app, sql, config };
+  let booted;
+  try {
+    booted = await bootstrap(config, { backgroundJobs: false, ...appOptions });
+  } catch (error) {
+    const hint = describeBootFailure(error, config.database.url);
+    if (!hint) throw error;
+    throw new Error(hint, { cause: error });
+  }
+  cached = booted;
   return cached;
 }
 

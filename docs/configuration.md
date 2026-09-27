@@ -185,4 +185,4 @@ Ordinary JSON bodies are capped at 100 KB. The publish endpoint instead takes a 
 
 ## Not runtime configuration
 
-`TWEXTHUB_TEST_DATABASE_URL` is consumed by the test suite and CI only. It is not part of the configuration surface.
+`TWEXTHUB_TEST_DATABASE_URL` is consumed by the test suite and CI only. It is not part of the configuration surface. It defaults to the database `npm run test:setup` starts — see [Development](../README.md#development) in the README.

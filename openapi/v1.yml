@@ -24,17 +24,21 @@ info:
     `termsAcceptedVersion` set to the `version` that `GET /terms` reports. A
     stale version is a `422`, so an acceptance is always recorded against text
     the account was shown. Exemptions that stay available without
-    re-acceptance: `POST /auth/logout`, `GET /auth/me`, the acceptance itself,
-    password-only user updates, and account deletion.
+    re-acceptance: `DELETE /sessions/current`, `GET /me`, the acceptance
+    itself, password-only user updates, and account deletion.
 
     Bearer tokens come in two kinds. **Sessions** are created by
-    `/auth/login` or `/auth/signup`, expire after 7 days, and implicitly
-    satisfy every scope. **Automation tokens** are created explicitly via
+    `POST /sessions` (sign in) or `POST /users` (create an account, which
+    signs the new account in), expire after 7 days, and implicitly satisfy
+    every scope. **Automation tokens** are created explicitly via
     `POST /tokens`, are scoped to just `publish` and/or `yank` for CI use
     (e.g. a `twext publish` GitHub Action), and never expire unless the
-    caller sets one. Only a session may manage sessions or automation
-    tokens, act on `/admin/*` endpoints, or change account settings —
-    an automation token calling any of those gets a `403`.
+    caller sets one. A caller can revoke the credential it is holding
+    without knowing its own id: `DELETE /sessions/current` ends the session
+    and `DELETE /tokens/current` revokes the automation token. Only a
+    session may manage sessions or automation tokens, act on `/admin/*`
+    endpoints, or change account settings — an automation token calling any
+    of those gets a `403`.
 servers:
   - url: https://{host}/v1
     variables:
@@ -53,45 +57,34 @@ security:
   - BearerAuth: []
 
 paths:
-  # ---------------------------------------------------------------- Auth
-  /auth/signup:
-    post:
-      summary: Create an account
-      operationId: signup
-      tags: [Open]
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [namespace, password]
-              properties:
-                namespace: { $ref: '#/components/schemas/Namespace' }
-                displayName: { type: string, maxLength: 80 }
-                password: { type: string, minLength: 8, writeOnly: true }
+  # ------------------------------------------------------------ The caller
+  /me:
+    get:
+      summary: Get the authenticated account
+      operationId: getAuthenticatedUser
+      tags: [Userspace]
+      description: >
+        The account the presented token belongs to. It is not addressed by
+        namespace because there is exactly one and the token already names it.
       responses:
-        '201':
-          description: Account created. The first account ever created becomes an admin.
+        '200':
+          description: The caller's own account
           content:
             application/json:
-              schema:
-                type: object
-                required: [user, token]
-                properties:
-                  user: { $ref: '#/components/schemas/User' }
-                  token: { type: string }
-        '409': { $ref: '#/components/responses/Conflict' }
-        '422': { $ref: '#/components/responses/UnprocessableEntity' }
-        '429': { $ref: '#/components/responses/TooManyRequests' }
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
 
-  /auth/login:
+  # ---------------------------------------------- Sessions & automation tokens
+  /sessions:
     post:
-      summary: Log in
-      operationId: login
+      summary: Sign in
+      operationId: createSession
       tags: [Open]
       security: []
+      description: >
+        Signing in is creating a session, so the credentials ride in the body
+        rather than a namespace in the path. The plaintext `token` is shown
+        once here and never again: only its hash is stored.
       requestBody:
         required: true
         content:
@@ -103,44 +96,23 @@ paths:
                 namespace: { $ref: '#/components/schemas/Namespace' }
                 password: { type: string, writeOnly: true }
       responses:
-        '200':
-          description: Authenticated
+        '201':
+          description: The session that was created, its owner, and its one-time token
+          headers:
+            Location:
+              description: The new session's own URL
+              schema: { type: string }
           content:
             application/json:
               schema:
                 type: object
-                required: [user, token]
+                required: [session, user, token]
                 properties:
+                  session: { $ref: '#/components/schemas/Session' }
                   user: { $ref: '#/components/schemas/User' }
                   token: { type: string }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
-
-  /auth/logout:
-    post:
-      summary: Revoke the current bearer token
-      operationId: logout
-      tags: [Userspace]
-      description: Equivalent to `DELETE /sessions/{id}` for the session that authenticated this request.
-      responses:
-        '204': { description: Token revoked }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-
-  /auth/me:
-    get:
-      summary: Get the authenticated account
-      operationId: getMe
-      tags: [Userspace]
-      responses:
-        '200':
-          description: The caller's own account
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/User' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-
-  # ---------------------------------------------- Sessions & automation tokens
-  /sessions:
     get:
       summary: List a caller's active sessions
       operationId: listSessions
@@ -169,6 +141,21 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '400': { $ref: '#/components/responses/BadRequest' }
 
+  /sessions/current:
+    delete:
+      summary: Revoke the session making this request
+      operationId: revokeCurrentSession
+      tags: [Userspace]
+      description: >
+        `current` is the session that authenticated the request, so a client
+        that never kept its own id can still sign itself out. Exempt from the
+        terms gate: an account that has just been bumped to new terms is exactly
+        the one that needs to be able to end its session.
+      responses:
+        '204': { description: Revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
   /sessions/{id}:
     parameters:
       - name: id
@@ -179,7 +166,7 @@ paths:
       summary: Revoke a session
       operationId: deleteSession
       tags: [Userspace]
-      description: Self or admin, session-authenticated only. Revoking the session that authenticated this very request behaves like `POST /auth/logout`.
+      description: Self or admin, session-authenticated only. To revoke the session making the request, use `DELETE /sessions/current` instead of looking up its id.
       responses:
         '204': { description: Revoked }
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -244,6 +231,20 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
 
+  /tokens/current:
+    delete:
+      summary: Revoke the automation token making this request
+      operationId: revokeCurrentAutomationToken
+      tags: [Userspace]
+      description: >
+        The automation-token counterpart to `DELETE /sessions/current`, for CI
+        that holds a single token and no id. Automation-token authenticated, so a
+        session gets a `403`: it has no token of its own to revoke.
+      responses:
+        '204': { description: Revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
   /tokens/{id}:
     parameters:
       - name: id
@@ -291,6 +292,46 @@ paths:
 
   # --------------------------------------------------------------- Users
   /users:
+    post:
+      summary: Create an account
+      operationId: createUser
+      tags: [Open]
+      security: []
+      description: >
+        Creating the account and signing in are the same act, so the response
+        carries a session too: the new user, the session opened for it, and the
+        plaintext token to use for both. The first account ever created becomes
+        an admin.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [namespace, password]
+              properties:
+                namespace: { $ref: '#/components/schemas/Namespace' }
+                displayName: { type: string, maxLength: 80 }
+                password: { type: string, minLength: 8, writeOnly: true }
+      responses:
+        '201':
+          description: Account created, with a session already open for it
+          headers:
+            Location:
+              description: The new account's own URL
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user, session, token]
+                properties:
+                  user: { $ref: '#/components/schemas/User' }
+                  session: { $ref: '#/components/schemas/Session' }
+                  token: { type: string }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
     get:
       summary: List accounts
       operationId: listUsers

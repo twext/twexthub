@@ -24,9 +24,9 @@ test('sessions lists only the current session for a user', async () => {
 
   // a second session appears for the same user
   const r = await request(app)
-    .post('/v1/auth/login')
+    .post('/v1/sessions')
     .send({ namespace: ns, password: FIXTURE_PASSWORD })
-    .expect(200);
+    .expect(201);
   const secondToken = r.body.token;
 
   const again = await request(app).get('/v1/sessions').set(bearer(secondToken)).expect(200);
@@ -38,9 +38,9 @@ test('deleting a session revokes it', async () => {
   const ns = user.namespace;
 
   const login = await request(app)
-    .post('/v1/auth/login')
+    .post('/v1/sessions')
     .send({ namespace: ns, password: FIXTURE_PASSWORD })
-    .expect(200);
+    .expect(201);
   const secondToken = login.body.token;
 
   const list = await request(app).get('/v1/sessions').set(bearer(token)).expect(200);
@@ -52,7 +52,7 @@ test('deleting a session revokes it', async () => {
   const after = await request(app).get('/v1/sessions').set(bearer(token)).expect(200);
   assert.equal(after.body.data.length, 1);
 
-  await request(app).get('/v1/auth/me').set(bearer(secondToken)).expect(401);
+  await request(app).get('/v1/me').set(bearer(secondToken)).expect(401);
 });
 
 test('automation tokens cannot list sessions', async () => {

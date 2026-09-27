@@ -8,7 +8,7 @@ import { makeRequestTelemetry } from './observability.js';
 import { makeCors } from './cors.js';
 import { HttpError, notFound, errorHandler } from './errors.js';
 import { normalizeApiRoot } from './util.js';
-import { makeAuthRouter } from './routes/auth.js';
+import { makeMeRouter } from './routes/me.js';
 import { makeSessionsRouter } from './routes/sessions.js';
 import { makeTokensRouter } from './routes/tokens.js';
 import { makeUsersRouter } from './routes/users.js';
@@ -66,11 +66,11 @@ export function createApp(opts = {}) {
   const root = apiRoot ? `/${apiRoot}` : '';
   const mount = (suffix) => `${root}${suffix}`;
 
-  app.use(mount('/auth'), makeAuthRouter(shared));
   app.use(mount('/sessions'), makeSessionsRouter(shared));
   app.use(mount('/tokens'), makeTokensRouter(shared));
   app.use(mount('/users'), makeUsersRouter(shared));
   app.use(mount('/notifications'), makeNotificationsRouter(shared));
+  app.use(root || '/', makeMeRouter(shared));
   app.use(root || '/', makeBlobsRouter(shared));
   app.use(root || '/', makePackagesRouter(shared));
   app.use(root || '/', makeDiscoveryRouter(shared));

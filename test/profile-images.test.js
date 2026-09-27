@@ -755,7 +755,7 @@ describe('visibility', () => {
     const ns = await account();
     await put(ns, 'avatar', pngBytes(), 'image/png');
     const res = await request(app)
-      .get('/v1/auth/me')
+      .get('/v1/me')
       .set(bearer(tokens.get(ns)));
     assert.equal(res.status, 200);
     assert.equal(res.body.avatarUrl, await versioned(ns, 'avatar'));
@@ -770,7 +770,7 @@ describe('visibility', () => {
       .expect(200);
 
     const res = await request(app)
-      .get('/v1/auth/me')
+      .get('/v1/me')
       .set(bearer(tokens.get(ns)));
     assert.equal(res.body.bio, 'Hello there');
     assert.equal(res.body.website, 'https://kane.dev');

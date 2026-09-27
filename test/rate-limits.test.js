@@ -131,10 +131,10 @@ test('the download bucket is per IP, keyed on real paths, and a null limit disab
 test('signup and login limits still work alongside the new buckets', async () => {
   const ns = uniqNs();
   for (let i = 0; i < 5; i += 1) {
-    await request(tightApp).post('/v1/auth/login').send({ namespace: ns, password: 'wrong-pass' });
+    await request(tightApp).post('/v1/sessions').send({ namespace: ns, password: 'wrong-pass' });
   }
   const sixth = await request(tightApp)
-    .post('/v1/auth/login')
+    .post('/v1/sessions')
     .send({ namespace: ns, password: 'wrong-pass' });
   assert.equal(sixth.status, 429);
 });

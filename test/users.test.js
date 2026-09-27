@@ -63,13 +63,13 @@ test('changing password revokes existing sessions and tokens', async () => {
     .send({ password: 'newpassword9', currentPassword: FIXTURE_PASSWORD })
     .expect(200);
 
-  await request(app).get('/v1/auth/me').set(bearer(token)).expect(401);
+  await request(app).get('/v1/me').set(bearer(token)).expect(401);
   await request(app).get('/v1/tokens').set(bearer(created.body.token)).expect(401);
 
   const login = await request(app)
-    .post('/v1/auth/login')
+    .post('/v1/sessions')
     .send({ namespace: ns, password: 'newpassword9' })
-    .expect(200);
+    .expect(201);
   assert.ok(login.body.token);
 });
 
@@ -90,9 +90,9 @@ test('password rotation bypasses terms re-acceptance', async () => {
   assert.equal(r.status, 200);
 
   const login = await request(app)
-    .post('/v1/auth/login')
+    .post('/v1/sessions')
     .send({ namespace: user.namespace, password: 'newpassword9' })
-    .expect(200);
+    .expect(201);
   assert.ok(login.body.token);
 });
 

@@ -80,7 +80,7 @@ export function bearer(token) {
 export const FIXTURE_PASSWORD = 'correct-horse-battery-staple';
 
 export async function signup(app, namespace, password = FIXTURE_PASSWORD, displayName = namespace) {
-  return request(app).post('/v1/auth/signup').send({ namespace, password, displayName });
+  return request(app).post('/v1/users').send({ namespace, password, displayName });
 }
 
 export async function acceptTerms(app, namespace, token) {

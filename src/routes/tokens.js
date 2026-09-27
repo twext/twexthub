@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { hashToken, newToken, requireSession } from '../auth.js';
+import { hashToken, newToken, requireAuth, requireSession } from '../auth.js';
 import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
 import { fieldErrors, forbidden, notFound } from '../errors.js';
 import { automationTokenToObject } from '../serialize.js';
@@ -134,6 +134,18 @@ export function makeTokensRouter({ sql, config }) {
     if (!updated) throw notFound();
 
     res.json(automationTokenToObject(updated));
+  });
+
+  // The counterpart of `DELETE /sessions/current`: an automation token that
+  // revokes itself, without the caller having to know its own id. A session is
+  // not a token, so it has no row here to delete and is told so rather than
+  // having a session id matched against this table.
+  router.delete('/current', requireAuth, async (req, res) => {
+    if (req.auth.tokenType !== 'automation') {
+      throw forbidden('This is a session; use DELETE /sessions/current to end it.');
+    }
+    await sql`DELETE FROM automation_tokens WHERE id = ${req.auth.tokenId}`;
+    res.status(204).end();
   });
 
   router.delete('/:id', requireSession, async (req, res) => {

@@ -14,11 +14,11 @@ import {
 } from '../profile-images.js';
 import { removeSourceIfUnused } from '../sources.js';
 import { decodeCursor, encodeCursor, parseLimit } from '../pagination.js';
-import { fieldErrors, forbidden, HttpError, notFound } from '../errors.js';
-import { isValidNamespace } from '../util.js';
-import { userToObject } from '../serialize.js';
+import { conflict, fieldErrors, forbidden, HttpError, notFound } from '../errors.js';
+import { isValidNamespace, normalizeApiRoot } from '../util.js';
+import { sessionToObject, userToObject } from '../serialize.js';
 import { notifyUser, roleChangedMessage, tokensRevokedMessage } from '../notify.js';
-import { requireObjectBody } from './shared.js';
+import { createSession, requireObjectBody } from './shared.js';
 import { audit } from '../audit.js';
 
 // A bare /^https?:\/\// prefix accepts "https://" with no host and anything the
@@ -34,8 +34,75 @@ function isHttpUrl(value) {
   return parsed.hostname.length > 0;
 }
 
-export function makeUsersRouter({ sql, config, termsGate }) {
+export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
   const router = Router();
+  const scrypt = config.auth.scrypt;
+  const sessionTtlMs = config.auth.sessionTtlDays * 86_400_000;
+
+  // Creating the account is the same act as signing in, so a new user arrives
+  // with a session already: the response is the user, the session that was
+  // opened for it, and the token to use for both.
+  router.post('/', async (req, res) => {
+    requireObjectBody(req);
+    const { namespace, password, displayName } = req.body;
+
+    const errors = [];
+    if (typeof namespace !== 'string' || !isValidNamespace(namespace)) {
+      errors.push({
+        field: 'namespace',
+        message: 'Must be lowercase letters, digits and hyphens; no leading/trailing hyphen.',
+      });
+    }
+    if (typeof password !== 'string') {
+      errors.push({ field: 'password', message: 'Password is required.' });
+    } else if (password.length < 8) {
+      errors.push({ field: 'password', message: 'Password must be at least 8 characters.' });
+    }
+    if (displayName !== undefined && typeof displayName !== 'string') {
+      errors.push({ field: 'displayName', message: 'Must be a string.' });
+    } else if (displayName !== undefined && displayName.length > 80) {
+      errors.push({
+        field: 'displayName',
+        message: 'Display name must be at most 80 characters.',
+      });
+    }
+    if (errors.length > 0) throw fieldErrors(errors);
+
+    const effectiveDisplayName =
+      typeof displayName === 'string' && displayName.length > 0 ? displayName : namespace;
+
+    await rateLimiter.signupCheck(`signup:${req.ip}`);
+    const passwordHash = await hashPassword(password, scrypt);
+
+    let user;
+    let created;
+    try {
+      await sql.begin(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(hashtext('signup-bootstrap'))`;
+        const [{ count }] = await tx`SELECT count(*)::int AS count FROM users`;
+        const role = count === 0 ? 'admin' : 'normal';
+        [user] = await tx`
+          INSERT INTO users (namespace, display_name, password_hash, role)
+          VALUES (${namespace}, ${effectiveDisplayName}, ${passwordHash}, ${role})
+          RETURNING *
+        `;
+        created = await createSession(tx, user.id, sessionTtlMs);
+      });
+    } catch (error) {
+      if (error.code === '23505') throw conflict('That namespace is already taken.');
+      throw error;
+    }
+
+    const root = normalizeApiRoot(config.apiRoot);
+    res
+      .location(`/${root}/users/${user.namespace}`)
+      .status(201)
+      .json({
+        user: userToObject(user, config),
+        session: sessionToObject(created.session),
+        token: created.token,
+      });
+  });
 
   function serializePublicUser(row, req) {
     const isOwner = req.auth?.user.namespace === row.namespace;

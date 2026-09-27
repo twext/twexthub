@@ -25,7 +25,7 @@ Admins act with a session token. To get one for scripting the queue:
 ```sh
 curl -X POST -H 'Content-Type: application/json' \
   -d '{"namespace":"alice","password":"…"}' \
-  https://hub.example.com/v1/auth/login
+  https://hub.example.com/v1/sessions
 ```
 
 The response includes `token`; every admin endpoint below takes it as `Authorization: Bearer <token>`. Automation tokens are rejected by admin endpoints.

@@ -476,9 +476,9 @@ test('an admin password reset notifies the target, self-service does not', async
   assert.match(rows[0].message, new RegExp(`@${admin.user.namespace}`));
 
   const relogin = await request(app)
-    .post('/v1/auth/login')
+    .post('/v1/sessions')
     .send({ namespace: target.user.namespace, password: 'newpassword1' })
-    .expect(200);
+    .expect(201);
   await request(app)
     .patch(`/v1/users/${target.user.namespace}`)
     .set(bearer(relogin.body.token))

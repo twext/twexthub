@@ -157,7 +157,7 @@ test('terms and privacy documents are public', async () => {
 
 test('accepting terms on the user records the version that was read', async () => {
   const { token, user } = await signupAndAccept(app, uniqNs());
-  const me = await request(app).get('/v1/auth/me').set(bearer(token)).expect(200);
+  const me = await request(app).get('/v1/me').set(bearer(token)).expect(200);
   assert.equal(me.body.termsAcceptedVersion, 1);
 
   // The version has to be the one the account was shown, so a stale acceptance
@@ -173,7 +173,7 @@ test('accepting terms on the user records the version that was read', async () =
 
 test('publish without accepting terms is forbidden', async () => {
   const r = await request(app)
-    .post('/v1/auth/signup')
+    .post('/v1/users')
     .send({ namespace: uniqNs(), password: 'password123', displayName: 'd' });
   const { token } = r.body;
   const pub = await publish(token, r.body.user.namespace, 'aaa', '1.0.0', {}, 403);

@@ -14,7 +14,9 @@ const LAST_USED_THROTTLE_MS = 60_000;
 export function makeAuthenticate(sql) {
   return async function authenticate(req, res, next) {
     const header = req.headers.authorization;
-    const match = typeof header === 'string' ? header.match(/^Bearer\s+(.+)$/i) : null;
+    // \S after \s+ keeps the match unambiguous (the two can't share a
+    // character), so this can't backtrack polynomially on hostile input.
+    const match = typeof header === 'string' ? header.match(/^Bearer\s+(\S.*)$/i) : null;
     if (!match) {
       req.auth = null;
       return next();

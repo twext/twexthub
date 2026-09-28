@@ -76,7 +76,7 @@ function capLog(text, dropped) {
 export function compileProject(
   config,
   projectDir,
-  { outFile = null, limitShell = '/bin/sh' } = {},
+  { outFile = null, _limitShell = '/bin/sh' } = {},
 ) {
   return new Promise((resolve) => {
     let cli;
@@ -145,21 +145,17 @@ export function compileProject(
 
     // Run Node directly (no shell) and apply process memory limits via spawn.
     // This avoids shell interpretation of dynamic paths while preserving limits.
-    const child = spawn(
-      process.execPath,
-      args,
-      {
-        cwd: projectDir,
-        env,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        timeout: timeoutMs,
-        killSignal: 'SIGKILL',
-        windowsHide: true,
-        resourceLimits: {
-          maxRSS: addressSpaceMb * 1024 * 1024,
-        },
+    const child = spawn(process.execPath, args, {
+      cwd: projectDir,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: timeoutMs,
+      killSignal: 'SIGKILL',
+      windowsHide: true,
+      resourceLimits: {
+        maxRSS: addressSpaceMb * 1024 * 1024,
       },
-    );
+    });
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk) => {

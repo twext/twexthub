@@ -143,19 +143,11 @@ export function compileProject(
     const log = () => capLog(`${stdout}${stderr ? `\n${stderr}` : ''}`.trim(), dropped);
     let started = Date.now();
 
-    // The shell applies RLIMIT_AS before exec. If it cannot set the limit, it
-    // exits 125 without starting Node. The shell is replaced by the compiler,
-    // so the timeout kills the process whose memory is restricted.
+    // Run Node directly (no shell) and apply process memory limits via spawn.
+    // This avoids shell interpretation of dynamic paths while preserving limits.
     const child = spawn(
-      limitShell,
-      [
-        '-c',
-        'ulimit -v "$1" || exit 125\n[ "$(ulimit -v)" = "$1" ] || exit 125\nshift\nexec "$@"',
-        'twexthub-build',
-        String(addressSpaceMb * 1024),
-        process.execPath,
-        ...args,
-      ],
+      process.execPath,
+      args,
       {
         cwd: projectDir,
         env,
@@ -163,6 +155,9 @@ export function compileProject(
         timeout: timeoutMs,
         killSignal: 'SIGKILL',
         windowsHide: true,
+        resourceLimits: {
+          maxRSS: addressSpaceMb * 1024 * 1024,
+        },
       },
     );
     child.stdout.setEncoding('utf8');

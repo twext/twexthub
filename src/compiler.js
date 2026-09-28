@@ -55,6 +55,12 @@ function tailWithinBytes(text, limit) {
   return bytes.subarray(start).toString('utf8');
 }
 
+// Quote a word for a POSIX shell. Single quotes make everything else literal,
+// so a path with spaces or quotes arrives as one argv entry, intact.
+function shellQuote(word) {
+  return `'${word.replace(/'/g, `'\\''`)}'`;
+}
+
 function capLog(text, dropped) {
   const bytes = Buffer.byteLength(text);
   if (dropped === 0 && bytes <= MAX_LOG_BYTES) return text;
@@ -145,17 +151,17 @@ export function compileProject(
 
     // The shell applies RLIMIT_AS before exec. If it cannot set the limit, it
     // exits 125 without starting Node. The shell is replaced by the compiler,
-    // so the timeout kills the process whose memory is restricted.
+    // so the timeout kills the process whose memory is restricted. The build
+    // command is single-quoted into the script rather than passed as further
+    // shell arguments, so no path reaches the shell unquoted.
+    const command = [process.execPath, ...args].map(shellQuote).join(' ');
+    const script = `ulimit -v "$1" || exit 125
+[ "$(ulimit -v)" = "$1" ] || exit 125
+exec ${command}`;
+
     const child = spawn(
       limitShell,
-      [
-        '-c',
-        'ulimit -v "$1" || exit 125\n[ "$(ulimit -v)" = "$1" ] || exit 125\nshift\nexec "$@"',
-        'twexthub-build',
-        String(addressSpaceMb * 1024),
-        process.execPath,
-        ...args,
-      ],
+      ['-c', script, 'twexthub-build', String(addressSpaceMb * 1024)],
       {
         cwd: projectDir,
         env,

@@ -1665,6 +1665,10 @@ paths:
       operationId: listExtensionOwners
       tags: [Open]
       security: []
+      description: >
+        Owners in join order, accepted grants and the namespace account alike.
+        An organization can be an owner, which `kind` distinguishes; the
+        accounts that act for it are at `/orgs/{namespace}/owners`.
       responses:
         '200':
           description: Owners in join order
@@ -1678,12 +1682,52 @@ paths:
                     type: array
                     items:
                       type: object
-                      required: [namespace, display_name]
+                      required: [namespace, display_name, kind]
                       properties:
                         namespace: { $ref: '#/components/schemas/Namespace' }
+                        kind: { $ref: '#/components/schemas/Kind' }
                         display_name: { type: string }
                         role: { $ref: '#/components/schemas/Role' }
                         added_at: { type: string, format: date-time }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /@{namespace}/{id}/owners/pending:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+    get:
+      summary: List the invitations this caller can accept
+      operationId: listExtensionOwnerInvites
+      tags: [Userspace]
+      description: >
+        The caller's own pending invitations, plus any addressed to an
+        organization the caller owns. An organization holds no inbox, so an
+        account acting for one has to be able to see what is waiting on it here.
+        Registered before `/owners/{ownerNamespace}` so a namespace named
+        `pending` does not shadow it.
+      responses:
+        '200':
+          description: Pending invitations, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required: [namespace, display_name, kind]
+                      properties:
+                        namespace: { $ref: '#/components/schemas/Namespace' }
+                        kind: { $ref: '#/components/schemas/Kind' }
+                        display_name: { type: string }
+                        created_at: { type: string, format: date-time }
+                        invited_by:
+                          allOf: [{ $ref: '#/components/schemas/Namespace' }]
+                          description: The namespace that sent it, or null if that account was deleted.
+        '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /@{namespace}/{id}/owners/{ownerNamespace}:
@@ -1695,26 +1739,77 @@ paths:
         required: true
         schema: { $ref: '#/components/schemas/Namespace' }
     put:
-      summary: Add an owner
-      operationId: addExtensionOwner
+      summary: Invite an owner
+      operationId: inviteExtensionOwner
       tags: [Userspace]
-      description: Existing owner or admin. The new owner is notified; removing the namespace account itself is refused.
+      description: >
+        The namespace account or an admin; a co-owner cannot widen the list.
+        This records an invitation and grants nothing on its own: the candidate
+        answers it at `POST .../accept`, and until then they cannot publish, yank,
+        tag or read a private version. The candidate is notified, or every owner
+        of it when the candidate is an organization. Asking twice is a `204`, so a
+        retry needs no state. The namespace account owns the published address
+        and cannot be invited to it.
       responses:
-        '204': { description: Owner added (idempotent) }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
-    delete:
-      summary: Remove an owner
-      operationId: removeExtensionOwner
-      tags: [Userspace]
-      description: Existing owner or admin. Transfer is grant-then-remove.
-      responses:
-        '204': { description: Owner removed }
+        '204': { description: Invitation recorded (idempotent) }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
+    delete:
+      summary: Withdraw an invitation or remove an owner
+      operationId: removeExtensionOwner
+      tags: [Userspace]
+      description: >
+        The namespace account or an admin. Withdraws a pending invitation if
+        there is one, otherwise removes an accepted owner; the invitation is
+        checked first, so which one happened is reported by the notification and
+        the webhook, not guessed. Transfer is invite, accept, then remove.
+      responses:
+        '204': { description: Invitation withdrawn or owner removed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /@{namespace}/{id}/owners/{ownerNamespace}/accept:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+      - name: ownerNamespace
+        in: path
+        required: true
+        schema: { $ref: '#/components/schemas/Namespace' }
+    post:
+      summary: Accept an invitation to co-own an extension
+      operationId: acceptExtensionOwner
+      tags: [Userspace]
+      description: >
+        The second half of the grant. An account accepts its own invitation; an
+        organization has no session, so any account on its owner list may
+        accept, and one accepting speaks for the rest. On success the invitation
+        becomes an owner row and the partners on an organization's owner list are
+        notified. The extension stays published under the namespace that owns the
+        address; this grants management, it does not move the address.
+      responses:
+        '200':
+          description: The grant now stands
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [namespace, id, owner]
+                    properties:
+                      namespace: { $ref: '#/components/schemas/Namespace' }
+                      id: { $ref: '#/components/schemas/ExtensionId' }
+                      owner: { $ref: '#/components/schemas/Namespace' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /@{namespace}/{id}/access:
     parameters:
@@ -2410,6 +2505,8 @@ components:
           tokens.revoked,
           role.changed,
           broadcast,
+          extension.owner.invited,
+          extension.owner.withdrawn,
           extension.owner.added,
           extension.owner.removed,
           organization.owner.added,
@@ -2422,9 +2519,10 @@ components:
         version), `tokens.revoked` when an admin resets another account's
         password, `role.changed` on a role change, `broadcast` from
         instance-wide admin announcements, `extension.owner.*` when an
-        account is added to or removed from an extension's owner list, and
-        `organization.owner.*` when an account is added to or removed from an
-        organization's owner list.
+        extension's owner list changes: `invited` and `withdrawn` for the
+        invitation half of the grant, `added` and `removed` once a co-owner is
+        in or out, and `organization.owner.*` when an account is added to or
+        removed from an organization's owner list.
 
     Notification:
       type: object
@@ -2700,7 +2798,14 @@ components:
     WebhookEvent:
       type: string
       enum:
-        [version.published, version.yanked, version.deprecated, version.rejected, owners.changed]
+        [
+          version.published,
+          version.yanked,
+          version.deprecated,
+          version.rejected,
+          owners.invited,
+          owners.changed,
+        ]
 
     WebhookInput:
       type: object
@@ -2754,8 +2859,9 @@ components:
           type: string
           description: >-
             e.g. version.publish, version.approve, version.reject,
-            version.yank, version.deprecate, tag.set, tag.remove, owner.add,
-            owner.remove, access.grant, access.revoke, quota.set,
+            version.yank, version.deprecate, tag.set, tag.remove, owner.invite,
+            owner.accept, owner.withdraw, owner.remove, access.grant,
+            access.revoke, quota.set,
             role.change, extension.delete, org.create, org.update, org.delete,
             organization.owner.add, organization.owner.remove,
             organization.webhook.create, organization.webhook.delete

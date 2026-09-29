@@ -49,15 +49,42 @@ test('adding an owner grants publish/yank/tag access and notifies them', async (
     .set(bearer(ownerA.token))
     .expect(204);
 
-  const list = await request(app).get(`/v1/@${ns}/hello/owners`).expect(200);
-  const namespaces = list.body.data.map((u) => u.namespace);
-  assert.ok(namespaces.includes(ns));
-  assert.ok(namespaces.includes(coowner.user.namespace));
+  // The invitation alone is not a grant, so the list does not name them yet.
+  const pending = await request(app)
+    .get(`/v1/@${ns}/hello/owners/pending`)
+    .set(bearer(coowner.token))
+    .expect(200);
+  assert.deepEqual(
+    pending.body.data.map((row) => row.namespace),
+    [coowner.user.namespace],
+  );
 
   // co-owner receives a notification
   const notes = await request(app).get('/v1/notifications').set(bearer(coowner.token)).expect(200);
   assert.equal(notes.body.data.length, 1);
-  assert.match(notes.body.data[0].message, /manage @.*\/hello/);
+  assert.match(notes.body.data[0].message, /accept management of @.*\/hello/);
+
+  await publishProject(
+    app,
+    ns,
+    'hello',
+    coowner.token,
+    {
+      version: '2.0.0',
+      code: '// x',
+    },
+    403,
+  );
+
+  await request(app)
+    .post(`/v1/@${ns}/hello/owners/${coowner.user.namespace}/accept`)
+    .set(bearer(coowner.token))
+    .expect(200);
+
+  const list = await request(app).get(`/v1/@${ns}/hello/owners`).expect(200);
+  const namespaces = list.body.data.map((u) => u.namespace);
+  assert.ok(namespaces.includes(ns));
+  assert.ok(namespaces.includes(coowner.user.namespace));
 
   // co-owner publishes and yanks
   await publishProject(app, ns, 'hello', coowner.token, {
@@ -110,11 +137,15 @@ test('adding an owner grants publish/yank/tag access and notifies them', async (
     403,
   );
 
-  // admin can still hand management around (transfer: grant then remove)
+  // admin can still hand management around (invite, then accept)
   await request(app)
     .put(`/v1/@${ns}/hello/owners/${coowner.user.namespace}`)
     .set(bearer(admin.token))
     .expect(204);
+  await request(app)
+    .post(`/v1/@${ns}/hello/owners/${coowner.user.namespace}/accept`)
+    .set(bearer(coowner.token))
+    .expect(200);
 });
 
 test('the namespace account is a permanent owner', async () => {
@@ -150,6 +181,10 @@ test("a co-owner's approval trusts the namespace, not the co-owner", async () =>
     .put(`/v1/@${ns}/hello/owners/${coowner.user.namespace}`)
     .set(bearer(ownerA.token))
     .expect(204);
+  await request(app)
+    .post(`/v1/@${ns}/hello/owners/${coowner.user.namespace}/accept`)
+    .set(bearer(coowner.token))
+    .expect(200);
 
   // The co-owner publishes into the namespace as a separate publisher, so their
   // version reaches review too and owner_id on that row is the co-owner.

@@ -217,6 +217,10 @@ test('registry events schedule deliveries for subscribed hooks', async () => {
     .set(bearer(owner.token))
     .expect(204);
   await request(app)
+    .post(`/v1/@${ns}/hooked/owners/${other.user.namespace}/accept`)
+    .set(bearer(other.token))
+    .expect(200);
+  await request(app)
     .delete(`/v1/@${ns}/hooked/owners/${other.user.namespace}`)
     .set(bearer(owner.token))
     .expect(204);
@@ -228,6 +232,7 @@ test('registry events schedule deliveries for subscribed hooks', async () => {
     'version.published',
     'version.deprecated',
     'version.yanked',
+    'owners.invited',
     'owners.changed',
   ]) {
     assert.ok(seen.includes(event), `${event} should schedule a delivery`);

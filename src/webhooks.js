@@ -8,6 +8,7 @@ export const WEBHOOK_EVENTS = Object.freeze([
   'version.yanked',
   'version.deprecated',
   'version.rejected',
+  'owners.invited',
   'owners.changed',
 ]);
 
@@ -125,6 +126,10 @@ export function renderWebhookMessage(event, namespace, id, payload) {
       return `${ref} ${payload.version} was deprecated.`;
     case 'version.rejected':
       return `${ref} ${payload.version} was rejected.`;
+    case 'owners.invited':
+      return payload.withdrawn
+        ? `${payload.withdrawn} is no longer invited to own ${ref}.`
+        : `${payload.invited} was invited to own ${ref}.`;
     case 'owners.changed':
       return payload.added
         ? `${payload.added} was added as an owner of ${ref}.`

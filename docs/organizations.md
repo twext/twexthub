@@ -12,6 +12,7 @@ This is the same thing as a personal namespace from the outside: `@acme/widget` 
 - [Creating an organization](#creating-an-organization)
 - [Owners](#owners)
 - [Publishing and visibility](#publishing-and-visibility)
+- [Co-owning an extension](#co-owning-an-extension)
 - [Profile and images](#profile-and-images)
 - [Webhooks](#webhooks)
 - [Accounts and organizations](#accounts-and-organizations)
@@ -56,6 +57,26 @@ The last owner cannot be removed (`409`). An organization nobody owns cannot be 
 `GET /v1/orgs/:namespace/extensions` is the registry listing scoped to the organization, with the same `sort`, `license`, cursor and paging parameters as `GET /v1/extensions?namespace=:namespace`. An owner of the organization sees its private extensions; everyone else sees only the public ones.
 
 Owners publish to the organization's namespace with the same `twext publish` flow as for an account. The first publish to a namespace still requires admin approval, so a new organization's first extension is reviewed exactly like a new account's.
+
+## Co-owning an extension
+
+An organization can be given ownership of an extension, so a group can help maintain something published under someone else's namespace. The owner of the extension invites the organization, and the invitation is deliberately not a grant:
+
+```sh
+# An owner of @alice/widget invites @acme
+curl -X PUT -H 'Authorization: Bearer <token>' \
+  https://hub.example.com/v1/@alice/widget/owners/acme
+
+# An owner of @acme accepts, and speaks for the rest of them
+curl -X POST -H 'Authorization: Bearer <token>' \
+  https://hub.example.com/v1/@alice/widget/owners/acme/accept
+```
+
+Until it is accepted, the organization has no access: not to publishing, not to private versions, not to the listing. Accounts on the organization's owner list are notified of the invitation and of the withdrawal of one, and `GET /v1/@alice/widget/owners` reports the organization with `"kind": "organization"` once it is in. Removing it with `DELETE` withdraws a pending invitation if there is one, and otherwise removes the grant; either way the partners are notified.
+
+An account can be invited the same way, answering its own invitation. `GET /v1/@alice/widget/owners/pending` is the inbox for both: an account sees what was addressed to it, and an owner of `@acme` sees what was addressed to `@acme`.
+
+Accepting an invitation grants management of the extension. It does not move the published address, the download history, the tags, or the webhooks — those stay with the namespace that published the extension.
 
 ## Profile and images
 

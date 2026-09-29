@@ -321,6 +321,10 @@ test('access grants open private detail/download to the grantee and revoke clean
     .put(`/v1/@${ns}/secret/owners/${coowner.user.namespace}`)
     .set(bearer(owner.token))
     .expect(204);
+  await request(app)
+    .post(`/v1/@${ns}/secret/owners/${coowner.user.namespace}/accept`)
+    .set(bearer(coowner.token))
+    .expect(200);
   await request(app).get(`/v1/@${ns}/secret`).set(bearer(coowner.token)).expect(200);
 });
 
@@ -396,6 +400,10 @@ test('concurrent publishes to sibling extensions cannot both pass the quota', as
     .put(`/v1/@${ns}/seed/owners/${coowner.user.namespace}`)
     .set(bearer(owner.token))
     .expect(204);
+  await request(app)
+    .post(`/v1/@${ns}/seed/owners/${coowner.user.namespace}/accept`)
+    .set(bearer(coowner.token))
+    .expect(200);
 
   // Size the account for one of the two publishes still to come.
   const [afterSeed] = await sql`SELECT blob_bytes FROM users WHERE namespace = ${ns}`;
@@ -459,7 +467,7 @@ test('admins can read and tune per-account quota, and only admins view the audit
     .expect(200);
   assert.equal(tuned.body.maxBlobBytes, 999);
 
-  // Audit the whole flow: publish, owner add, quota change, role change.
+  // Audit the whole flow: publish, owner invite, quota change, role change.
   const roleTarget = await signupAndAccept(app, uniqNs());
   await request(app)
     .put(`/v1/@${ns}/secret/owners/${peer.user.namespace}`)
@@ -476,12 +484,12 @@ test('admins can read and tune per-account quota, and only admins view the audit
 
   const audit = await request(app).get('/v1/admin/audit').set(bearer(admin.token)).expect(200);
   const actions = audit.body.data.map((entry) => entry.action);
-  for (const expected of ['version.publish', 'owner.add', 'quota.set', 'role.change']) {
+  for (const expected of ['version.publish', 'owner.invite', 'quota.set', 'role.change']) {
     assert.ok(actions.includes(expected), `expected audit action ${expected}, got ${actions}`);
   }
-  const ownerAdd = audit.body.data.find((entry) => entry.action === 'owner.add');
-  assert.equal(ownerAdd.target.namespace, ns);
-  assert.equal(ownerAdd.detail.added, peer.user.namespace);
+  const ownerInvite = audit.body.data.find((entry) => entry.action === 'owner.invite');
+  assert.equal(ownerInvite.target.namespace, ns);
+  assert.equal(ownerInvite.detail.invited, peer.user.namespace);
   const roleChange = audit.body.data.find((entry) => entry.action === 'role.change');
   assert.equal(roleChange.detail.role, 'admin');
   assert.equal(roleChange.detail.previousRole, 'normal');

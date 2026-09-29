@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAdmin } from '../auth.js';
+import { organizationsOwnedBy, requireAdmin } from '../auth.js';
 import { decodeCursor, keysetPage, pageLinks, parseDir, parseLimit } from '../pagination.js';
 import { HttpError, notFound } from '../errors.js';
 import { asString, foldText, isValidExtensionId, isValidNamespace } from '../util.js';
@@ -96,7 +96,10 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
   //
   // The organizations a caller owns are resolved once per request rather than
   // as a correlated subquery per row, since a caller belongs to few of them and
-  // this runs on the public listing.
+  // this runs on the public listing. An organization listed there is one whose
+  // own extensions the caller may write to; an organization holding an
+  // ownership row on somebody else's extension is reached through the
+  // extension_owners branch instead, which is already correlated on the row.
   function visibilityFilter(user, organizations = []) {
     if (user?.role === 'admin') return sql``;
     if (user) {
@@ -105,8 +108,15 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
           OR s.namespace = ANY (${sql.array(organizations)}::text[])
           OR EXISTS (
             SELECT 1 FROM extension_owners o
-            WHERE o.owner_id = ${user.id} AND o.namespace = s.namespace
+            WHERE o.namespace = s.namespace
               AND o.extension_id = s.extension_id
+              AND (
+                o.owner_id = ${user.id}
+                OR EXISTS (
+                  SELECT 1 FROM organization_owners g
+                  WHERE g.org_id = o.owner_id AND g.user_id = ${user.id}
+                )
+              )
           ))
       `;
     }
@@ -115,13 +125,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
 
   async function organizationsOf(sql, user) {
     if (!user) return [];
-    const rows = await sql`
-      SELECT org.namespace
-      FROM organization_owners g
-      JOIN users org ON org.id = g.org_id
-      WHERE g.user_id = ${user.id} AND org.kind = 'organization'
-    `;
-    return rows.map((row) => row.namespace);
+    return organizationsOwnedBy(sql, user);
   }
 
   async function listLatestVersions({

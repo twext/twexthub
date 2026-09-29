@@ -74,6 +74,19 @@ export function withdrawnAsOwnerMessage(actorNamespace, namespace, id) {
   return `The invitation to manage @${namespace}/${id} was withdrawn by @${actorNamespace}.`;
 }
 
+// A transfer moves the address itself, so the message names both ends: what is
+// being offered, and where it would land.
+export function transferRequestedMessage(actorNamespace, namespace, id, toNamespace) {
+  return `@${namespace}/${id} was offered to @${toNamespace} by @${actorNamespace}. Accept it to take the extension over.`;
+}
+
+export function transferOutcomeMessage(actorNamespace, namespace, id, toNamespace, outcome) {
+  if (outcome === 'accepted') {
+    return `@${namespace}/${id} now belongs to @${toNamespace}, accepted by @${actorNamespace}. The old address redirects.`;
+  }
+  return `The transfer of @${namespace}/${id} to @${toNamespace} was withdrawn by @${actorNamespace}.`;
+}
+
 // An organization names people rather than extensions, so these are the same
 // two messages with the extension id left off.
 export function addedAsOrgOwnerMessage(actorNamespace, namespace) {

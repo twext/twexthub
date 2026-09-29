@@ -36,6 +36,17 @@ import {
 } from '../notify.js';
 import { requireObjectBody } from './shared.js';
 import {
+  acceptTransfer,
+  hasOrgOwner,
+  loadNamespaceAccount as loadTransferRecipient,
+  mayOfferTransfer,
+  mayReceiveTransfer,
+  openTransfer,
+  pendingTransfersFor,
+  redirectFor,
+  withdrawTransfer,
+} from '../transfer.js';
+import {
   BLOB_GC_LOCK_KEY,
   blobPathFor,
   removeBlobIfUnused,
@@ -138,12 +149,35 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     return await loadVersion(namespace, id, tagRow.version);
   }
 
+  // An address that has been transferred away answers with the address that
+  // replaced it, so a pinned `@old/id` keeps resolving.
+  //
+  // The redirect is only sent to a caller who would have been allowed to read
+  // the extension at its new address. Answering everybody would turn the old
+  // address into a directory of which private extensions moved and where to, and
+  // a caller with no business there has to get the same 404 they got before the
+  // move -- so the destination's visibility is checked, and the redirect is not
+  // a way around it.
+  async function redirectIfMoved(req, res, suffix = '') {
+    const { namespace, id } = req.params;
+    const moved = await redirectFor(sql, namespace, id);
+    if (!moved) return false;
+    const visibility = await loadVisibility(moved.namespace, moved.id);
+    if (!visibility || !(await canSee(req.auth?.user ?? null, visibility))) throw notFound();
+    const query = req.originalUrl.includes('?')
+      ? `?${req.originalUrl.slice(req.originalUrl.indexOf('?') + 1)}`
+      : '';
+    res.redirect(301, `/v1/@${moved.namespace}/${moved.id}${suffix}${query}`);
+    return true;
+  }
+
   // A range is a filter on the collection, not a lookup of its own: the list is
   // every version the caller can see that satisfies it, highest SemVer first, so
   // the first entry is the one a "resolve" would have picked.
   router.get('/@:namespace/:id/versions', async (req, res) => {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    if (await redirectIfMoved(req, res, '/versions')) return;
     const { range } = req.query;
     if (range !== undefined && (typeof range !== 'string' || !semver.validRange(range.trim()))) {
       throw fieldErrors([{ field: 'range', message: 'Must be a valid SemVer range.' }]);
@@ -402,6 +436,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
   router.get('/@:namespace/:id/tags', async (req, res) => {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    if (await redirectIfMoved(req, res, '/tags')) return;
     const visibility = await loadVisibility(namespace, id);
     if (!visibility || !(await canSee(req.auth?.user, visibility))) throw notFound();
     const rows = await sql`
@@ -470,6 +505,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
   });
 
   router.get('/@:namespace/:id/versions/:version', async (req, res) => {
+    if (await redirectIfMoved(req, res, `/versions/${req.params.version}`)) return;
     const row = await resolveVersion(req.params, req.auth?.user ?? null);
     const isVisible =
       row.status === 'published' || row.status === 'yanked' || row.status === 'deprecated';
@@ -671,6 +707,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     }
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    if (await redirectIfMoved(req, res, `/versions/${req.params.version}/download`)) return;
     const row = await resolveVersion(req.params, req.auth?.user ?? null);
     const isPublished =
       row.status === 'published' || row.status === 'yanked' || row.status === 'deprecated';
@@ -1119,9 +1156,119 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     res.json({ data: rows });
   });
 
+  // Offering an extension to another namespace. Two steps, like an owner grant
+  // and for the same reason: the recipient is the one whose name ends up on the
+  // address and whose quota pays for it, so it is the one that agrees. Until it
+  // does, nothing about @namespace/id has changed and the recipient cannot even
+  // see the offer unless it asks.
+  router.post('/@:namespace/:id/transfers', ownerChain, async (req, res) => {
+    const { namespace: from, id } = req.params;
+    if (!isValidNamespace(from) || !isValidExtensionId(id)) throw notFound();
+    requireObjectBody(req);
+    const to = req.body.to;
+    if (!isValidNamespace(to)) {
+      throw fieldErrors([{ field: 'to', message: 'Must be a valid namespace.' }]);
+    }
+    if (to === from) {
+      throw fieldErrors([
+        { field: 'to', message: 'An extension cannot be transferred to itself.' },
+      ]);
+    }
+    if (!(await mayOfferTransfer(sql, req.auth.user, from))) {
+      throw forbidden('Only the namespace account or an admin can transfer an extension away.');
+    }
+    const recipient = await loadTransferRecipient(sql, to);
+    if (!recipient) throw notFound('No such account to transfer to.');
+    if (recipient.kind === 'organization' && !(await hasOrgOwner(sql, recipient.id))) {
+      throw conflict('An organization with no owners cannot receive an extension.');
+    }
+    await sql.begin(async (tx) => {
+      await openTransfer(tx, {
+        config,
+        actor: req.auth.user,
+        namespace: from,
+        id,
+        toNamespace: to,
+        recipient,
+      });
+    });
+    res.status(201).json({ data: { namespace: from, id, to } });
+  });
+
+  // What has been offered at this address that the caller can answer for.
+  router.get('/@:namespace/:id/transfers', requireAuth, async (req, res) => {
+    const { namespace, id } = req.params;
+    if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    res.json({ data: await pendingTransfersFor(sql, req.auth.user, namespace, id) });
+  });
+
+  // The recipient accepts, and the move happens. Same transaction as the audit
+  // entry, the notification and the redirect row, so a transfer either lands
+  // whole or not at all.
+  router.post(
+    '/@:namespace/:id/transfers/:toNamespace/accept',
+    requireAuth,
+    termsGate,
+    async (req, res) => {
+      const { namespace: from, id, toNamespace: to } = req.params;
+      if (!isValidNamespace(from) || !isValidNamespace(to) || !isValidExtensionId(id)) {
+        throw notFound();
+      }
+      const recipient = await loadTransferRecipient(sql, to);
+      if (!recipient) throw notFound();
+      if (!(await mayReceiveTransfer(sql, req.auth.user, to))) {
+        throw forbidden('Only the receiving namespace or an admin can accept this transfer.');
+      }
+      const moved = await sql.begin(async (tx) => {
+        return await acceptTransfer(tx, {
+          config,
+          actor: req.auth.user,
+          namespace: from,
+          id,
+          toNamespace: to,
+          recipient,
+        });
+      });
+      // Fired against the new address: the webhooks moved with the extension, and
+      // a subscriber that wanted to hear about this extension is now the new
+      // owner's.
+      void webhooks.scheduleFor(to, id, 'extension.transferred', {
+        actor: req.auth.user.namespace,
+        from,
+        to,
+        id,
+        occurredAt: new Date().toISOString(),
+      });
+      res.json({ data: { namespace: to, id, from, versions: moved.versions } });
+    },
+  );
+
+  router.delete('/@:namespace/:id/transfers/:toNamespace', ownerChain, async (req, res) => {
+    const { namespace: from, id, toNamespace: to } = req.params;
+    if (!isValidNamespace(from) || !isValidNamespace(to) || !isValidExtensionId(id)) {
+      throw notFound();
+    }
+    if (!(await mayOfferTransfer(sql, req.auth.user, from))) {
+      throw forbidden('Only the namespace account or an admin can withdraw a transfer.');
+    }
+    const recipient = await loadTransferRecipient(sql, to);
+    if (!recipient) throw notFound();
+    await sql.begin(async (tx) => {
+      await withdrawTransfer(tx, {
+        actor: req.auth.user,
+        namespace: from,
+        id,
+        toNamespace: to,
+        recipient,
+      });
+    });
+    res.status(204).end();
+  });
+
   router.get('/@:namespace/:id', async (req, res) => {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    if (await redirectIfMoved(req, res)) return;
     const rows = await sql`
       SELECT * FROM versions
       WHERE namespace = ${namespace} AND extension_id = ${id}

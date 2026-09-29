@@ -10,6 +10,7 @@ export const WEBHOOK_EVENTS = Object.freeze([
   'version.rejected',
   'owners.invited',
   'owners.changed',
+  'extension.transferred',
 ]);
 
 // Index 0 is the initial attempt; the rest are retry delays.
@@ -134,6 +135,8 @@ export function renderWebhookMessage(event, namespace, id, payload) {
       return payload.added
         ? `${payload.added} was added as an owner of ${ref}.`
         : `${payload.removed} was removed as an owner of ${ref}.`;
+    case 'extension.transferred':
+      return `Moved from @${payload.from}/${payload.id} to @${payload.to}/${payload.id}.`;
     default:
       throw new Error(`No message rendered for event ${event}.`);
   }

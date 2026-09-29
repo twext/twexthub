@@ -1811,6 +1811,156 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /@{namespace}/{id}/transfers:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+    get:
+      summary: List the transfer offers this caller can answer
+      operationId: listExtensionTransfers
+      tags: [Userspace]
+      description: >
+        The caller's own pending offers, plus any addressed to an organization
+        the caller owns, for the extension at this address. An offer is only
+        visible to the side that has to act on it, so the sender does not see the
+        recipient's copy of its own offer.
+      responses:
+        '200':
+          description: Pending transfer offers, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required: [to, display_name, kind, created_at]
+                      properties:
+                        to: { $ref: '#/components/schemas/Namespace' }
+                        display_name: { type: string }
+                        kind: { $ref: '#/components/schemas/Kind' }
+                        created_at: { type: string, format: date-time }
+                        requested_by:
+                          allOf: [{ $ref: '#/components/schemas/Namespace' }]
+                          description: The namespace that made the offer, or null if that account was deleted.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      summary: Offer an extension to another namespace
+      operationId: offerExtensionTransfer
+      tags: [Userspace]
+      description: >
+        The namespace account or an admin; a co-owner cannot move the address
+        out from under the owner that published it. Records an offer and moves
+        nothing: the destination's owner is the one whose name ends up on the
+        address and whose quota pays for it, so they accept at
+        `POST .../transfers/{toNamespace}/accept`. Until then nothing about
+        `@{namespace}/{id}` has changed, and the destination cannot even see the
+        offer unless it asks for it.
+
+        The destination must not already hold an extension with this id, must
+        not itself be an address that has been transferred away, and must have
+        room for the extension's bytes. Asking twice for the same destination is
+        a `409`. A publish in progress is a `409` too, and `404` if there is
+        nothing at this address.
+      responses:
+        '201':
+          description: Offer recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [namespace, id, to]
+                    properties:
+                      namespace: { $ref: '#/components/schemas/Namespace' }
+                      id: { $ref: '#/components/schemas/ExtensionId' }
+                      to: { $ref: '#/components/schemas/Namespace' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /@{namespace}/{id}/transfers/{toNamespace}:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+      - name: toNamespace
+        in: path
+        required: true
+        schema: { $ref: '#/components/schemas/Namespace' }
+    delete:
+      summary: Withdraw a transfer offer
+      operationId: withdrawExtensionTransfer
+      tags: [Userspace]
+      description: >
+        The namespace account or an admin. Withdraws an offer this namespace made
+        to `@{toNamespace}`; it is `404` when nothing is waiting there, and the
+        destination is notified.
+      responses:
+        '204': { description: Offer withdrawn }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /@{namespace}/{id}/transfers/{toNamespace}/accept:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+      - name: toNamespace
+        in: path
+        required: true
+        schema: { $ref: '#/components/schemas/Namespace' }
+    post:
+      summary: Accept an extension, and move it to your namespace
+      operationId: acceptExtensionTransfer
+      tags: [Userspace]
+      description: >
+        The receiving namespace or an admin; an account accepts for itself, and
+        any account on the owner list of an organization accepts for that
+        organization. The move is a single transaction: the versions, dist-tags,
+        owners, access grants, webhooks and download history all change address
+        together, or none of them do.
+
+        The old address answers `301` to the new one, so a pinned reference keeps
+        resolving, and a caller who could not read the extension at its new
+        address is still refused rather than being pointed at it. The storage
+        charge moves with the bytes. `versions.owner_id` is not rewritten: the
+        audit trail still says who published each version.
+
+        Receiving an extension does not make the destination an established
+        namespace: its first own version is still held for review. The versions
+        that moved were reviewed for the address they were published under, and
+        they do not vouch for what the destination publishes next.
+      responses:
+        '200':
+          description: The extension now lives at the destination
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [namespace, id, from, versions]
+                    properties:
+                      namespace: { $ref: '#/components/schemas/Namespace' }
+                      id: { $ref: '#/components/schemas/ExtensionId' }
+                      from: { $ref: '#/components/schemas/Namespace' }
+                      versions: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
   /@{namespace}/{id}/access:
     parameters:
       - $ref: '#/components/parameters/NamespacePath'
@@ -2509,6 +2659,8 @@ components:
           extension.owner.withdrawn,
           extension.owner.added,
           extension.owner.removed,
+          extension.transfer.requested,
+          extension.transfer.completed,
           organization.owner.added,
           organization.owner.removed,
         ]
@@ -2521,7 +2673,10 @@ components:
         instance-wide admin announcements, `extension.owner.*` when an
         extension's owner list changes: `invited` and `withdrawn` for the
         invitation half of the grant, `added` and `removed` once a co-owner is
-        in or out, and `organization.owner.*` when an account is added to or
+        in or out, `extension.transfer.*` when an extension is offered to another
+        namespace (`requested`, to the destination) or the offer ends
+        (`completed`, to the namespace that made it, whether it was accepted or
+        withdrawn), and `organization.owner.*` when an account is added to or
         removed from an organization's owner list.
 
     Notification:
@@ -2805,6 +2960,7 @@ components:
           version.rejected,
           owners.invited,
           owners.changed,
+          extension.transferred,
         ]
 
     WebhookInput:
@@ -2861,7 +3017,8 @@ components:
             e.g. version.publish, version.approve, version.reject,
             version.yank, version.deprecate, tag.set, tag.remove, owner.invite,
             owner.accept, owner.withdraw, owner.remove, access.grant,
-            access.revoke, quota.set,
+            access.revoke, quota.set, extension.transfer.request,
+            extension.transfer.withdraw, extension.transfer,
             role.change, extension.delete, org.create, org.update, org.delete,
             organization.owner.add, organization.owner.remove,
             organization.webhook.create, organization.webhook.delete

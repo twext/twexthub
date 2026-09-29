@@ -25,7 +25,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the v1.0.0 release notes.
 - Build on publish: you upload a tarball of the Twext project; the hub compiles it in a sandboxed build and queues the source and build log for moderation.
 - Public, cursor-paginated discovery of published extensions (`/v1/extensions`, `/v1/search`) with sort, license filter, badges, and an Atom feed.
 - Namespaced publishing with a moderation gate: a namespace's first publish is `pending` until an admin approves; later publishes to that namespace go straight to `published`.
-- Sessions and scoped automation tokens (`publish`, `yank`), npm-style dist-tags, SemVer range resolution, multi-owner extensions by invitation, webhooks, and deprecation as a softer alternative to yank.
+- Sessions and scoped automation tokens (`publish`, `yank`), npm-style dist-tags, SemVer range resolution, multi-owner extensions by invitation, extensions transferred between namespaces by offer and acceptance, webhooks, and deprecation as a softer alternative to yank.
 - Per-account notifications for review decisions, terms bumps, and admin broadcasts (`GET /v1/notifications`), with a `twext notifications` command in the CLI.
 - [Organizations](docs/organizations.md): a shared namespace with multiple owners, its own profile, images and namespace-wide webhooks, and no credentials of its own to leak. An organization can also be invited to co-own an extension published by someone else.
 - Download metrics, private extensions with access grants, storage quotas, an append-only audit log, and Prometheus metrics at `GET /v1/admin/metrics`.
@@ -49,7 +49,7 @@ Three kinds of callers use the API:
 
 CI can publish with automation tokens created at `POST /v1/tokens`; the `publish` scope covers publishing, `yank` covers `DELETE /v1/@:namespace/:id/versions/:version`.
 
-A namespace can also be a shared [organization](docs/organizations.md) with several owners instead of a single account; it is created at `POST /v1/orgs` and managed by the accounts on its owner list. Co-ownership of an extension is by invitation: `PUT /v1/@:namespace/:id/owners/:ownerNamespace` invites, and the invited account — or any owner of the invited organization — accepts at `POST /v1/@:namespace/:id/owners/:ownerNamespace/accept`. Nothing is granted until then, and the extension stays published under the namespace that owns the address.
+A namespace can also be a shared [organization](docs/organizations.md) with several owners instead of a single account; it is created at `POST /v1/orgs` and managed by the accounts on its owner list. Co-ownership of an extension is by invitation: `PUT /v1/@:namespace/:id/owners/:ownerNamespace` invites, and the invited account — or any owner of the invited organization — accepts at `POST /v1/@:namespace/:id/owners/:ownerNamespace/accept`. Nothing is granted until then, and the extension stays published under the namespace that owns the address. Moving that address is a transfer: `POST /v1/@:namespace/:id/transfers` offers the extension to another namespace, that namespace's owner accepts at `POST /v1/@:namespace/:id/transfers/:toNamespace/accept`, and the versions, tags, owners, access grants, webhooks and download history move together while the old address answers `301` to the new one.
 
 ## Installation
 

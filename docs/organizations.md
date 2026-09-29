@@ -13,6 +13,7 @@ This is the same thing as a personal namespace from the outside: `@acme/widget` 
 - [Owners](#owners)
 - [Publishing and visibility](#publishing-and-visibility)
 - [Co-owning an extension](#co-owning-an-extension)
+- [Transferring an extension](#transferring-an-extension)
 - [Profile and images](#profile-and-images)
 - [Webhooks](#webhooks)
 - [Accounts and organizations](#accounts-and-organizations)
@@ -76,7 +77,28 @@ Until it is accepted, the organization has no access: not to publishing, not to 
 
 An account can be invited the same way, answering its own invitation. `GET /v1/@alice/widget/owners/pending` is the inbox for both: an account sees what was addressed to it, and an owner of `@acme` sees what was addressed to `@acme`.
 
-Accepting an invitation grants management of the extension. It does not move the published address, the download history, the tags, or the webhooks — those stay with the namespace that published the extension.
+Accepting an invitation grants management of the extension. It does not move the published address, the download history, the tags, or the webhooks — those stay with the namespace that published the extension. To hand an extension over entirely, transfer it instead, below.
+
+## Transferring an extension
+
+Co-ownership shares an extension at its existing address. A transfer moves the address itself, and it is two steps for the same reason an owner grant is: the destination's owner is the one whose name ends up on the address and whose quota pays for the bytes, so they are the one who agrees.
+
+```sh
+# The owner of @alice/widget offers it to @acme
+curl -X POST -H 'Authorization: Bearer <token>' \
+  -d '{"to":"acme"}' \
+  https://hub.example.com/v1/@alice/widget/transfers
+
+# An owner of @acme accepts, and speaks for the rest of them
+curl -X POST -H 'Authorization: Bearer <token>' \
+  https://hub.example.com/v1/@alice/widget/transfers/acme/accept
+```
+
+Only the namespace account or an admin may offer or withdraw, and only the destination may accept. A co-owner cannot move the address out from under the namespace that published it, though it can publish to the extension while it is there. Until the offer is accepted nothing has changed at `@alice/widget`, and `@acme` cannot see the offer unless it asks: `GET /v1/@alice/widget/transfers` is the inbox, the same way `/owners/pending` is for invitations. The destination is notified of the offer and of its withdrawal; the sender is notified once the move happens, because it is the only party that did not act.
+
+Accepting moves the versions, dist-tags, owners, access grants, webhooks and download history to the new address in one transaction. The extension keeps its id and its download count, and `versions.owner_id` is not rewritten — the audit trail still says who published each version. The storage charge moves with the bytes. Receiving an extension does not make the destination an established namespace, so its first own version is still held for review: the versions that moved were reviewed for the address they were published under, and they do not vouch for what the destination publishes next. The old address answers `301` to the new one, so a pinned `@alice/widget` keeps resolving, and the redirect is only sent to a caller who could already read the extension at its new address: to anyone else the old address is still a `404`, rather than a directory of which private extensions moved and where to.
+
+A destination that already holds an extension with that id, or that is itself an address that has been transferred away, cannot receive one — an address is only ever one thing. A destination without room for the extension's bytes is refused, checked when the offer is made and again at accept, because it can fill up in between. The offer is dropped if the sender's extension is moved, deleted or transferred somewhere else in the meantime.
 
 ## Profile and images
 

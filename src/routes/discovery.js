@@ -258,9 +258,10 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     const requested = Number(req.query.limit ?? 10);
     const limit = Math.min(Number.isInteger(requested) && requested > 0 ? requested : 10, 50);
     const user = req.auth?.user ?? null;
+    const organizations = await organizationsOf(sql, user);
     const trending = await trendingExtensions(sql, {
       limit,
-      visibility: visibilityFilter(user, await organizationsOf(sql, user)),
+      visibility: visibilityFilter(user, organizations),
     });
     if (trending.length === 0) {
       return res.json({ data: [], _links: pageLinks(req) });
@@ -284,7 +285,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
         WHERE v.status IN ('published', 'deprecated')
       ) s
       WHERE rn = 1
-        ${visibilityFilter(user)}
+        ${visibilityFilter(user, organizations)}
     `;
     const byKey = new Map(trending.map((e) => [`${e.namespace}/${e.id}`, e]));
     const page = rows

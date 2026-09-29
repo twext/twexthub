@@ -307,35 +307,48 @@ export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
     if (req.auth.user.namespace !== target.namespace && req.auth.user.role !== 'admin') {
       throw forbidden('Only an admin can delete another account.');
     }
-    // Deleting an account cascades it out of every organization it owns, which
-    // is how an organization nobody administers is created. The last owner of an
-    // organization has to hand it over or delete it first.
-    const soleOwner = await sql`
-      SELECT org.namespace
-      FROM organization_owners g
-      JOIN users org ON org.id = g.org_id
-      WHERE g.user_id = ${target.id}
-        AND 1 = (SELECT count(*) FROM organization_owners x WHERE x.org_id = g.org_id)
-      ORDER BY org.namespace
-    `;
-    if (soleOwner.length > 0) {
-      throw conflict(
-        `You are the only owner of ${soleOwner.map((row) => `@${row.namespace}`).join(', ')}. Add another owner, or delete the organization, before deleting the account.`,
-      );
-    }
-    // Blobs and sources are content-addressed under blobs/<xx>/<rest> and
-    // sources/<xx>/<rest>, not under a per-namespace directory, so the digests
-    // have to be read before the DELETE: it cascades the version rows away and
-    // they are the only record of which files this account put on disk.
-    const owned = await sql`
-      SELECT DISTINCT blob_digest, blob_path, source_digest
-      FROM versions
-      WHERE owner_id = ${target.id}
-    `;
-    // Uploaded images are named by the users row itself, so they have to be
-    // read before the DELETE takes it away.
+    const owned = await sql.begin(async (tx) => {
+      // Serialize owner removals and account deletions on the organization rows.
+      await tx`
+        SELECT org.id FROM users org
+        JOIN organization_owners g ON g.org_id = org.id
+        WHERE g.user_id = ${target.id}
+        ORDER BY org.id
+        FOR UPDATE OF org
+      `;
+      const soleOwner = await tx`
+        SELECT org.namespace
+        FROM organization_owners g
+        JOIN users org ON org.id = g.org_id
+        WHERE g.user_id = ${target.id}
+          AND 1 = (SELECT count(*) FROM organization_owners x WHERE x.org_id = g.org_id)
+        ORDER BY org.namespace
+      `;
+      if (soleOwner.length > 0) {
+        throw conflict(
+          `You are the only owner of ${soleOwner.map((row) => `@${row.namespace}`).join(', ')}. Add another owner, or delete the organization, before deleting the account.`,
+        );
+      }
+      // Save the digests before the owner_id cascade removes the versions.
+      const rows = await tx`
+        SELECT DISTINCT blob_digest, blob_path, source_digest
+        FROM versions
+        WHERE owner_id = ${target.id}
+      `;
+      // Delegated publishes charge the namespace account, not the publisher.
+      await tx`
+        UPDATE users u SET blob_bytes = GREATEST(u.blob_bytes - removed.bytes, 0)
+        FROM (
+          SELECT namespace, sum(COALESCE(blob_size, 0) + COALESCE(source_size, 0)) AS bytes
+          FROM versions WHERE owner_id = ${target.id}
+          GROUP BY namespace
+        ) removed
+        WHERE u.namespace = removed.namespace AND u.id <> ${target.id}
+      `;
+      await tx`DELETE FROM users WHERE id = ${target.id}`;
+      return rows;
+    });
     const profileDigests = [target.avatar_blob_digest, target.banner_blob_digest].filter(Boolean);
-    await sql`DELETE FROM users WHERE id = ${target.id}`;
 
     // Only after the commit: a failed DELETE leaves the rows, and the keeper
     // check keeps any digest another account's version still references.

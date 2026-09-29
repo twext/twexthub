@@ -2780,7 +2780,7 @@ components:
 
     Organization:
       type: object
-      required: [namespace, displayName, bio, createdAt]
+      required: [namespace, displayName, bio, createdAt, _links]
       properties:
         namespace: { $ref: '#/components/schemas/Namespace' }
         displayName: { type: string }
@@ -2802,6 +2802,15 @@ components:
             The external reference, or this organization's own
             `/orgs/{namespace}/banner` path after an upload.
         createdAt: { type: string, format: date-time, readOnly: true }
+        _links:
+          type: object
+          required: [self, extensions, owners, avatar, banner]
+          properties:
+            self: { type: string }
+            extensions: { type: string }
+            owners: { type: string }
+            avatar: { type: string }
+            banner: { type: string }
       description: >
         An organization: a pseudo-account that owns a namespace, a profile and
         an extension collection, with no password, no sessions and no role. Its

@@ -1,5 +1,8 @@
 import { test, before, beforeEach, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { stat } from 'node:fs/promises';
+import { blobPathFor } from '../src/blobs.js';
+import { sourcePathFor } from '../src/sources.js';
 import request from 'supertest';
 import sharp from 'sharp';
 import {
@@ -14,13 +17,14 @@ import {
 
 let app;
 let sql;
+let config;
 
 // The sandbox resolver cannot invent a host, and a hook URL is resolved and
 // checked before it is stored, so a created hook has to name a real one.
 const PUBLIC_URL = 'https://example.com/twext-hook';
 
 before(async () => {
-  ({ app, sql } = await boot());
+  ({ app, sql, config } = await boot());
 });
 beforeEach(resetDb);
 after(async () => {
@@ -64,6 +68,15 @@ describe('creating an organization', () => {
       .send({ namespace: ns, password: 'correct-horse-battery-staple' });
     assert.equal(login.status, 403);
     assert.match(login.body.detail, /organization/);
+  });
+
+  test('an empty display name falls back to the namespace and preserves profile fields', async () => {
+    const created = await org({ displayName: '', bio: 'Our team', github: 'acme' });
+    assert.equal(created.displayName, created.ns);
+    assert.equal(created.bio, 'Our team');
+    assert.equal(created.github, 'acme');
+    const read = await request(app).get(`/v1/orgs/${created.ns}`).expect(200);
+    assert.equal(read.body.displayName, created.ns);
   });
 
   test('the namespace is shared with accounts', async () => {
@@ -131,6 +144,32 @@ describe('creating an organization', () => {
       .send({ namespace: uniqNs() });
     assert.equal(gated.status, 403);
     assert.ok(owner.token);
+  });
+
+  test('automation tokens cannot create or manage organizations', async () => {
+    const { ns, owner } = await org();
+    const created = await request(app)
+      .post('/v1/tokens')
+      .set(bearer(owner.token))
+      .send({ name: 'automation', scopes: ['publish', 'yank'] })
+      .expect(201);
+    for (const [method, route, body] of [
+      ['post', '/v1/orgs', { namespace: uniqNs() }],
+      ['patch', `/v1/orgs/${ns}`, { bio: 'Changed' }],
+      ['delete', `/v1/orgs/${ns}`],
+      ['put', `/v1/orgs/${ns}/owners/${owner.user.namespace}`],
+      ['delete', `/v1/orgs/${ns}/owners/${owner.user.namespace}`],
+      ['get', `/v1/orgs/${ns}/webhooks`],
+      ['post', `/v1/orgs/${ns}/webhooks`, { url: PUBLIC_URL, events: ['version.published'] }],
+      ['delete', `/v1/orgs/${ns}/webhooks/1`],
+    ]) {
+      const client = request(app);
+      const denied = await client[method](route)
+        .set(bearer(created.body.token))
+        .send(body)
+        .expect(403);
+      assert.match(denied.body.detail, /Automation tokens/);
+    }
   });
 
   test('the list is public and pages', async () => {
@@ -229,6 +268,33 @@ describe('changing an organization', () => {
     await request(app).get(`/v1/orgs/${ns}`).expect(404);
     await request(app).get(`/v1/users/${ns}`).expect(404);
   });
+
+  test('organization deletion removes published files and both kinds of webhook', async () => {
+    const { ns, owner } = await org();
+    await publishProject(app, ns, 'cleanup', owner.token);
+    const [version] = await sql`SELECT * FROM versions WHERE namespace = ${ns}`;
+    for (const extensionId of [null, 'cleanup']) {
+      const [hook] = await sql`
+        INSERT INTO webhooks (namespace, extension_id, url, secret)
+        VALUES (${ns}, ${extensionId}, ${PUBLIC_URL}, 'test-secret') RETURNING id
+      `;
+      await sql`
+        INSERT INTO webhook_deliveries (webhook_id, event, payload, body, signature)
+        VALUES (${hook.id}, 'version.published', '{}', '{}', 'test-signature')
+      `;
+    }
+    await request(app).delete(`/v1/orgs/${ns}`).set(bearer(owner.token)).expect(204);
+    assert.equal((await sql`SELECT 1 FROM versions WHERE namespace = ${ns}`).length, 0);
+    assert.equal((await sql`SELECT 1 FROM webhooks WHERE namespace = ${ns}`).length, 0);
+    assert.equal((await sql`SELECT 1 FROM webhook_deliveries`).length, 0);
+    await assert.rejects(stat(blobPathFor(config.dataDir, version.blob_digest)), {
+      code: 'ENOENT',
+    });
+    await assert.rejects(stat(sourcePathFor(config.dataDir, version.source_digest)), {
+      code: 'ENOENT',
+    });
+    await request(app).get(`/v1/users/${owner.user.namespace}`).expect(200);
+  });
 });
 
 describe('owners', () => {
@@ -316,6 +382,87 @@ describe('owners', () => {
     assert.match(notes.body.data[0].message, /removed as an owner/);
   });
 
+  test('removing a non-owner returns 404 even when there is only one owner', async () => {
+    const { ns, owner } = await org();
+    const outsider = await signupAndAccept(app, uniqNs());
+    await request(app)
+      .delete(`/v1/orgs/${ns}/owners/${outsider.user.namespace}`)
+      .set(bearer(owner.token))
+      .expect(404);
+  });
+
+  for (const actions of [
+    ['remove', 'remove'],
+    ['delete', 'delete'],
+    ['remove', 'delete'],
+  ]) {
+    test(`concurrent ${actions.join(' and ')} preserves the last owner`, async () => {
+      const { ns, owner } = await org();
+      const coowner = await signupAndAccept(app, uniqNs());
+      await request(app)
+        .put(`/v1/orgs/${ns}/owners/${coowner.user.namespace}`)
+        .set(bearer(owner.token))
+        .expect(204);
+      const accounts = [owner, coowner];
+      const responses = await Promise.all(
+        actions.map((action, i) => {
+          const account = accounts[i];
+          const route =
+            action === 'remove'
+              ? `/v1/orgs/${ns}/owners/${account.user.namespace}`
+              : `/v1/users/${account.user.namespace}`;
+          return request(app).delete(route).set(bearer(account.token));
+        }),
+      );
+      assert.deepEqual(responses.map((r) => r.status).sort(), [204, 409]);
+      const owners = await request(app).get(`/v1/orgs/${ns}/owners`).expect(200);
+      assert.equal(owners.body.data.length, 1);
+      const retained = accounts[responses.findIndex((r) => r.status === 409)];
+      assert.equal(owners.body.data[0].namespace, retained.user.namespace);
+      await request(app).get(`/v1/users/${retained.user.namespace}`).expect(200);
+    });
+  }
+
+  test('deleting a co-owner refunds each namespace for cascaded versions', async () => {
+    const first = await org();
+    const admin = first.owner;
+    const publisher = await signupAndAccept(app, uniqNs());
+    const organizations = [first, await org()];
+    for (const [index, { ns, owner }] of organizations.entries()) {
+      const id = `removed${index}`;
+      await request(app)
+        .put(`/v1/orgs/${ns}/owners/${publisher.user.namespace}`)
+        .set(bearer(owner.token))
+        .expect(204);
+      await publishProject(app, ns, id, publisher.token, { code: 'const removed = 1;' });
+      await approveVersion(app, admin.token, ns, id, '1.0.0');
+      await publishProject(app, ns, 'retained', owner.token, { code: 'const retained = 2;' });
+    }
+    const removed = await sql`SELECT * FROM versions WHERE extension_id LIKE 'removed%'`;
+    await request(app)
+      .delete(`/v1/users/${publisher.user.namespace}`)
+      .set(bearer(publisher.token))
+      .expect(204);
+    for (const { ns } of organizations) {
+      const rows = await sql`SELECT * FROM versions WHERE namespace = ${ns}`;
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].extension_id, 'retained');
+      const [account] = await sql`SELECT blob_bytes FROM users WHERE namespace = ${ns}`;
+      assert.equal(
+        Number(account.blob_bytes),
+        Number(rows[0].blob_size) + Number(rows[0].source_size),
+      );
+      await stat(blobPathFor(config.dataDir, rows[0].blob_digest));
+      await stat(sourcePathFor(config.dataDir, rows[0].source_digest));
+    }
+    for (const row of removed) {
+      await assert.rejects(stat(blobPathFor(config.dataDir, row.blob_digest)), { code: 'ENOENT' });
+      await assert.rejects(stat(sourcePathFor(config.dataDir, row.source_digest)), {
+        code: 'ENOENT',
+      });
+    }
+  });
+
   test('an account that is the last owner of an organization cannot be deleted', async () => {
     const { ns, owner } = await org();
     const refused = await request(app)
@@ -386,6 +533,24 @@ describe('extensions', () => {
 
     const anonymous = await request(app).get(`/v1/orgs/${ns}/extensions`).expect(200);
     assert.equal(anonymous.body.data.length, 0);
+
+    await sql`
+      INSERT INTO extension_daily_downloads (namespace, extension_id, day, total_downloads)
+      VALUES (${ns}, 'secret', CURRENT_DATE, 10)
+    `;
+    const trending = await request(app)
+      .get('/v1/extensions/trending')
+      .set(bearer(coowner.token))
+      .expect(200);
+    assert.deepEqual(
+      trending.body.data.map((row) => row.id),
+      ['secret'],
+    );
+    const outsider = await signupAndAccept(app, uniqNs());
+    for (const headers of [{}, bearer(outsider.token)]) {
+      const hidden = await request(app).get('/v1/extensions/trending').set(headers).expect(200);
+      assert.deepEqual(hidden.body.data, []);
+    }
 
     const detail = await request(app).get(`/v1/@${ns}/secret`).set(bearer(coowner.token));
     assert.equal(detail.status, 200);

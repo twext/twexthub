@@ -14,9 +14,13 @@ import { normalizeApiRoot } from './util.js';
 // Without it the path is the same before and after a re-upload, which makes a
 // one-year immutable cache a lie: a reader would keep the old picture. A short
 // prefix is enough to separate two different images and keeps the URL short.
-function profileImagePath(config, namespace, kind, digest) {
+//
+// An organization is a row of the same table but has its own collection, so its
+// images are published under /orgs rather than /users.
+function profileImagePath(config, row, kind, digest) {
   const root = normalizeApiRoot(config.apiRoot);
-  const base = `${config.publicBaseUrl.replace(/\/$/, '')}${root ? `/${root}` : ''}/users/${namespace}/${kind}`;
+  const collection = row.kind === 'organization' ? 'orgs' : 'users';
+  const base = `${config.publicBaseUrl.replace(/\/$/, '')}${root ? `/${root}` : ''}/${collection}/${row.namespace}/${kind}`;
   return digest ? `${base}?v=${digest.slice(0, 16)}` : base;
 }
 
@@ -24,9 +28,13 @@ function profileImagePath(config, namespace, kind, digest) {
 // instance serves. A URL is the fallback, kept so that removing an upload does
 // not leave the account with no image, and it is also the pointer a consumer can
 // read to find the original file the account linked to.
-function imageUrl(row, kind, config) {
+// The image actually served for a profile: the upload if there is one, the
+// external link otherwise, and null when the profile has neither. Exported
+// because an organization's owner list shows each owner's avatar without
+// serializing a whole account row.
+export function profileImageUrl(row, kind, config) {
   const digest = kind === 'avatar' ? row.avatar_blob_digest : row.banner_blob_digest;
-  if (digest) return profileImagePath(config, row.namespace, kind, digest);
+  if (digest) return profileImagePath(config, row, kind, digest);
   const external = kind === 'avatar' ? row.avatar_url : row.banner_url;
   return external ?? null;
 }
@@ -35,15 +43,41 @@ export function userToObject(row, config) {
   return {
     namespace: row.namespace,
     displayName: row.display_name,
+    kind: row.kind ?? 'user',
     role: row.role,
     hasPublished: row.has_published,
     bio: row.bio ?? '',
     website: row.website ?? null,
     github: row.github ?? null,
-    avatarUrl: imageUrl(row, 'avatar', config),
-    bannerUrl: imageUrl(row, 'banner', config),
+    avatarUrl: profileImageUrl(row, 'avatar', config),
+    bannerUrl: profileImageUrl(row, 'banner', config),
     createdAt: row.created_at.toISOString(),
     termsAcceptedVersion: row.terms_accepted_version ?? null,
+  };
+}
+
+// The same row as an account, minus what does not apply: an organization has no
+// role, no terms of its own, and no password, and pretending otherwise on a
+// public profile would invite a client to offer controls that lead nowhere.
+export function organizationToObject(row, config) {
+  const root = normalizeApiRoot(config.apiRoot);
+  const base = `${root ? `/${root}` : ''}/orgs/${encodeURIComponent(row.namespace)}`;
+  return {
+    namespace: row.namespace,
+    displayName: row.display_name,
+    bio: row.bio ?? '',
+    website: row.website ?? null,
+    github: row.github ?? null,
+    avatarUrl: profileImageUrl(row, 'avatar', config),
+    bannerUrl: profileImageUrl(row, 'banner', config),
+    createdAt: row.created_at.toISOString(),
+    _links: {
+      self: base,
+      extensions: `${base}/extensions`,
+      owners: `${base}/owners`,
+      avatar: `${base}/avatar`,
+      banner: `${base}/banner`,
+    },
   };
 }
 export function sessionToObject(row) {

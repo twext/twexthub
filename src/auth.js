@@ -112,7 +112,22 @@ export async function canSee(sql, user, row) {
     SELECT 1 FROM extension_access
     WHERE user_id = ${user.id} AND namespace = ${row.namespace} AND extension_id = ${row.extension_id}
   `;
-  return Boolean(grant);
+  if (grant) return true;
+  return isOrganizationOwner(sql, user, row.namespace);
+}
+
+// An organization manages its own extensions: every owner of @org is an owner
+// of @org/id, with no row per person. The join to the organization row is what
+// keeps a plain account's namespace from answering this for the wrong reasons.
+export async function isOrganizationOwner(sql, user, namespace) {
+  const [row] = await sql`
+    SELECT 1
+    FROM organization_owners g
+    JOIN users org ON org.id = g.org_id
+    WHERE g.user_id = ${user.id} AND org.namespace = ${namespace}
+      AND org.kind = 'organization'
+  `;
+  return Boolean(row);
 }
 
 export function requireSession(req, res, next) {

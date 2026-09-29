@@ -5,7 +5,12 @@ import { randomBytes } from 'node:crypto';
 import express, { Router } from 'express';
 import semver from 'semver';
 import YAML from 'yaml';
-import { canSee as canSeeExtension, requireAuth, requireScope } from '../auth.js';
+import {
+  canSee as canSeeExtension,
+  isOrganizationOwner,
+  requireAuth,
+  requireScope,
+} from '../auth.js';
 import { conflict, forbidden, HttpError, fieldErrors, notFound } from '../errors.js';
 import {
   asString,
@@ -57,7 +62,10 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
       SELECT 1 FROM extension_owners
       WHERE owner_id = ${user.id} AND namespace = ${namespace} AND extension_id = ${id}
     `;
-    return Boolean(row);
+    if (row) return true;
+    // An organization's owners manage its extensions, which is what makes
+    // publishing to a fresh @org/id work without a row per person.
+    return isOrganizationOwner(sql, user, namespace);
   }
 
   const canSee = (user, row) => canSeeExtension(sql, user, row);

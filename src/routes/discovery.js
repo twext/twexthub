@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { requireAdmin } from '../auth.js';
 import { decodeCursor, keysetPage, pageLinks, parseDir, parseLimit } from '../pagination.js';
 import { HttpError, notFound } from '../errors.js';
-import { foldText, isValidExtensionId, isValidNamespace } from '../util.js';
+import { asString, foldText, isValidExtensionId, isValidNamespace } from '../util.js';
 import { trendingExtensions, totalDownloads } from '../metrics.js';
 import { product } from '../product.js';
 import {
@@ -90,14 +90,19 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     name: sql`s.name DESC, s.namespace DESC, s.extension_id DESC`,
   };
 
-  // Anonymous and unprivileged callers never see private extensions; owners
-  // and admins do. Grants do not apply here: the private surface is
-  // detail/download only, so listing stays a single-query affair.
-  function visibilityFilter(user) {
+  // Anonymous and unprivileged callers never see private extensions; owners and
+  // admins do. Grants do not apply here: the private surface is detail/download
+  // only, so listing stays a single-query affair.
+  //
+  // The organizations a caller owns are resolved once per request rather than
+  // as a correlated subquery per row, since a caller belongs to few of them and
+  // this runs on the public listing.
+  function visibilityFilter(user, organizations = []) {
     if (user?.role === 'admin') return sql``;
     if (user) {
       return sql`
         AND (s.visibility = 'public' OR s.namespace = ${user.namespace}
+          OR s.namespace = ANY (${sql.array(organizations)}::text[])
           OR EXISTS (
             SELECT 1 FROM extension_owners o
             WHERE o.owner_id = ${user.id} AND o.namespace = s.namespace
@@ -108,16 +113,29 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     return sql`AND s.visibility = 'public'`;
   }
 
+  async function organizationsOf(sql, user) {
+    if (!user) return [];
+    const rows = await sql`
+      SELECT org.namespace
+      FROM organization_owners g
+      JOIN users org ON org.id = g.org_id
+      WHERE g.user_id = ${user.id} AND org.kind = 'organization'
+    `;
+    return rows.map((row) => row.namespace);
+  }
+
   async function listLatestVersions({
     req,
     limit,
     cursor,
     sort = 'recent',
     license,
+    namespace = null,
     searchFilter = sql``,
     user = null,
   }) {
     const back = parseDir(req.query.dir);
+    const organizations = await organizationsOf(sql, user);
     const rows = await sql`
       SELECT s.*, COALESCE(d.total, 0)::bigint AS downloads,
         ${TIMESTAMP_SORT_KEYS.recent}::text AS published_key,
@@ -141,7 +159,8 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
         GROUP BY namespace, extension_id
       ) d ON d.namespace = s.namespace AND d.extension_id = s.extension_id
       WHERE rn = 1
-        ${visibilityFilter(user)}
+        ${visibilityFilter(user, organizations)}
+        ${namespace ? sql`AND s.namespace = ${namespace}` : sql``}
         ${license ? sql`AND s.license = ${license}` : sql``}
         ${searchFilter}
         ${cursorCondition(cursor, sort, back)}
@@ -188,7 +207,12 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     return raw;
   }
 
-  router.get('/extensions', async (req, res) => {
+  // The registry listing, shared with an organization's own extension list so
+  // visibility, sorting and cursor paging cannot drift between the two. The
+  // namespace is a filter rather than a separate collection for the same
+  // reason: the per-extension owner rows and the org membership behind a private
+  // extension are already in the visibility filter below.
+  async function listExtensions(req, { namespace = null } = {}) {
     const limit = parseLimit(config, req.query.limit);
     const sort = parseSort(req.query.sort);
     // SPDX identifiers are case-sensitive ("Apache-2.0"), so no normalization.
@@ -204,16 +228,23 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
       ns: 'string',
       id: 'string',
     });
-    res.json(
-      await listLatestVersions({
-        req,
-        limit,
-        cursor,
-        sort,
-        license,
-        user: req.auth?.user ?? null,
-      }),
-    );
+    return listLatestVersions({
+      req,
+      limit,
+      cursor,
+      sort,
+      license,
+      namespace,
+      user: req.auth?.user ?? null,
+    });
+  }
+
+  router.get('/extensions', async (req, res) => {
+    const namespace = asString(req.query.namespace);
+    if (namespace !== null && !isValidNamespace(namespace)) {
+      throw new HttpError(400, { title: 'Bad Request', detail: 'Invalid namespace.' });
+    }
+    res.json(await listExtensions(req, { namespace }));
   });
 
   router.get('/extensions/trending', async (req, res) => {
@@ -223,7 +254,10 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     const requested = Number(req.query.limit ?? 10);
     const limit = Math.min(Number.isInteger(requested) && requested > 0 ? requested : 10, 50);
     const user = req.auth?.user ?? null;
-    const trending = await trendingExtensions(sql, { limit, visibility: visibilityFilter(user) });
+    const trending = await trendingExtensions(sql, {
+      limit,
+      visibility: visibilityFilter(user, await organizationsOf(sql, user)),
+    });
     if (trending.length === 0) {
       return res.json({ data: [], _links: pageLinks(req) });
     }
@@ -753,5 +787,9 @@ ${entries}
     );
   });
 
-  return router;
+  // An organization's extension list is the registry listing scoped to its
+  // namespace, so the router hands the query out rather than the organization
+  // routes keeping a second copy of it: visibility, sorting and cursor paging
+  // would then have to be kept in step in two places.
+  return { router, listExtensions };
 }

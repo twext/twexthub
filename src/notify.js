@@ -46,3 +46,13 @@ export function addedAsOwnerMessage(actorNamespace, namespace, id) {
 export function removedAsOwnerMessage(actorNamespace, namespace, id) {
   return `You were removed as an owner of @${namespace}/${id} by @${actorNamespace}.`;
 }
+
+// An organization names people rather than extensions, so these are the same
+// two messages with the extension id left off.
+export function addedAsOrgOwnerMessage(actorNamespace, namespace) {
+  return `You can now manage @${namespace} (added by @${actorNamespace}).`;
+}
+
+export function removedAsOrgOwnerMessage(actorNamespace, namespace) {
+  return `You were removed as an owner of @${namespace} by @${actorNamespace}.`;
+}

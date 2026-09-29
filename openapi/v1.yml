@@ -94,7 +94,7 @@ paths:
         Signing in is creating a session, so the credentials ride in the body
         rather than a namespace in the path. The plaintext `token` is shown
         once here and never again: only its hash is stored. A namespace that
-        belongs to an organization is a `401` here rather than a bad password:
+        belongs to an organization is a `403` here rather than a bad password:
         an organization has no credentials of its own, and is acted for by its
         owners instead.
       requestBody:
@@ -124,6 +124,7 @@ paths:
                   user: { $ref: '#/components/schemas/User' }
                   token: { type: string }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
     get:
       summary: List a caller's active sessions

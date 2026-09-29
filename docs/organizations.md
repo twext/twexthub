@@ -89,7 +89,7 @@ A publish, yank, deprecation, rejection or owner change under `@acme` then reach
 
 An organization is not an account, so the account endpoints refuse it rather than pretending:
 
-- `POST /v1/sessions` (sign in) is a `401` — an organization has no credentials.
+- `POST /v1/sessions` (sign in) is a `403` — an organization has no credentials, so the namespace is refused before the password is ever checked.
 - `PATCH` and `DELETE /v1/users/:namespace` are a `403`, and point at `/v1/orgs/:namespace`.
 - `GET /v1/users/:namespace` does answer for an organization, with `kind` set to `organization` and without `role` or `termsAcceptedVersion`, since an organization has neither.
 

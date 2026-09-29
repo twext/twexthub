@@ -143,6 +143,10 @@ export class WebhookInputError extends Error {
 }
 
 export function makeWebhooks({ sql }) {
+  // One hook per extension, or one for a whole namespace when extensionId is
+  // null. `IS NOT DISTINCT FROM` matches null to null, so the per-extension and
+  // per-organization queries are the same query with a different argument
+  // rather than two that could drift apart.
   async function create(namespace, extensionId, input) {
     const errors = [];
     if (
@@ -179,7 +183,7 @@ export function makeWebhooks({ sql }) {
       SELECT id, namespace, extension_id, url, events, active,
              last_delivery_status, last_delivery_at, created_at
       FROM webhooks
-      WHERE namespace = ${namespace} AND extension_id = ${extensionId}
+      WHERE namespace = ${namespace} AND extension_id IS NOT DISTINCT FROM ${extensionId}
       ORDER BY created_at DESC
     `;
   }
@@ -187,7 +191,8 @@ export function makeWebhooks({ sql }) {
   async function remove(namespace, extensionId, id) {
     const [deleted] = await sql`
       DELETE FROM webhooks
-      WHERE id = ${id} AND namespace = ${namespace} AND extension_id = ${extensionId}
+      WHERE id = ${id} AND namespace = ${namespace}
+        AND extension_id IS NOT DISTINCT FROM ${extensionId}
       RETURNING 1
     `;
     return Boolean(deleted);
@@ -195,9 +200,13 @@ export function makeWebhooks({ sql }) {
 
   async function scheduleFor(namespace, extensionId, event, basePayload) {
     try {
+      // A namespace-wide hook (extension_id IS NULL) is scheduled alongside the
+      // hook registered for this exact extension, so one publish feeds both
+      // without either having to be registered twice.
       const hooks = await sql`
         SELECT * FROM webhooks
-        WHERE namespace = ${namespace} AND extension_id = ${extensionId}
+        WHERE namespace = ${namespace}
+          AND (extension_id = ${extensionId} OR extension_id IS NULL)
           AND active AND ${event} = ANY (events)
       `;
       for (const hook of hooks) {

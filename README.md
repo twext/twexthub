@@ -27,6 +27,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the v1.0.0 release notes.
 - Namespaced publishing with a moderation gate: a namespace's first publish is `pending` until an admin approves; later publishes to that namespace go straight to `published`.
 - Sessions and scoped automation tokens (`publish`, `yank`), npm-style dist-tags, SemVer range resolution, multi-owner extensions, webhooks, and deprecation as a softer alternative to yank.
 - Per-account notifications for review decisions, terms bumps, and admin broadcasts (`GET /v1/notifications`), with a `twext notifications` command in the CLI.
+- [Organizations](docs/organizations.md): a shared namespace with multiple owners, its own profile, images and namespace-wide webhooks, and no credentials of its own to leak.
 - Download metrics, private extensions with access grants, storage quotas, an append-only audit log, and Prometheus metrics at `GET /v1/admin/metrics`.
 - Blobs and sources live on disk keyed by SHA-256, verifiable and deduplicated. Bearer tokens are stored only as SHA-256 hashes.
 
@@ -47,6 +48,8 @@ Three kinds of callers use the API:
 - An admin reviews that queue with `GET /v1/versions?status=pending` — entries carry the build log and a source URL — and approves or rejects each entry via `PATCH /v1/@:namespace/:id/versions/:version`. Admins also publish the terms/privacy text (`PATCH /v1/admin/terms`, `PATCH /v1/admin/privacy`) — a terms bump forces everyone to re-accept before publishing again — and can read `GET /v1/admin/metrics` and `GET /v1/admin/audit`.
 
 CI can publish with automation tokens created at `POST /v1/tokens`; the `publish` scope covers publishing, `yank` covers `DELETE /v1/@:namespace/:id/versions/:version`.
+
+A namespace can also be a shared [organization](docs/organizations.md) with several owners instead of a single account; it is created at `POST /v1/orgs` and managed by the accounts on its owner list.
 
 ## Installation
 

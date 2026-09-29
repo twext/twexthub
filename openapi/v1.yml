@@ -39,6 +39,15 @@ info:
     session may manage sessions or automation tokens, act on `/admin/*`
     endpoints, or change account settings — an automation token calling any
     of those gets a `403`.
+
+    Besides accounts, a namespace can belong to an **organization**: a
+    pseudo-account that publishes under it, has a profile and holds webhooks,
+    but has no password, no session and no role. It is created at `POST /orgs`
+    and managed by the accounts listed at `/orgs/{namespace}/owners`; an owner
+    of the organization can publish, see private extensions and manage webhooks
+    in its namespace. Because it is only ever acted for by its owners, no
+    organization credential exists to leak or revoke, and the account endpoints
+    refuse it and point at `/orgs`.
 servers:
   - url: https://{host}/v1
     variables:
@@ -84,7 +93,10 @@ paths:
       description: >
         Signing in is creating a session, so the credentials ride in the body
         rather than a namespace in the path. The plaintext `token` is shown
-        once here and never again: only its hash is stored.
+        once here and never again: only its hash is stored. A namespace that
+        belongs to an organization is a `401` here rather than a bad password:
+        an organization has no credentials of its own, and is acted for by its
+        owners instead.
       requestBody:
         required: true
         content:
@@ -385,6 +397,9 @@ paths:
         (`bio`, `website`, `github`, `avatarUrl`, `bannerUrl`) are
         self-service and do not require re-accepting the Terms.
 
+        An organization is not an account and is a `403` here; its profile is
+        edited at `PATCH /orgs/{namespace}`.
+
         `termsAcceptedVersion` records acceptance of the Terms of Service. It is
         exempt from the gate that every other field is behind, so a caller who
         has not accepted yet can still call this — but only on its own: send it
@@ -454,12 +469,18 @@ paths:
       summary: Delete an account
       operationId: deleteUser
       tags: [Userspace]
-      description: Self or admin. Cascades to all of that account's extensions and versions.
+      description: >
+        Self or admin. Cascades to all of that account's extensions and
+        versions. A namespace that belongs to an organization is a `403`:
+        organizations are removed at `DELETE /orgs/{namespace}`. An account
+        that is the last owner of an organization is also a `409`, since the
+        cascade would leave the organization unmanageable.
       responses:
         '204': { description: Deleted }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
 
   /users/{namespace}/avatar:
     parameters:
@@ -647,6 +668,424 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  # --------------------------------------------------------- Organizations
+  /orgs:
+    post:
+      summary: Create an organization
+      operationId: createOrganization
+      tags: [Userspace]
+      description: >
+        An organization is a pseudo-account: it owns a namespace, a profile and
+        an extension collection, but has no password and cannot sign in. The
+        caller becomes its first owner, which is the only reason it exists — an
+        organization with no owner could not be changed by anyone.
+
+        The namespace is shared with accounts, so a name already used by an
+        account is a `409`. Creation is rate limited like a signup and needs the
+        current Terms of Service accepted, like a publish.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [namespace]
+              properties:
+                namespace: { $ref: '#/components/schemas/Namespace' }
+                displayName: { type: string, maxLength: 80 }
+                bio: { type: ['string', 'null'], maxLength: 280 }
+                website: { type: ['string', 'null'], maxLength: 400, format: uri }
+                github:
+                  type: ['string', 'null']
+                  description: GitHub username, shown as a profile link.
+                avatarUrl: { type: ['string', 'null'], maxLength: 400, format: uri }
+                bannerUrl: { type: ['string', 'null'], maxLength: 400, format: uri }
+      responses:
+        '201':
+          description: Organization created
+          headers:
+            Location:
+              description: The new organization's own URL
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Organization' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+    get:
+      summary: List organizations
+      operationId: listOrganizations
+      tags: [Open]
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Dir'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Paginated organizations
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, _links]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Organization' }
+                  _links: { $ref: '#/components/schemas/PageLinks' }
+
+  /orgs/{namespace}:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+    get:
+      summary: Get an organization
+      operationId: getOrganization
+      tags: [Open]
+      security: []
+      responses:
+        '200':
+          description: Organization found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Organization' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      summary: Update an organization
+      operationId: updateOrganization
+      tags: [Userspace]
+      description: >
+        Any owner, or an admin. Only the profile fields exist here: an
+        organization has no password, no role and no terms of its own, and its
+        members are changed through `/orgs/{namespace}/owners`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                displayName: { type: string, maxLength: 80 }
+                bio: { type: ['string', 'null'], maxLength: 280 }
+                website: { type: ['string', 'null'], maxLength: 400, format: uri }
+                github:
+                  type: ['string', 'null']
+                  description: GitHub username, shown as a profile link.
+                avatarUrl: { type: ['string', 'null'], maxLength: 400, format: uri }
+                bannerUrl: { type: ['string', 'null'], maxLength: 400, format: uri }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Organization' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+    delete:
+      summary: Delete an organization
+      operationId: deleteOrganization
+      tags: [Userspace]
+      description: >
+        Any owner, or an admin. Cascades to every extension, version, image and
+        webhook under the namespace, and to the owner rows.
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /orgs/{namespace}/owners:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+    get:
+      summary: List an organization's owners
+      operationId: listOrganizationOwners
+      tags: [Open]
+      security: []
+      responses:
+        '200':
+          description: The accounts that manage this organization
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/OrganizationOwner' }
+
+  /orgs/{namespace}/owners/{ownerNamespace}:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - name: ownerNamespace
+        in: path
+        required: true
+        schema: { $ref: '#/components/schemas/Namespace' }
+        description: The account to add or remove. An organization cannot own another organization.
+    put:
+      summary: Add an owner
+      operationId: addOrganizationOwner
+      tags: [Userspace]
+      description: >
+        Any owner, or an admin. Idempotent: adding an account that is already an
+        owner is a `204` rather than an error, so a retry does not need to know
+        whether the first attempt landed. The account is notified.
+      responses:
+        '204': { description: Added, or already an owner }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+    delete:
+      summary: Remove an owner
+      operationId: removeOrganizationOwner
+      tags: [Userspace]
+      description: >
+        Any owner, or an admin. The last owner cannot be removed — an
+        organization nobody owns has no way back, so the row is either handed on
+        or the organization deleted. The account is notified.
+      responses:
+        '204': { description: Removed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /orgs/{namespace}/extensions:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+    get:
+      summary: List an organization's extensions
+      operationId: listOrganizationExtensions
+      tags: [Open]
+      security: []
+      description: >
+        The registry listing scoped to this namespace, with the same `sort`,
+        `license`, cursor and paging behaviour. An owner of the organization
+        sees its private extensions; everyone else sees only the public ones.
+      parameters:
+        - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/LicenseFilter'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Dir'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Paginated extensions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, _links]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/ExtensionSummary' }
+                  _links: { $ref: '#/components/schemas/PageLinks' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /orgs/{namespace}/webhooks:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+    get:
+      summary: List an organization's webhooks
+      operationId: listOrganizationWebhooks
+      tags: [Userspace]
+      description: >
+        Any owner, or an admin. Secrets are never returned here; they are
+        returned once, by the create call.
+      responses:
+        '200':
+          description: The namespace-wide webhooks
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Webhook' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      summary: Create an organization webhook
+      operationId: createOrganizationWebhook
+      tags: [Userspace]
+      description: >
+        Any owner, or an admin. A webhook on an organization watches every
+        extension in its namespace instead of one `id`, so a publish, yank,
+        deprecation, rejection or owner change under `@{namespace}` reaches it
+        without registering anything per extension. The per-extension webhooks
+        at `/@{namespace}/{id}/webhooks` are a separate collection and are
+        unaffected; the two do not see each other.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebhookInput' }
+      responses:
+        '201':
+          description: Created, with the signing secret returned once
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookCreated' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /orgs/{namespace}/webhooks/{webhookId}:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - name: webhookId
+        in: path
+        required: true
+        schema: { type: integer }
+    delete:
+      summary: Delete an organization webhook
+      operationId: deleteOrganizationWebhook
+      tags: [Userspace]
+      description: >
+        Any owner, or an admin. An id belonging to a per-extension webhook is a
+        `404` here, since the two collections do not overlap.
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /orgs/{namespace}/avatar:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ImageVersion'
+    get:
+      summary: Get an organization's avatar
+      operationId: getOrganizationAvatar
+      tags: [Open]
+      security: []
+      description: >
+        The same three states as an account's avatar, in the same order: the
+        upload is streamed from the blob store, an external `avatarUrl` is
+        redirected, and an organization with neither gets its identicon.
+      responses:
+        '200':
+          description: The image
+          content:
+            image/*:
+              schema: { type: string, format: binary }
+            image/svg+xml:
+              schema: { type: string }
+        '302': { description: Redirected to the current version or the external URL }
+        '304': { description: Not modified }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      summary: Upload an organization's avatar
+      operationId: uploadOrganizationAvatar
+      tags: [Userspace]
+      description: >
+        Any owner, or an admin. The raw image bytes are the whole body, the same
+        as for an account, and the same size and format limits apply.
+      requestBody:
+        required: true
+        content:
+          image/*:
+            schema: { type: string, format: binary }
+      responses:
+        '200':
+          description: The updated organization
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Organization' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+    delete:
+      summary: Remove an uploaded avatar
+      operationId: deleteOrganizationAvatar
+      tags: [Userspace]
+      description: >
+        Any owner, or an admin. An external `avatarUrl`, if the organization has
+        one, becomes the image again; otherwise the identicon is.
+      responses:
+        '200':
+          description: The updated organization
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Organization' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /orgs/{namespace}/banner:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ImageVersion'
+    get:
+      summary: Get an organization's banner
+      operationId: getOrganizationBanner
+      tags: [Open]
+      security: []
+      description: >-
+        As `/orgs/{namespace}/avatar`, but with no identicon fallback — an organization with no banner is a `404`.
+      responses:
+        '200':
+          description: The image
+          content:
+            image/*:
+              schema: { type: string, format: binary }
+        '302': { description: Redirected to the current version or the external URL }
+        '304': { description: Not modified }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      summary: Upload an organization's banner
+      operationId: uploadOrganizationBanner
+      tags: [Userspace]
+      description: Any owner, or an admin. Raw bytes, as for an avatar.
+      requestBody:
+        required: true
+        content:
+          image/*:
+            schema: { type: string, format: binary }
+      responses:
+        '200':
+          description: The updated organization
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Organization' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+    delete:
+      summary: Remove an uploaded banner
+      operationId: deleteOrganizationBanner
+      tags: [Userspace]
+      description: Any owner, or an admin.
+      responses:
+        '200':
+          description: The updated organization
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Organization' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   # ---------------------------------------------------------- Notifications
   /notifications:
     get:
@@ -751,10 +1190,17 @@ paths:
       operationId: listExtensions
       tags: [Open]
       security: []
-      description: Latest published version per `(namespace, id)`. Defaults to newest-first; `sort` changes the ranking.
+      description: >
+        Latest published version per `(namespace, id)`. Defaults to
+        newest-first; `sort` changes the ranking. `namespace` narrows the
+        listing to one account or organization, which is also what
+        `GET /orgs/{namespace}/extensions` does with a membership check: an
+        owner of the organization sees its private extensions, and everyone
+        else sees only the public ones.
       parameters:
         - $ref: '#/components/parameters/Sort'
         - $ref: '#/components/parameters/LicenseFilter'
+        - $ref: '#/components/parameters/NamespaceFilter'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Dir'
         - $ref: '#/components/parameters/Limit'
@@ -1385,16 +1831,7 @@ paths:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              required: [url, events]
-              properties:
-                url: { type: string, format: uri }
-                events:
-                  type: array
-                  items: { $ref: '#/components/schemas/WebhookEvent' }
-                  minItems: 1
-                active: { type: boolean, default: true }
+            schema: { $ref: '#/components/schemas/WebhookInput' }
       responses:
         '201':
           description: Created, with the one-time secret
@@ -1933,6 +2370,11 @@ components:
       in: query
       schema: { type: string }
       description: Exact SPDX match (case-sensitive), e.g. `MIT` or `Apache-2.0`.
+    NamespaceFilter:
+      name: namespace
+      in: query
+      schema: { $ref: '#/components/schemas/Namespace' }
+      description: Only extensions published under this account or organization.
 
   schemas:
     Namespace:
@@ -1969,6 +2411,8 @@ components:
           broadcast,
           extension.owner.added,
           extension.owner.removed,
+          organization.owner.added,
+          organization.owner.removed,
         ]
       description: |
         What produced the notification. Emit points: `review.*` on an admin's
@@ -1977,7 +2421,9 @@ components:
         version), `tokens.revoked` when an admin resets another account's
         password, `role.changed` on a role change, `broadcast` from
         instance-wide admin announcements, `extension.owner.*` when an
-        account is added to or removed from an extension's owner list.
+        account is added to or removed from an extension's owner list, and
+        `organization.owner.*` when an account is added to or removed from an
+        organization's owner list.
 
     Notification:
       type: object
@@ -2034,11 +2480,20 @@ components:
                 description: The bearer token secret. Shown only in this one response.,
               }
 
+    Kind:
+      type: string
+      enum: [user, organization]
+      description: >
+        Which sort of namespace this is. An organization owns extensions and has
+        a profile, but has no password, no sessions and no role, so most account
+        endpoints refuse it with a `403` and point at `/orgs/{namespace}`.
+
     User:
       type: object
       required: [namespace, displayName, role, hasPublished, createdAt]
       properties:
         namespace: { $ref: '#/components/schemas/Namespace' }
+        kind: { $ref: '#/components/schemas/Kind' }
         displayName: { type: string }
         role: { $ref: '#/components/schemas/Role' }
         hasPublished: { type: boolean }
@@ -2063,6 +2518,55 @@ components:
         termsAcceptedVersion:
           type: ['integer', 'null']
           description: Terms of Service `version` this account last accepted, or `null` if never accepted. Present only for self or admin viewers.
+      description: >
+        An account. `GET /users/{namespace}` also answers for an organization,
+        with `kind` set to `organization` and without `role` or
+        `termsAcceptedVersion`, since an organization has neither. The
+        organization view of itself is `GET /orgs/{namespace}`.
+
+    Organization:
+      type: object
+      required: [namespace, displayName, bio, createdAt]
+      properties:
+        namespace: { $ref: '#/components/schemas/Namespace' }
+        displayName: { type: string }
+        bio: { type: string }
+        website: { type: ['string', 'null'], format: uri }
+        github: { type: ['string', 'null'] }
+        avatarUrl:
+          type: ['string', 'null']
+          format: uri
+          description: >
+            The external reference, or this organization's own
+            `/orgs/{namespace}/avatar` path when the image was uploaded rather
+            than referenced. `null` when there is neither, in which case the
+            identicon is what `GET /orgs/{namespace}/avatar` serves.
+        bannerUrl:
+          type: ['string', 'null']
+          format: uri
+          description: >
+            The external reference, or this organization's own
+            `/orgs/{namespace}/banner` path after an upload.
+        createdAt: { type: string, format: date-time, readOnly: true }
+      description: >
+        An organization: a pseudo-account that owns a namespace, a profile and
+        an extension collection, with no password, no sessions and no role. Its
+        owners are accounts, and every owner has the same rights over it. A
+        `kind` would be constant here, so the field is only on the account view,
+        `GET /users/{namespace}`.
+
+    OrganizationOwner:
+      type: object
+      required: [namespace, displayName, avatarUrl, addedAt]
+      properties:
+        namespace: { $ref: '#/components/schemas/Namespace' }
+        displayName: { type: string }
+        avatarUrl: { type: ['string', 'null'], format: uri }
+        addedAt: { type: string, format: date-time, readOnly: true }
+      description: >
+        One account that manages an organization, in the order the owners were
+        added. Only what identifies the account is exposed; the rest of its
+        public profile is at `GET /users/{namespace}`.
 
     LegalDocument:
       type: object
@@ -2197,19 +2701,38 @@ components:
       enum:
         [version.published, version.yanked, version.deprecated, version.rejected, owners.changed]
 
+    WebhookInput:
+      type: object
+      required: [url, events]
+      properties:
+        url: { type: string, format: uri }
+        events:
+          type: array
+          items: { $ref: '#/components/schemas/WebhookEvent' }
+          minItems: 1
+        active: { type: boolean, default: true }
+
     Webhook:
       type: object
-      required: [id, url, events, active, createdAt]
+      description: >
+        The stored row, which is why these are snake_case. `extension_id` is
+        `null` on a webhook registered on an organization, where it watches the
+        whole namespace instead of one extension.
+      required: [id, namespace, extension_id, url, events, active, created_at]
       properties:
         id: { type: integer }
+        namespace: { $ref: '#/components/schemas/Namespace' }
+        extension_id:
+          type: ['string', 'null']
+          description: The single extension this webhook watches, or `null` for a namespace-wide one.
         url: { type: string, format: uri }
         events:
           type: array
           items: { $ref: '#/components/schemas/WebhookEvent' }
         active: { type: boolean }
-        lastDeliveryStatus: { type: ['string', 'null'] }
-        lastDeliveryAt: { type: ['string', 'null'], format: date-time }
-        createdAt: { type: string, format: date-time }
+        last_delivery_status: { type: ['string', 'null'] }
+        last_delivery_at: { type: ['string', 'null'], format: date-time }
+        created_at: { type: string, format: date-time }
 
     WebhookCreated:
       allOf:
@@ -2232,7 +2755,9 @@ components:
             e.g. version.publish, version.approve, version.reject,
             version.yank, version.deprecate, tag.set, tag.remove, owner.add,
             owner.remove, access.grant, access.revoke, quota.set,
-            role.change, extension.delete
+            role.change, extension.delete, org.create, org.update, org.delete,
+            organization.owner.add, organization.owner.remove,
+            organization.webhook.create, organization.webhook.delete
         target:
           type: object
           properties:

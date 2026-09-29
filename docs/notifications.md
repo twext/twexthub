@@ -19,14 +19,18 @@ TwextHub keeps a per-account notification mailbox. Review decisions, terms updat
 
 Every notification has a `kind`:
 
-| Kind              | Emitted when                                                                             | Recipient                                                                                               |
-| ----------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `review.approved` | An admin approves a pending version.                                                     | The version's owner.                                                                                    |
-| `review.rejected` | An admin rejects a pending version. The payload carries the `reason`.                    | The version's owner.                                                                                    |
-| `terms.bumped`    | A terms update lands (version 2 or later). The first terms document is not a bump.       | Every account that had accepted a previous version — exactly the accounts the publish gate would block. |
-| `tokens.revoked`  | An admin resets another account's password. Self-service password changes notify no one. | The account whose sessions and automation tokens were revoked.                                          |
-| `role.changed`    | An admin changes an account's role.                                                      | The account whose role changed.                                                                         |
-| `broadcast`       | An admin posts a registry-wide message.                                                  | Every account at the moment of the call.                                                                |
+| Kind                         | Emitted when                                                                             | Recipient                                                                                               |
+| ---------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `review.approved`            | An admin approves a pending version.                                                     | The version's owner.                                                                                    |
+| `review.rejected`            | An admin rejects a pending version. The payload carries the `reason`.                    | The version's owner.                                                                                    |
+| `terms.bumped`               | A terms update lands (version 2 or later). The first terms document is not a bump.       | Every account that had accepted a previous version — exactly the accounts the publish gate would block. |
+| `tokens.revoked`             | An admin resets another account's password. Self-service password changes notify no one. | The account whose sessions and automation tokens were revoked.                                          |
+| `role.changed`               | An admin changes an account's role.                                                      | The account whose role changed.                                                                         |
+| `broadcast`                  | An admin posts a registry-wide message.                                                  | Every account at the moment of the call.                                                                |
+| `extension.owner.added`      | An account is added to an extension's owner list.                                        | The account that was added.                                                                             |
+| `extension.owner.removed`    | An account is removed from an extension's owner list.                                    | The account that was removed.                                                                           |
+| `organization.owner.added`   | An account is added to an organization's owner list.                                     | The account that was added.                                                                             |
+| `organization.owner.removed` | An account is removed from an organization's owner list.                                 | The account that was removed.                                                                           |
 
 Notifications are written in the same transaction as the event that produced them: a rolled-back review or password change leaves no notification behind, and a notification never appears for a decision that did not stick.
 

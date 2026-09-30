@@ -15,8 +15,11 @@ import { aggregateDayLoader } from '../src/metrics.js';
 let app;
 let sql;
 before(async () => {
+  // The access-grant test signs up five accounts and then creates an
+  // organization, which draws on the signup bucket too.
   ({ app, sql } = await boot({
     limits: { maxBlobBytes: 5000, maxAccountBlobBytes: 8000 },
+    rateLimits: { signupsPerIpPerWindow: 10_000 },
   }));
 });
 beforeEach(resetDb);

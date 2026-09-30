@@ -24,7 +24,9 @@ let config;
 const PUBLIC_URL = 'https://example.com/twext-hook';
 
 before(async () => {
-  ({ app, sql, config } = await boot());
+  // An organization draws from the signup bucket the same as an account, and
+  // these tests want more than the default five of them.
+  ({ app, sql, config } = await boot({ rateLimits: { signupsPerIpPerWindow: 10_000 } }));
 });
 beforeEach(resetDb);
 after(async () => {

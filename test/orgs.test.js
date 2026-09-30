@@ -269,6 +269,60 @@ describe('changing an organization', () => {
     await request(app).get(`/v1/users/${ns}`).expect(404);
   });
 
+  test('organization deletion clears namespace state at either transfer endpoint', async () => {
+    const { ns, owner } = await org();
+    const outside = owner.user.namespace;
+    const [account] = await sql`SELECT id FROM users WHERE namespace = ${outside}`;
+    for (const namespace of [ns, outside]) {
+      await sql`INSERT INTO dist_tags (owner_id, namespace, extension_id, tag, version)
+        VALUES (${account.id}, ${namespace}, 'cleanup', 'latest', '1.0.0')`;
+      await sql`INSERT INTO extension_owners (owner_id, namespace, extension_id)
+        VALUES (${account.id}, ${namespace}, 'cleanup')`;
+      await sql`INSERT INTO extension_owner_invites (owner_id, namespace, extension_id)
+        VALUES (${account.id}, ${namespace}, 'cleanup')`;
+      await sql`INSERT INTO extension_access (user_id, namespace, extension_id)
+        VALUES (${account.id}, ${namespace}, 'cleanup')`;
+      await sql`INSERT INTO download_events (namespace, extension_id, version)
+        VALUES (${namespace}, 'cleanup', '1.0.0')`;
+      await sql`INSERT INTO extension_daily_downloads (namespace, extension_id, day)
+        VALUES (${namespace}, 'cleanup', current_date)`;
+    }
+    for (const [from, to] of [
+      [ns, outside],
+      [outside, ns],
+      [outside, outside],
+    ]) {
+      await sql`INSERT INTO extension_transfers (namespace, extension_id, to_namespace, requested_by)
+        VALUES (${from}, 'cleanup', ${to}, ${account.id})`;
+      await sql`INSERT INTO extension_redirects (from_namespace, from_extension_id, to_namespace, to_extension_id)
+        VALUES (${from}, ${to}, ${to}, 'cleanup')`;
+    }
+
+    await request(app).delete(`/v1/orgs/${ns}`).set(bearer(owner.token)).expect(204);
+
+    for (const table of [
+      'dist_tags',
+      'extension_owners',
+      'extension_owner_invites',
+      'extension_access',
+      'download_events',
+      'extension_daily_downloads',
+      'extension_transfers',
+    ]) {
+      const rows = await sql`SELECT namespace FROM ${sql(table)}`;
+      assert.deepEqual(
+        rows.map((row) => row.namespace),
+        [outside],
+        table,
+      );
+    }
+    const redirects = await sql`
+      SELECT from_namespace, to_namespace FROM extension_redirects
+      WHERE from_namespace IN (${ns}, ${outside}) OR to_namespace IN (${ns}, ${outside})
+    `;
+    assert.deepEqual([...redirects], [{ from_namespace: outside, to_namespace: outside }]);
+  });
+
   test('organization deletion removes published files and both kinds of webhook', async () => {
     const { ns, owner } = await org();
     await publishProject(app, ns, 'cleanup', owner.token);

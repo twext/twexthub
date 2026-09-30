@@ -196,8 +196,9 @@ export async function acceptTransfer(tx, { config, actor, namespace, id, toNames
   // Re-read everything the open checked. The offer may be months old: the
   // destination may have published its own `id` in the meantime, or filled up.
   const [offer] = await tx`
-    SELECT 1 FROM extension_transfers
+    DELETE FROM extension_transfers
     WHERE namespace = ${namespace} AND extension_id = ${id} AND to_namespace = ${toNamespace}
+    RETURNING 1
   `;
   if (!offer) throw notFound(`@${namespace}/${id} has no transfer waiting for @${toNamespace}.`);
 
@@ -213,11 +214,15 @@ export async function acceptTransfer(tx, { config, actor, namespace, id, toNames
 
   // The charge follows the extension and the quota stays a hard limit, so a
   // transfer is not a way around one.
+  const [account] = await tx`
+    SELECT id, blob_bytes, max_blob_bytes FROM users WHERE id = ${recipient.id} FOR UPDATE
+  `;
+  if (!account) throw notFound('No such receiving account.');
   const charged = chargedBytes(versions);
-  const limit = quotaFor(config, recipient);
-  if (Number(recipient.blob_bytes ?? 0) + charged > limit) {
+  const limit = quotaFor(config, account);
+  if (Number(account.blob_bytes ?? 0) + charged > limit) {
     throw conflict(
-      `@${toNamespace} does not have room for ${charged} bytes; its limit is ${limit} and it holds ${recipient.blob_bytes ?? 0}.`,
+      `@${toNamespace} does not have room for ${charged} bytes; its limit is ${limit} and it holds ${account.blob_bytes ?? 0}.`,
     );
   }
 
@@ -227,12 +232,23 @@ export async function acceptTransfer(tx, { config, actor, namespace, id, toNames
       WHERE namespace = ${toNamespace} AND extension_id = ${id}
     `;
   }
+  await tx`
+    DELETE FROM extension_owners
+    WHERE namespace = ${namespace} AND extension_id = ${id}
+      AND owner_id = (SELECT id FROM users WHERE namespace = ${namespace})
+  `;
   for (const table of MOVED_TABLES) {
     await tx`
       UPDATE ${tx(table)} SET namespace = ${toNamespace}
       WHERE namespace = ${namespace} AND extension_id = ${id}
     `;
   }
+
+  await tx`
+    INSERT INTO extension_owners (owner_id, namespace, extension_id, added_by)
+    VALUES (${account.id}, ${toNamespace}, ${id}, ${actor.id})
+    ON CONFLICT (namespace, extension_id, owner_id) DO NOTHING
+  `;
 
   // versions.owner_id is the account that ran the publish, not the namespace, so
   // it is deliberately left alone: who pushed 1.0.0 stays on the version, which

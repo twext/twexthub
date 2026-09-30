@@ -73,6 +73,39 @@ const notifications = async (token) =>
   (await request(app).get('/v1/notifications').set(bearer(token)).expect(200)).body.data;
 
 describe('an invitation grants nothing until it is accepted', () => {
+  test('concurrent acceptances grant ownership only once', async () => {
+    const { ns, owner } = await publishedExtension();
+    const candidate = await signupAndAccept(app, uniqNs());
+    await invite(ns, 'hello', candidate.user.namespace, owner.token);
+    const attempts = [];
+    await sql.begin(async (tx) => {
+      await tx`LOCK TABLE extension_owner_invites IN SHARE MODE`;
+      for (let i = 0; i < 2; i += 1) {
+        attempts.push(
+          request(app)
+            .post(`/v1/@${ns}/hello/owners/${candidate.user.namespace}/accept`)
+            .set(bearer(candidate.token))
+            .then((response) => response),
+        );
+      }
+      // Hold both DELETEs until each request has read the pending invitation.
+      const deadline = Date.now() + 5000;
+      while (true) {
+        const [{ waiting }] = await sql`
+          SELECT count(*)::int AS waiting FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND query LIKE '%DELETE FROM extension_owner_invites%'
+        `;
+        if (waiting === 2) break;
+        assert.ok(Date.now() < deadline, 'both acceptances should reach the claim');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    });
+    const responses = await Promise.all(attempts);
+    assert.deepEqual(responses.map((response) => response.status).sort(), [200, 404]);
+    assert.ok((await ownerNames(ns, 'hello')).includes(candidate.user.namespace));
+  });
+
   test('publishing is refused before acceptance and allowed after', async () => {
     const { ns, owner } = await publishedExtension();
     const candidate = await signupAndAccept(app, uniqNs());

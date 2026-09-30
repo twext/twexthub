@@ -212,6 +212,24 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
         RETURNING blob_digest, blob_path, source_digest
       `;
       await tx`DELETE FROM webhooks WHERE namespace = ${org.namespace}`;
+      for (const table of [
+        'dist_tags',
+        'extension_owners',
+        'extension_owner_invites',
+        'extension_access',
+        'download_events',
+        'extension_daily_downloads',
+      ]) {
+        await tx`DELETE FROM ${tx(table)} WHERE namespace = ${org.namespace}`;
+      }
+      await tx`
+        DELETE FROM extension_transfers
+        WHERE namespace = ${org.namespace} OR to_namespace = ${org.namespace}
+      `;
+      await tx`
+        DELETE FROM extension_redirects
+        WHERE from_namespace = ${org.namespace} OR to_namespace = ${org.namespace}
+      `;
       await tx`DELETE FROM users WHERE id = ${org.id}`;
       await audit(tx, req.auth.user, 'org.delete', { namespace: org.namespace });
       return rows;

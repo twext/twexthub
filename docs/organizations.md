@@ -86,6 +86,7 @@ Co-ownership shares an extension at its existing address. A transfer moves the a
 ```sh
 # The owner of @alice/widget offers it to @acme
 curl -X POST -H 'Authorization: Bearer <token>' \
+  -H 'Content-Type: application/json' \
   -d '{"to":"acme"}' \
   https://hub.example.com/v1/@alice/widget/transfers
 

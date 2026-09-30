@@ -1,6 +1,7 @@
 import { test, before, beforeEach, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
+import { acceptTransfer, loadNamespaceAccount } from '../src/transfer.js';
 import {
   approveVersion,
   bearer,
@@ -170,6 +171,18 @@ describe('the recipient decides', () => {
 });
 
 describe('the old address redirects', () => {
+  test('publishing to a transferred address is rejected', async () => {
+    const { ns, owner } = await publishedExtension();
+    const other = await signupAndAccept(app, uniqNs());
+    await offer(ns, 'hello', other.user.namespace, owner.token).expect(201);
+    await accept(ns, 'hello', other.user.namespace, other.token);
+
+    const rejected = await publishProject(app, ns, 'hello', owner.token, { version: '2.0.0' }, 409);
+    assert.match(rejected.body.detail, /transferred away/);
+    assert.equal((await sql`SELECT 1 FROM versions WHERE namespace = ${ns}`).length, 0);
+    assert.deepEqual(await versionsMoved(ns, 'hello', other.user.namespace), ['1.0.0']);
+  });
+
   test('a pinned address keeps resolving, and the query string comes along', async () => {
     const { ns, owner } = await publishedExtension();
     const other = await signupAndAccept(app, uniqNs());
@@ -307,6 +320,76 @@ describe('what the move refuses', () => {
 });
 
 describe('what the move carries', () => {
+  test('the sender can no longer publish to the transferred extension', async () => {
+    const { ns, owner } = await publishedExtension();
+    const other = await signupAndAccept(app, uniqNs());
+    await offer(ns, 'hello', other.user.namespace, owner.token).expect(201);
+    await accept(ns, 'hello', other.user.namespace, other.token);
+
+    await publishProject(
+      app,
+      other.user.namespace,
+      'hello',
+      owner.token,
+      { version: '2.0.0' },
+      403,
+    );
+    const rows = await sql`
+      SELECT owner_id FROM extension_owners
+      WHERE namespace = ${other.user.namespace} AND extension_id = 'hello'
+    `;
+    const recipient = await loadNamespaceAccount(sql, other.user.namespace);
+    assert.deepEqual(
+      rows.map((row) => row.owner_id),
+      [recipient.id],
+    );
+  });
+
+  test('deleting an extension clears offers before its address is reused', async () => {
+    const { ns, owner } = await publishedExtension();
+    const other = await signupAndAccept(app, uniqNs());
+    await offer(ns, 'hello', other.user.namespace, owner.token).expect(201);
+    await request(app).delete(`/v1/@${ns}/hello`).set(bearer(owner.token)).expect(204);
+    await publishProject(app, ns, 'hello', owner.token, { version: '2.0.0' });
+
+    await request(app)
+      .post(`/v1/@${ns}/hello/transfers/${other.user.namespace}/accept`)
+      .set(bearer(other.token))
+      .expect(404);
+    assert.deepEqual(await versions(ns, 'hello'), ['2.0.0']);
+  });
+
+  test('acceptance checks the current quota and balance and preserves a refused offer', async () => {
+    const { ns, owner } = await publishedExtension();
+    const other = await signupAndAccept(app, uniqNs());
+    await offer(ns, 'hello', other.user.namespace, owner.token).expect(201);
+    const recipient = await loadNamespaceAccount(sql, other.user.namespace);
+    await sql`
+      UPDATE users SET blob_bytes = 100, max_blob_bytes = 100
+      WHERE id = ${recipient.id}
+    `;
+
+    await assert.rejects(
+      sql.begin((tx) =>
+        acceptTransfer(tx, {
+          config: {},
+          actor: { ...other.user, id: recipient.id },
+          namespace: ns,
+          id: 'hello',
+          toNamespace: other.user.namespace,
+          recipient,
+        }),
+      ),
+      (error) => {
+        assert.equal(error.status, 409);
+        assert.match(error.detail, /limit is 100 and it holds 100/);
+        return true;
+      },
+    );
+    assert.equal((await sql`SELECT 1 FROM extension_transfers WHERE namespace = ${ns}`).length, 1);
+    assert.deepEqual(await versions(ns, 'hello'), ['1.0.0']);
+  });
+
   test('tags, owners, access grants, webhooks, history and the quota charge', async () => {
     const { ns, owner } = await publishedExtension();
     const other = await signupAndAccept(app, uniqNs());

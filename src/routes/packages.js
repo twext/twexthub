@@ -281,6 +281,10 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         throw forbidden('You can only publish to an extension you own.');
       }
 
+      if (await redirectFor(sql, namespace, id)) {
+        throw conflict('This extension address has been transferred away.');
+      }
+
       const maxSource = config.limits?.maxSourceBytes ?? 1024 * 1024;
       if (tarball.length > maxSource) {
         throw new HttpError(413, {
@@ -917,11 +921,13 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         throw forbidden('Only an owner of the invited organization can accept this invitation.');
       }
       await sql.begin(async (tx) => {
-        await tx`
+        const [claimed] = await tx`
           DELETE FROM extension_owner_invites
           WHERE namespace = ${targetNamespace} AND extension_id = ${id}
             AND owner_id = ${invite.owner_id}
+          RETURNING 1
         `;
+        if (!claimed) throw notFound('There is no pending invitation to accept.');
         await tx`
           INSERT INTO extension_owners (owner_id, namespace, extension_id, added_by)
           VALUES (${invite.owner_id}, ${targetNamespace}, ${id}, ${req.auth.user.id})
@@ -1329,6 +1335,10 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
           DELETE FROM extension_owner_invites
           WHERE namespace = ${namespace} AND extension_id = ${id}
         `;
+        await reserved`
+          DELETE FROM extension_transfers
+          WHERE namespace = ${namespace} AND extension_id = ${id}
+        `;
         // Refund the account's quota for every byte this extension charged.
         const charged = rows.reduce(
           (sum, row) => sum + Number(row.blob_size ?? 0) + Number(row.source_size ?? 0),
@@ -1429,6 +1439,9 @@ async function publishVersion(
       // Serialize per namespace/extension so concurrent publishes cannot both
       // validate against the same ceiling snapshot.
       await tx`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+      if (await redirectFor(tx, owner.namespace, id)) {
+        throw conflict('This extension address has been transferred away.');
+      }
 
       const [pending] = await tx`
         SELECT 1 FROM versions

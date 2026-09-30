@@ -1725,7 +1725,9 @@ paths:
                         display_name: { type: string }
                         created_at: { type: string, format: date-time }
                         invited_by:
-                          allOf: [{ $ref: '#/components/schemas/Namespace' }]
+                          oneOf:
+                            - $ref: '#/components/schemas/Namespace'
+                            - type: 'null'
                           description: The namespace that sent it, or null if that account was deleted.
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -1844,7 +1846,9 @@ paths:
                         kind: { $ref: '#/components/schemas/Kind' }
                         created_at: { type: string, format: date-time }
                         requested_by:
-                          allOf: [{ $ref: '#/components/schemas/Namespace' }]
+                          oneOf:
+                            - $ref: '#/components/schemas/Namespace'
+                            - type: 'null'
                           description: The namespace that made the offer, or null if that account was deleted.
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -1866,6 +1870,15 @@ paths:
         room for the extension's bytes. Asking twice for the same destination is
         a `409`. A publish in progress is a `409` too, and `404` if there is
         nothing at this address.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to]
+              properties:
+                to: { $ref: '#/components/schemas/Namespace' }
       responses:
         '201':
           description: Offer recorded

@@ -812,7 +812,11 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
 
   router.put('/@:namespace/:id/owners/:ownerNamespace', ownerChain, async (req, res) => {
     const { namespace: targetNamespace, id, ownerNamespace: candidate } = req.params;
-    if (req.auth.user.namespace !== targetNamespace && req.auth.user.role !== 'admin') {
+    if (
+      req.auth.user.namespace !== targetNamespace &&
+      req.auth.user.role !== 'admin' &&
+      !(await isOrganizationOwner(sql, req.auth.user, targetNamespace))
+    ) {
       throw forbidden('Only an existing owner or an admin can add owners.');
     }
     if (
@@ -976,7 +980,11 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     ) {
       throw notFound();
     }
-    if (req.auth.user.namespace !== targetNamespace && req.auth.user.role !== 'admin') {
+    if (
+      req.auth.user.namespace !== targetNamespace &&
+      req.auth.user.role !== 'admin' &&
+      !(await isOrganizationOwner(sql, req.auth.user, targetNamespace))
+    ) {
       throw forbidden('Only an owner or an admin can remove owners.');
     }
     const [account] = await sql`
@@ -1079,7 +1087,11 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     ) {
       throw notFound();
     }
-    if (req.auth.user.namespace !== targetNamespace && req.auth.user.role !== 'admin') {
+    if (
+      req.auth.user.namespace !== targetNamespace &&
+      req.auth.user.role !== 'admin' &&
+      !(await isOrganizationOwner(sql, req.auth.user, targetNamespace))
+    ) {
       throw forbidden('Only an owner or an admin can grant access.');
     }
     const [existing] = await sql`
@@ -1120,7 +1132,11 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     ) {
       throw notFound();
     }
-    if (req.auth.user.namespace !== targetNamespace && req.auth.user.role !== 'admin') {
+    if (
+      req.auth.user.namespace !== targetNamespace &&
+      req.auth.user.role !== 'admin' &&
+      !(await isOrganizationOwner(sql, req.auth.user, targetNamespace))
+    ) {
       throw forbidden('Only an owner or an admin can revoke access.');
     }
     const [granteeUser] = await sql`SELECT * FROM users WHERE namespace = ${grantee}`;

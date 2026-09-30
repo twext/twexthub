@@ -19,6 +19,23 @@ export async function notifyUsersMatching(tx, where, kind, message, payload = {}
   return rows.length;
 }
 
+// An organization holds no inbox of its own, so anything addressed to one goes
+// to the accounts on its owner list -- each of which can act for it, and each of
+// which is the one that would have to accept an invitation.
+export async function notifyOwnerCandidate(tx, candidate, kind, message, payload = {}) {
+  if (candidate.kind !== 'organization') {
+    await notifyUser(tx, candidate.id, kind, message, payload);
+    return 1;
+  }
+  return notifyUsersMatching(
+    tx,
+    tx`WHERE id IN (SELECT user_id FROM organization_owners WHERE org_id = ${candidate.id})`,
+    kind,
+    message,
+    payload,
+  );
+}
+
 export function reviewApprovedMessage(namespace, id, version) {
   return `${id}@${version} was approved and is live. View it at @${namespace}/${id}.`;
 }
@@ -45,4 +62,37 @@ export function addedAsOwnerMessage(actorNamespace, namespace, id) {
 
 export function removedAsOwnerMessage(actorNamespace, namespace, id) {
   return `You were removed as an owner of @${namespace}/${id} by @${actorNamespace}.`;
+}
+
+// An invitation is not a grant, so it says what is still owed rather than what
+// was given.
+export function invitedAsOwnerMessage(actorNamespace, namespace, id) {
+  return `You can now accept management of @${namespace}/${id}, invited by @${actorNamespace}.`;
+}
+
+export function withdrawnAsOwnerMessage(actorNamespace, namespace, id) {
+  return `The invitation to manage @${namespace}/${id} was withdrawn by @${actorNamespace}.`;
+}
+
+// A transfer moves the address itself, so the message names both ends: what is
+// being offered, and where it would land.
+export function transferRequestedMessage(actorNamespace, namespace, id, toNamespace) {
+  return `@${namespace}/${id} was offered to @${toNamespace} by @${actorNamespace}. Accept it to take the extension over.`;
+}
+
+export function transferOutcomeMessage(actorNamespace, namespace, id, toNamespace, outcome) {
+  if (outcome === 'accepted') {
+    return `@${namespace}/${id} now belongs to @${toNamespace}, accepted by @${actorNamespace}. The old address redirects.`;
+  }
+  return `The transfer of @${namespace}/${id} to @${toNamespace} was withdrawn by @${actorNamespace}.`;
+}
+
+// An organization names people rather than extensions, so these are the same
+// two messages with the extension id left off.
+export function addedAsOrgOwnerMessage(actorNamespace, namespace) {
+  return `You can now manage @${namespace} (added by @${actorNamespace}).`;
+}
+
+export function removedAsOrgOwnerMessage(actorNamespace, namespace) {
+  return `You were removed as an owner of @${namespace} by @${actorNamespace}.`;
 }

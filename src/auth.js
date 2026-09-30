@@ -103,16 +103,60 @@ export async function canSee(sql, user, row) {
   if (row.visibility !== 'private') return true;
   if (!user) return false;
   if (user.role === 'admin' || user.namespace === row.namespace) return true;
-  const [ownerRow] = await sql`
-    SELECT 1 FROM extension_owners
-    WHERE owner_id = ${user.id} AND namespace = ${row.namespace} AND extension_id = ${row.extension_id}
-  `;
-  if (ownerRow) return true;
+  if (await isExtensionOwner(sql, user, row.namespace, row.extension_id)) return true;
   const [grant] = await sql`
     SELECT 1 FROM extension_access
     WHERE user_id = ${user.id} AND namespace = ${row.namespace} AND extension_id = ${row.extension_id}
   `;
   return Boolean(grant);
+}
+
+// An extension owner is an account or an organization, and an organization's
+// owners all stand behind its row. So one test answers both: the direct match
+// covers the account case, and the organization_owners branch covers @org/id
+// with no row per person, as well as an organization holding a row on somebody
+// else's extension.
+export async function isExtensionOwner(sql, user, namespace, id) {
+  const [row] = await sql`
+    SELECT 1
+    FROM extension_owners o
+    WHERE o.namespace = ${namespace} AND o.extension_id = ${id}
+      AND (
+        o.owner_id = ${user.id}
+        OR EXISTS (
+          SELECT 1 FROM organization_owners g
+          WHERE g.org_id = o.owner_id AND g.user_id = ${user.id}
+        )
+      )
+  `;
+  return Boolean(row);
+}
+
+// Whether an account may act for an organization by name. Used where the
+// organization is identified by its namespace rather than by an ownership row:
+// accepting an invitation addressed to it, for one.
+export async function isOrganizationOwner(sql, user, namespace) {
+  const [row] = await sql`
+    SELECT 1
+    FROM organization_owners g
+    JOIN users org ON org.id = g.org_id
+    WHERE g.user_id = ${user.id} AND org.namespace = ${namespace}
+      AND org.kind = 'organization'
+  `;
+  return Boolean(row);
+}
+
+// The same answer as a list, for the places that need it as one: the listing
+// filter carries the namespaces rather than testing each row, and an
+// organization holding an invitation needs to know it is waiting.
+export async function organizationsOwnedBy(sql, user) {
+  const rows = await sql`
+    SELECT org.namespace
+    FROM organization_owners g
+    JOIN users org ON org.id = g.org_id
+    WHERE g.user_id = ${user.id} AND org.kind = 'organization'
+  `;
+  return rows.map((row) => row.namespace);
 }
 
 export function requireSession(req, res, next) {

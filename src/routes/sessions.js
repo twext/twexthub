@@ -38,6 +38,12 @@ export function makeSessionsRouter({ sql, config, termsGate, rateLimiter }) {
     ]);
 
     const [user] = await sql`SELECT * FROM users WHERE namespace = ${namespace}`;
+    // An organization is a pseudo-account with no password, and its namespace is
+    // public knowledge, so this says what it is instead of pretending the
+    // credentials were wrong.
+    if (user?.kind === 'organization') {
+      throw forbidden(`@${namespace} is an organization, which cannot sign in.`);
+    }
     const ok = await verifyPassword(password, user ? user.password_hash : await dummyHash());
     if (!user || !ok) {
       await Promise.all(recordFailures.map((record) => record()));

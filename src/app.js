@@ -16,6 +16,7 @@ import { makeNotificationsRouter } from './routes/notifications.js';
 import { makePackagesRouter } from './routes/packages.js';
 import { makeBlobsRouter } from './routes/blobs.js';
 import { makeDiscoveryRouter } from './routes/discovery.js';
+import { makeOrgsRouter } from './routes/orgs.js';
 import { makeAdminRouter } from './routes/admin.js';
 
 export function createApp(opts = {}) {
@@ -65,15 +66,20 @@ export function createApp(opts = {}) {
   const apiRoot = normalizeApiRoot(config.apiRoot);
   const root = apiRoot ? `/${apiRoot}` : '';
   const mount = (suffix) => `${root}${suffix}`;
+  // The organization list is the registry listing scoped to a namespace, so the
+  // discovery router is built first and lends it out rather than the two keeping
+  // a copy of the same query and sort apart.
+  const discovery = makeDiscoveryRouter(shared);
 
   app.use(mount('/sessions'), makeSessionsRouter(shared));
   app.use(mount('/tokens'), makeTokensRouter(shared));
   app.use(mount('/users'), makeUsersRouter(shared));
+  app.use(mount('/orgs'), makeOrgsRouter({ ...shared, listExtensions: discovery.listExtensions }));
   app.use(mount('/notifications'), makeNotificationsRouter(shared));
   app.use(root || '/', makeMeRouter(shared));
   app.use(root || '/', makeBlobsRouter(shared));
   app.use(root || '/', makePackagesRouter(shared));
-  app.use(root || '/', makeDiscoveryRouter(shared));
+  app.use(root || '/', discovery.router);
   app.use(root || '/', makeAdminRouter(shared));
 
   app.use((req, res, next) => next(notFound()));

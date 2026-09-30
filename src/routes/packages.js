@@ -5,7 +5,14 @@ import { randomBytes } from 'node:crypto';
 import express, { Router } from 'express';
 import semver from 'semver';
 import YAML from 'yaml';
-import { canSee as canSeeExtension, requireAuth, requireScope } from '../auth.js';
+import {
+  canSee as canSeeExtension,
+  isExtensionOwner as isExtensionOwnerRow,
+  isOrganizationOwner,
+  organizationsOwnedBy,
+  requireAuth,
+  requireScope,
+} from '../auth.js';
 import { conflict, forbidden, HttpError, fieldErrors, notFound } from '../errors.js';
 import {
   asString,
@@ -19,12 +26,26 @@ import {
 import { extensionDetailFromRow, sourceUrl, versionToObject } from '../serialize.js';
 import {
   addedAsOwnerMessage,
+  invitedAsOwnerMessage,
+  notifyOwnerCandidate,
   notifyUser,
   removedAsOwnerMessage,
   reviewApprovedMessage,
   reviewRejectedMessage,
+  withdrawnAsOwnerMessage,
 } from '../notify.js';
 import { requireObjectBody } from './shared.js';
+import {
+  acceptTransfer,
+  hasOrgOwner,
+  loadNamespaceAccount as loadTransferRecipient,
+  mayOfferTransfer,
+  mayReceiveTransfer,
+  openTransfer,
+  pendingTransfersFor,
+  redirectFor,
+  withdrawTransfer,
+} from '../transfer.js';
 import {
   BLOB_GC_LOCK_KEY,
   blobPathFor,
@@ -50,14 +71,17 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
   const ownerChain = [requireAuth, termsGate];
   const publishChain = [requireAuth, termsGate, requireScope('publish')];
 
+  // Three ways to hold an extension. The namespace account owns the address.
+  // An organization owner owns the address of the organization they own, which
+  // is a separate test because it has to hold before the extension's first
+  // publish, when there is no ownership row to find. And an ownership row --
+  // the account's own, or one held by an organization the account is on the
+  // owner list of -- makes a co-owner of somebody else's extension.
   async function isExtensionOwner(user, namespace, id) {
     if (user.role === 'admin') return true;
     if (user.namespace === namespace) return true;
-    const [row] = await sql`
-      SELECT 1 FROM extension_owners
-      WHERE owner_id = ${user.id} AND namespace = ${namespace} AND extension_id = ${id}
-    `;
-    return Boolean(row);
+    if (await isExtensionOwnerRow(sql, user, namespace, id)) return true;
+    return isOrganizationOwner(sql, user, namespace);
   }
 
   const canSee = (user, row) => canSeeExtension(sql, user, row);
@@ -125,12 +149,35 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     return await loadVersion(namespace, id, tagRow.version);
   }
 
+  // An address that has been transferred away answers with the address that
+  // replaced it, so a pinned `@old/id` keeps resolving.
+  //
+  // The redirect is only sent to a caller who would have been allowed to read
+  // the extension at its new address. Answering everybody would turn the old
+  // address into a directory of which private extensions moved and where to, and
+  // a caller with no business there has to get the same 404 they got before the
+  // move -- so the destination's visibility is checked, and the redirect is not
+  // a way around it.
+  async function redirectIfMoved(req, res, suffix = '') {
+    const { namespace, id } = req.params;
+    const moved = await redirectFor(sql, namespace, id);
+    if (!moved) return false;
+    const visibility = await loadVisibility(moved.namespace, moved.id);
+    if (!visibility || !(await canSee(req.auth?.user ?? null, visibility))) throw notFound();
+    const query = req.originalUrl.includes('?')
+      ? `?${req.originalUrl.slice(req.originalUrl.indexOf('?') + 1)}`
+      : '';
+    res.redirect(301, `/v1/@${moved.namespace}/${moved.id}${suffix}${query}`);
+    return true;
+  }
+
   // A range is a filter on the collection, not a lookup of its own: the list is
   // every version the caller can see that satisfies it, highest SemVer first, so
   // the first entry is the one a "resolve" would have picked.
   router.get('/@:namespace/:id/versions', async (req, res) => {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    if (await redirectIfMoved(req, res, '/versions')) return;
     const { range } = req.query;
     if (range !== undefined && (typeof range !== 'string' || !semver.validRange(range.trim()))) {
       throw fieldErrors([{ field: 'range', message: 'Must be a valid SemVer range.' }]);
@@ -232,6 +279,10 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
       if (!owner) throw notFound('No such publishing account.');
       if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
         throw forbidden('You can only publish to an extension you own.');
+      }
+
+      if (await redirectFor(sql, namespace, id)) {
+        throw conflict('This extension address has been transferred away.');
       }
 
       const maxSource = config.limits?.maxSourceBytes ?? 1024 * 1024;
@@ -389,6 +440,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
   router.get('/@:namespace/:id/tags', async (req, res) => {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    if (await redirectIfMoved(req, res, '/tags')) return;
     const visibility = await loadVisibility(namespace, id);
     if (!visibility || !(await canSee(req.auth?.user, visibility))) throw notFound();
     const rows = await sql`
@@ -457,6 +509,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
   });
 
   router.get('/@:namespace/:id/versions/:version', async (req, res) => {
+    if (await redirectIfMoved(req, res, `/versions/${req.params.version}`)) return;
     const row = await resolveVersion(req.params, req.auth?.user ?? null);
     const isVisible =
       row.status === 'published' || row.status === 'yanked' || row.status === 'deprecated';
@@ -658,6 +711,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     }
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    if (await redirectIfMoved(req, res, `/versions/${req.params.version}/download`)) return;
     const row = await resolveVersion(req.params, req.auth?.user ?? null);
     const isPublished =
       row.status === 'published' || row.status === 'yanked' || row.status === 'deprecated';
@@ -715,7 +769,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     const visibility = await loadVisibility(namespace, id);
     if (!visibility || !(await canSee(req.auth?.user, visibility))) throw notFound();
     const rows = await sql`
-      SELECT u.namespace, u.display_name, u.role, u.created_at, o.added_at
+      SELECT u.namespace, u.display_name, u.role, u.kind, u.created_at, o.added_at
       FROM extension_owners o
       JOIN users u ON u.id = o.owner_id
       WHERE o.namespace = ${namespace} AND o.extension_id = ${id}
@@ -724,9 +778,45 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     res.json({ data: rows });
   });
 
+  // Invitations addressed to the caller: their own, plus any held by an
+  // organization they own. An organization cannot sign in, so an account acting
+  // for one needs to see what is waiting on the organization, not only what is
+  // waiting on them.
+  router.get('/@:namespace/:id/owners/pending', requireAuth, async (req, res) => {
+    const { namespace, id } = req.params;
+    if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    const organizations = await organizationsOwnedBy(sql, req.auth.user);
+    const rows = await sql`
+      SELECT u.namespace, u.display_name, u.kind, i.created_at,
+        a.namespace AS invited_by_namespace
+      FROM extension_owner_invites i
+      JOIN users u ON u.id = i.owner_id
+      LEFT JOIN users a ON a.id = i.invited_by
+      WHERE i.namespace = ${namespace} AND i.extension_id = ${id}
+        AND (
+          i.owner_id = ${req.auth.user.id}
+          OR u.namespace = ANY (${sql.array(organizations)}::text[])
+        )
+      ORDER BY i.created_at
+    `;
+    res.json({
+      data: rows.map((row) => ({
+        namespace: row.namespace,
+        display_name: row.display_name,
+        kind: row.kind,
+        created_at: row.created_at.toISOString(),
+        invited_by: row.invited_by_namespace,
+      })),
+    });
+  });
+
   router.put('/@:namespace/:id/owners/:ownerNamespace', ownerChain, async (req, res) => {
     const { namespace: targetNamespace, id, ownerNamespace: candidate } = req.params;
-    if (req.auth.user.namespace !== targetNamespace && req.auth.user.role !== 'admin') {
+    if (
+      req.auth.user.namespace !== targetNamespace &&
+      req.auth.user.role !== 'admin' &&
+      !(await isOrganizationOwner(sql, req.auth.user, targetNamespace))
+    ) {
       throw forbidden('Only an existing owner or an admin can add owners.');
     }
     if (
@@ -741,40 +831,145 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         WHERE namespace = ${targetNamespace} AND extension_id = ${id} AND status <> 'rejected'
       `;
     if (!existing) throw notFound();
+    if (candidate === targetNamespace) {
+      throw fieldErrors([
+        { field: 'namespace', message: 'The namespace account already owns this extension.' },
+      ]);
+    }
     const [candidateUser] = await sql`
         SELECT * FROM users WHERE namespace = ${candidate}
       `;
-    if (!candidateUser) throw notFound('No such account to add.');
-    await sql.begin(async (tx) => {
-      await tx`
-          INSERT INTO extension_owners (owner_id, namespace, extension_id, added_by)
-          VALUES (${candidateUser.id}, ${targetNamespace}, ${id}, ${req.auth.user.id})
+    if (!candidateUser) throw notFound('No such account to invite.');
+    const [alreadyOwner] = await sql`
+        SELECT 1 FROM extension_owners
+        WHERE namespace = ${targetNamespace} AND extension_id = ${id}
+          AND owner_id = ${candidateUser.id}
+      `;
+    if (alreadyOwner) {
+      // Nothing to invite, and clearing a leftover invitation keeps the two from
+      // disagreeing about whether it took.
+      await sql`
+        DELETE FROM extension_owner_invites
+        WHERE namespace = ${targetNamespace} AND extension_id = ${id}
+          AND owner_id = ${candidateUser.id}
+      `;
+      res.status(204).end();
+      return;
+    }
+    // An invitation is idempotent rather than an error, so a retried request does
+    // not need to know whether the first attempt landed.
+    const [invited] = await sql.begin(async (tx) => {
+      const [row] = await tx`
+          INSERT INTO extension_owner_invites (namespace, extension_id, owner_id, invited_by)
+          VALUES (${targetNamespace}, ${id}, ${candidateUser.id}, ${req.auth.user.id})
           ON CONFLICT (namespace, extension_id, owner_id) DO NOTHING
+          RETURNING 1
         `;
-      if (candidateUser.id !== req.auth.user.id) {
-        await notifyUser(
+      if (row) {
+        await notifyOwnerCandidate(
           tx,
-          candidateUser.id,
-          'extension.owner.added',
-          addedAsOwnerMessage(req.auth.user.namespace, targetNamespace, id),
+          candidateUser,
+          'extension.owner.invited',
+          invitedAsOwnerMessage(req.auth.user.namespace, targetNamespace, id),
           { namespace: targetNamespace, id },
         );
+        await audit(
+          tx,
+          req.auth.user,
+          'owner.invite',
+          { namespace: targetNamespace, id },
+          { invited: candidateUser.namespace },
+        );
       }
-      await audit(
-        tx,
-        req.auth.user,
-        'owner.add',
-        { namespace: targetNamespace, id },
-        { added: candidateUser.namespace },
-      );
+      return [row].filter(Boolean);
     });
-    void webhooks.scheduleFor(targetNamespace, id, 'owners.changed', {
-      actor: req.auth.user.namespace,
-      added: candidateUser.namespace,
-      occurredAt: new Date().toISOString(),
-    });
+    if (invited) {
+      void webhooks.scheduleFor(targetNamespace, id, 'owners.invited', {
+        actor: req.auth.user.namespace,
+        invited: candidateUser.namespace,
+        occurredAt: new Date().toISOString(),
+      });
+    }
     res.status(204).end();
   });
+
+  // The second step of the grant. An account accepts its own invitation; an
+  // organization holds no session, so any of the accounts on its owner list can
+  // accept, and one of them accepting speaks for the rest.
+  router.post(
+    '/@:namespace/:id/owners/:ownerNamespace/accept',
+    requireAuth,
+    termsGate,
+    async (req, res) => {
+      const { namespace: targetNamespace, id, ownerNamespace: candidate } = req.params;
+      if (
+        !isValidNamespace(targetNamespace) ||
+        !isValidNamespace(candidate) ||
+        !isValidExtensionId(id)
+      ) {
+        throw notFound();
+      }
+      const [invite] = await sql`
+          SELECT i.owner_id, u.kind
+          FROM extension_owner_invites i
+          JOIN users u ON u.id = i.owner_id
+          WHERE i.namespace = ${targetNamespace} AND i.extension_id = ${id}
+            AND u.namespace = ${candidate}
+        `;
+      if (!invite) throw notFound('There is no pending invitation to accept.');
+      const mine = invite.owner_id === req.auth.user.id;
+      if (!mine && invite.kind !== 'organization') {
+        throw forbidden('Only the invited account can accept this invitation.');
+      }
+      if (!mine && !(await isOrganizationOwner(sql, req.auth.user, candidate))) {
+        throw forbidden('Only an owner of the invited organization can accept this invitation.');
+      }
+      await sql.begin(async (tx) => {
+        const [claimed] = await tx`
+          DELETE FROM extension_owner_invites
+          WHERE namespace = ${targetNamespace} AND extension_id = ${id}
+            AND owner_id = ${invite.owner_id}
+          RETURNING 1
+        `;
+        if (!claimed) throw notFound('There is no pending invitation to accept.');
+        await tx`
+          INSERT INTO extension_owners (owner_id, namespace, extension_id, added_by)
+          VALUES (${invite.owner_id}, ${targetNamespace}, ${id}, ${req.auth.user.id})
+          ON CONFLICT (namespace, extension_id, owner_id) DO NOTHING
+        `;
+        // The account that accepted knows already; the partners on an
+        // organization's owner list do not, so they are the ones told.
+        if (invite.kind === 'organization') {
+          const partners = await tx`
+            SELECT user_id FROM organization_owners
+            WHERE org_id = ${invite.owner_id} AND user_id <> ${req.auth.user.id}
+          `;
+          for (const row of partners) {
+            await notifyUser(
+              tx,
+              row.user_id,
+              'extension.owner.added',
+              addedAsOwnerMessage(req.auth.user.namespace, targetNamespace, id),
+              { namespace: targetNamespace, id },
+            );
+          }
+        }
+        await audit(
+          tx,
+          req.auth.user,
+          'owner.accept',
+          { namespace: targetNamespace, id },
+          { added: candidate },
+        );
+      });
+      void webhooks.scheduleFor(targetNamespace, id, 'owners.changed', {
+        actor: req.auth.user.namespace,
+        added: candidate,
+        occurredAt: new Date().toISOString(),
+      });
+      res.json({ data: { namespace: targetNamespace, id, owner: candidate } });
+    },
+  );
 
   router.delete('/@:namespace/:id/owners/:ownerNamespace', ownerChain, async (req, res) => {
     const { namespace: targetNamespace, id, ownerNamespace: target } = req.params;
@@ -785,7 +980,11 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     ) {
       throw notFound();
     }
-    if (req.auth.user.namespace !== targetNamespace && req.auth.user.role !== 'admin') {
+    if (
+      req.auth.user.namespace !== targetNamespace &&
+      req.auth.user.role !== 'admin' &&
+      !(await isOrganizationOwner(sql, req.auth.user, targetNamespace))
+    ) {
       throw forbidden('Only an owner or an admin can remove owners.');
     }
     const [account] = await sql`
@@ -805,6 +1004,44 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         SELECT * FROM users WHERE namespace = ${target}
       `;
     if (!candidateUser) throw notFound('No such account.');
+
+    // Withdrawing an invitation and removing a grant are one request from the
+    // namespace account's side, and the invitation is looked for first so that
+    // reporting which of the two happened is not a guess.
+    const [withdrawn] = await sql.begin(async (tx) => {
+      const [r] = await tx`
+          DELETE FROM extension_owner_invites
+          WHERE owner_id = ${candidateUser.id} AND namespace = ${targetNamespace} AND extension_id = ${id}
+          RETURNING 1
+        `;
+      if (r) {
+        await notifyOwnerCandidate(
+          tx,
+          candidateUser,
+          'extension.owner.withdrawn',
+          withdrawnAsOwnerMessage(req.auth.user.namespace, targetNamespace, id),
+          { namespace: targetNamespace, id },
+        );
+        await audit(
+          tx,
+          req.auth.user,
+          'owner.withdraw',
+          { namespace: targetNamespace, id },
+          { withdrawn: candidateUser.namespace },
+        );
+      }
+      return [r].filter(Boolean);
+    });
+    if (withdrawn) {
+      void webhooks.scheduleFor(targetNamespace, id, 'owners.invited', {
+        actor: req.auth.user.namespace,
+        withdrawn: target,
+        occurredAt: new Date().toISOString(),
+      });
+      res.status(204).end();
+      return;
+    }
+
     const [deleted] = await sql.begin(async (tx) => {
       const [r] = await tx`
           DELETE FROM extension_owners
@@ -812,9 +1049,9 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
           RETURNING 1
         `;
       if (r) {
-        await notifyUser(
+        await notifyOwnerCandidate(
           tx,
-          candidateUser.id,
+          candidateUser,
           'extension.owner.removed',
           removedAsOwnerMessage(req.auth.user.namespace, targetNamespace, id),
           { namespace: targetNamespace, id },
@@ -850,7 +1087,11 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     ) {
       throw notFound();
     }
-    if (req.auth.user.namespace !== targetNamespace && req.auth.user.role !== 'admin') {
+    if (
+      req.auth.user.namespace !== targetNamespace &&
+      req.auth.user.role !== 'admin' &&
+      !(await isOrganizationOwner(sql, req.auth.user, targetNamespace))
+    ) {
       throw forbidden('Only an owner or an admin can grant access.');
     }
     const [existing] = await sql`
@@ -891,7 +1132,11 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     ) {
       throw notFound();
     }
-    if (req.auth.user.namespace !== targetNamespace && req.auth.user.role !== 'admin') {
+    if (
+      req.auth.user.namespace !== targetNamespace &&
+      req.auth.user.role !== 'admin' &&
+      !(await isOrganizationOwner(sql, req.auth.user, targetNamespace))
+    ) {
       throw forbidden('Only an owner or an admin can revoke access.');
     }
     const [granteeUser] = await sql`SELECT * FROM users WHERE namespace = ${grantee}`;
@@ -933,9 +1178,119 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     res.json({ data: rows });
   });
 
+  // Offering an extension to another namespace. Two steps, like an owner grant
+  // and for the same reason: the recipient is the one whose name ends up on the
+  // address and whose quota pays for it, so it is the one that agrees. Until it
+  // does, nothing about @namespace/id has changed and the recipient cannot even
+  // see the offer unless it asks.
+  router.post('/@:namespace/:id/transfers', ownerChain, async (req, res) => {
+    const { namespace: from, id } = req.params;
+    if (!isValidNamespace(from) || !isValidExtensionId(id)) throw notFound();
+    requireObjectBody(req);
+    const to = req.body.to;
+    if (!isValidNamespace(to)) {
+      throw fieldErrors([{ field: 'to', message: 'Must be a valid namespace.' }]);
+    }
+    if (to === from) {
+      throw fieldErrors([
+        { field: 'to', message: 'An extension cannot be transferred to itself.' },
+      ]);
+    }
+    if (!(await mayOfferTransfer(sql, req.auth.user, from))) {
+      throw forbidden('Only the namespace account or an admin can transfer an extension away.');
+    }
+    const recipient = await loadTransferRecipient(sql, to);
+    if (!recipient) throw notFound('No such account to transfer to.');
+    if (recipient.kind === 'organization' && !(await hasOrgOwner(sql, recipient.id))) {
+      throw conflict('An organization with no owners cannot receive an extension.');
+    }
+    await sql.begin(async (tx) => {
+      await openTransfer(tx, {
+        config,
+        actor: req.auth.user,
+        namespace: from,
+        id,
+        toNamespace: to,
+        recipient,
+      });
+    });
+    res.status(201).json({ data: { namespace: from, id, to } });
+  });
+
+  // What has been offered at this address that the caller can answer for.
+  router.get('/@:namespace/:id/transfers', requireAuth, async (req, res) => {
+    const { namespace, id } = req.params;
+    if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    res.json({ data: await pendingTransfersFor(sql, req.auth.user, namespace, id) });
+  });
+
+  // The recipient accepts, and the move happens. Same transaction as the audit
+  // entry, the notification and the redirect row, so a transfer either lands
+  // whole or not at all.
+  router.post(
+    '/@:namespace/:id/transfers/:toNamespace/accept',
+    requireAuth,
+    termsGate,
+    async (req, res) => {
+      const { namespace: from, id, toNamespace: to } = req.params;
+      if (!isValidNamespace(from) || !isValidNamespace(to) || !isValidExtensionId(id)) {
+        throw notFound();
+      }
+      const recipient = await loadTransferRecipient(sql, to);
+      if (!recipient) throw notFound();
+      if (!(await mayReceiveTransfer(sql, req.auth.user, to))) {
+        throw forbidden('Only the receiving namespace or an admin can accept this transfer.');
+      }
+      const moved = await sql.begin(async (tx) => {
+        return await acceptTransfer(tx, {
+          config,
+          actor: req.auth.user,
+          namespace: from,
+          id,
+          toNamespace: to,
+          recipient,
+        });
+      });
+      // Fired against the new address: the webhooks moved with the extension, and
+      // a subscriber that wanted to hear about this extension is now the new
+      // owner's.
+      void webhooks.scheduleFor(to, id, 'extension.transferred', {
+        actor: req.auth.user.namespace,
+        from,
+        to,
+        id,
+        occurredAt: new Date().toISOString(),
+      });
+      res.json({ data: { namespace: to, id, from, versions: moved.versions } });
+    },
+  );
+
+  router.delete('/@:namespace/:id/transfers/:toNamespace', ownerChain, async (req, res) => {
+    const { namespace: from, id, toNamespace: to } = req.params;
+    if (!isValidNamespace(from) || !isValidNamespace(to) || !isValidExtensionId(id)) {
+      throw notFound();
+    }
+    if (!(await mayOfferTransfer(sql, req.auth.user, from))) {
+      throw forbidden('Only the namespace account or an admin can withdraw a transfer.');
+    }
+    const recipient = await loadTransferRecipient(sql, to);
+    if (!recipient) throw notFound();
+    await sql.begin(async (tx) => {
+      await withdrawTransfer(tx, {
+        actor: req.auth.user,
+        namespace: from,
+        id,
+        toNamespace: to,
+        recipient,
+      });
+    });
+    res.status(204).end();
+  });
+
   router.get('/@:namespace/:id', async (req, res) => {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    if (await redirectIfMoved(req, res)) return;
     const rows = await sql`
       SELECT * FROM versions
       WHERE namespace = ${namespace} AND extension_id = ${id}
@@ -989,6 +1344,17 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
           throw conflict('A publish is in progress for this extension.');
         }
         await reserved`DELETE FROM versions WHERE namespace = ${namespace} AND extension_id = ${id}`;
+        // An invitation to manage an extension that no longer exists can never
+        // be accepted, and the extension_owners rows survive on purpose, so
+        // these have to be cleared here rather than left for a cascade.
+        await reserved`
+          DELETE FROM extension_owner_invites
+          WHERE namespace = ${namespace} AND extension_id = ${id}
+        `;
+        await reserved`
+          DELETE FROM extension_transfers
+          WHERE namespace = ${namespace} AND extension_id = ${id}
+        `;
         // Refund the account's quota for every byte this extension charged.
         const charged = rows.reduce(
           (sum, row) => sum + Number(row.blob_size ?? 0) + Number(row.source_size ?? 0),
@@ -1089,6 +1455,9 @@ async function publishVersion(
       // Serialize per namespace/extension so concurrent publishes cannot both
       // validate against the same ceiling snapshot.
       await tx`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+      if (await redirectFor(tx, owner.namespace, id)) {
+        throw conflict('This extension address has been transferred away.');
+      }
 
       const [pending] = await tx`
         SELECT 1 FROM versions

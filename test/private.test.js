@@ -326,6 +326,46 @@ test('access grants open private detail/download to the grantee and revoke clean
     .set(bearer(coowner.token))
     .expect(200);
   await request(app).get(`/v1/@${ns}/secret`).set(bearer(coowner.token)).expect(200);
+  await request(app)
+    .put(`/v1/@${ns}/secret/access/${grantee.user.namespace}`)
+    .set(bearer(coowner.token))
+    .expect(403);
+
+  const orgNamespace = uniqNs();
+  await request(app)
+    .post('/v1/orgs')
+    .set(bearer(outsider.token))
+    .send({ namespace: orgNamespace })
+    .expect(201);
+  await request(app)
+    .put(`/v1/@${ns}/secret/owners/${orgNamespace}`)
+    .set(bearer(owner.token))
+    .expect(204);
+  await request(app)
+    .post(`/v1/@${ns}/secret/owners/${orgNamespace}/accept`)
+    .set(bearer(outsider.token))
+    .expect(200);
+  await request(app).get(`/v1/@${ns}/secret`).set(bearer(outsider.token)).expect(200);
+  await request(app)
+    .put(`/v1/@${ns}/secret/access/${grantee.user.namespace}`)
+    .set(bearer(outsider.token))
+    .expect(403);
+
+  await request(app)
+    .put(`/v1/@${ns}/secret/access/${grantee.user.namespace}`)
+    .set(bearer(admin.token))
+    .expect(204);
+  for (const actor of [coowner, outsider]) {
+    await request(app)
+      .delete(`/v1/@${ns}/secret/access/${grantee.user.namespace}`)
+      .set(bearer(actor.token))
+      .expect(403);
+  }
+  await request(app)
+    .delete(`/v1/@${ns}/secret/access/${grantee.user.namespace}`)
+    .set(bearer(admin.token))
+    .expect(204);
+  await request(app).get(`/v1/@${ns}/secret`).set(bearer(grantee.token)).expect(404);
 });
 
 test('blob size caps and the account quota are enforced on publish', async () => {

@@ -545,6 +545,121 @@ describe('owners', () => {
 });
 
 describe('extensions', () => {
+  test('organization owners manage extension invitations, owners and private access', async () => {
+    const admin = await signupAndAccept(app, uniqNs());
+    const { ns, owner } = await org();
+    const manager = await signupAndAccept(app, uniqNs());
+    const candidate = await signupAndAccept(app, uniqNs());
+    const grantee = await signupAndAccept(app, uniqNs());
+    await request(app)
+      .put(`/v1/orgs/${ns}/owners/${manager.user.namespace}`)
+      .set(bearer(owner.token))
+      .expect(204);
+    await publishProject(app, ns, 'secret', owner.token, { visibility: 'private' });
+    await approveVersion(app, admin.token, ns, 'secret', '1.0.0');
+    const extensionPath = `/v1/@${ns}/secret`;
+    const ownerPath = `${extensionPath}/owners/${candidate.user.namespace}`;
+    const accessPath = `${extensionPath}/access/${grantee.user.namespace}`;
+
+    await request(app).put(ownerPath).set(bearer(manager.token)).expect(204);
+    const pending = await request(app)
+      .get(`${extensionPath}/owners/pending`)
+      .set(bearer(candidate.token))
+      .expect(200);
+    assert.deepEqual(
+      pending.body.data.map((row) => row.namespace),
+      [candidate.user.namespace],
+    );
+    await request(app).get(extensionPath).set(bearer(candidate.token)).expect(404);
+    await request(app).delete(ownerPath).set(bearer(manager.token)).expect(204);
+    await request(app).post(`${ownerPath}/accept`).set(bearer(candidate.token)).expect(404);
+
+    await request(app).put(ownerPath).set(bearer(manager.token)).expect(204);
+    await request(app).post(`${ownerPath}/accept`).set(bearer(candidate.token)).expect(200);
+    await request(app).get(extensionPath).set(bearer(candidate.token)).expect(200);
+    await request(app).delete(ownerPath).set(bearer(manager.token)).expect(204);
+    await request(app).get(extensionPath).set(bearer(candidate.token)).expect(404);
+    await request(app)
+      .delete(`${extensionPath}/owners/${ns}`)
+      .set(bearer(manager.token))
+      .expect(422);
+
+    await request(app).get(extensionPath).set(bearer(grantee.token)).expect(404);
+    await request(app).put(accessPath).set(bearer(manager.token)).expect(204);
+    await request(app).get(extensionPath).set(bearer(grantee.token)).expect(200);
+    await request(app).delete(accessPath).set(bearer(manager.token)).expect(204);
+    await request(app).get(extensionPath).set(bearer(grantee.token)).expect(404);
+  });
+
+  test('outsiders, removed organization owners and extension co-owners cannot manage namespace grants', async () => {
+    await signupAndAccept(app, uniqNs());
+    const { ns, owner } = await org();
+    const formerOwner = await signupAndAccept(app, uniqNs());
+    const outsider = await signupAndAccept(app, uniqNs());
+    const coowner = await signupAndAccept(app, uniqNs());
+    const candidate = await signupAndAccept(app, uniqNs());
+    await request(app)
+      .put(`/v1/orgs/${ns}/owners/${formerOwner.user.namespace}`)
+      .set(bearer(owner.token))
+      .expect(204);
+    await request(app)
+      .delete(`/v1/orgs/${ns}/owners/${formerOwner.user.namespace}`)
+      .set(bearer(owner.token))
+      .expect(204);
+    await publishProject(app, ns, 'hello', owner.token, { visibility: 'private' });
+    const extensionPath = `/v1/@${ns}/hello`;
+    await request(app)
+      .put(`${extensionPath}/owners/${coowner.user.namespace}`)
+      .set(bearer(owner.token))
+      .expect(204);
+    await request(app)
+      .post(`${extensionPath}/owners/${coowner.user.namespace}/accept`)
+      .set(bearer(coowner.token))
+      .expect(200);
+    await request(app)
+      .put(`${extensionPath}/owners/${candidate.user.namespace}`)
+      .set(bearer(owner.token))
+      .expect(204);
+    await request(app)
+      .put(`${extensionPath}/access/${candidate.user.namespace}`)
+      .set(bearer(owner.token))
+      .expect(204);
+
+    for (const actor of [outsider, formerOwner, coowner]) {
+      await request(app)
+        .put(`${extensionPath}/owners/${outsider.user.namespace}`)
+        .set(bearer(actor.token))
+        .expect(403);
+      for (const target of [candidate, coowner]) {
+        await request(app)
+          .delete(`${extensionPath}/owners/${target.user.namespace}`)
+          .set(bearer(actor.token))
+          .expect(403);
+      }
+      await request(app)
+        .put(`${extensionPath}/access/${outsider.user.namespace}`)
+        .set(bearer(actor.token))
+        .expect(403);
+      await request(app)
+        .delete(`${extensionPath}/access/${candidate.user.namespace}`)
+        .set(bearer(actor.token))
+        .expect(403);
+    }
+
+    await request(app)
+      .post(`${extensionPath}/owners/${candidate.user.namespace}/accept`)
+      .set(bearer(candidate.token))
+      .expect(200);
+    await request(app)
+      .delete(`${extensionPath}/owners/${coowner.user.namespace}`)
+      .set(bearer(owner.token))
+      .expect(204);
+    await request(app)
+      .delete(`${extensionPath}/access/${candidate.user.namespace}`)
+      .set(bearer(owner.token))
+      .expect(204);
+  });
+
   test('an organization owner publishes, and the list is scoped to it', async () => {
     const admin = await signupAndAccept(app, uniqNs());
     const { ns, owner } = await org();

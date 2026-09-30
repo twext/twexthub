@@ -160,6 +160,44 @@ test('the namespace account is a permanent owner', async () => {
   assert.ok(list.body.data.some((u) => u.namespace === ns));
 });
 
+test('organization co-owners cannot manage owners in another namespace', async () => {
+  const { ownerA, coowner, outsider, ns } = await makeSetup();
+  const orgNamespace = uniqNs();
+  await request(app)
+    .post('/v1/orgs')
+    .set(bearer(coowner.token))
+    .send({ namespace: orgNamespace })
+    .expect(201);
+  const extensionPath = `/v1/@${ns}/hello`;
+  await request(app)
+    .put(`${extensionPath}/owners/${orgNamespace}`)
+    .set(bearer(ownerA.token))
+    .expect(204);
+  await request(app)
+    .post(`${extensionPath}/owners/${orgNamespace}/accept`)
+    .set(bearer(coowner.token))
+    .expect(200);
+  await request(app)
+    .put(`${extensionPath}/owners/${outsider.user.namespace}`)
+    .set(bearer(ownerA.token))
+    .expect(204);
+
+  await request(app)
+    .put(`${extensionPath}/owners/${coowner.user.namespace}`)
+    .set(bearer(coowner.token))
+    .expect(403);
+  for (const target of [outsider.user.namespace, orgNamespace]) {
+    await request(app)
+      .delete(`${extensionPath}/owners/${target}`)
+      .set(bearer(coowner.token))
+      .expect(403);
+  }
+  await request(app)
+    .post(`${extensionPath}/owners/${outsider.user.namespace}/accept`)
+    .set(bearer(outsider.token))
+    .expect(200);
+});
+
 test("a co-owner's approval trusts the namespace, not the co-owner", async () => {
   const admin = await signupAndAccept(app, uniqNs());
   const ownerA = await signupAndAccept(app, uniqNs());

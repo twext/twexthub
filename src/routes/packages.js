@@ -6,7 +6,9 @@ import express, { Router } from 'express';
 import semver from 'semver';
 import YAML from 'yaml';
 import {
+  assertAdmin,
   canSee as canSeeExtension,
+  isAdmin,
   isExtensionOwner as isExtensionOwnerRow,
   isOrganizationOwner,
   organizationsOwnedBy,
@@ -515,8 +517,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
       row.status === 'published' || row.status === 'yanked' || row.status === 'deprecated';
     if (!isVisible) {
       const isOwner = req.auth?.user.namespace === req.params.namespace;
-      const isAdmin = req.auth?.user.role === 'admin';
-      if (!isOwner && !isAdmin) throw notFound();
+      if (!isOwner && req.auth?.user.role !== 'admin') throw notFound();
     }
     if (isVisible && !(await canSee(req.auth?.user, row))) throw notFound();
     res.json(versionToObject(row, config));
@@ -565,11 +566,12 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     res.json(versionToObject(updated, config));
   }
 
+  // A review is a moderation decision, so it needs the admin role on the
+  // account and the `admin` scope on the credential. An automation token held by
+  // an admin can review once it is granted that scope; a non-admin cannot get
+  // there, because the role check runs first.
   async function reviewVersion(req, res, status) {
-    if (req.auth.user.role !== 'admin') throw forbidden('Admin privileges are required.');
-    if (req.auth.tokenType !== 'session') {
-      throw forbidden('Automation tokens cannot review versions.');
-    }
+    assertAdmin(req.auth);
     const { namespace, id, version } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     const [row] = await sql`
@@ -715,8 +717,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     const row = await resolveVersion(req.params, req.auth?.user ?? null);
     const isPublished =
       row.status === 'published' || row.status === 'yanked' || row.status === 'deprecated';
-    const isAdmin = req.auth?.user.role === 'admin' && req.auth.tokenType === 'session';
-    if (!isPublished && !(row.status === 'pending' && isAdmin)) throw notFound();
+    if (!isPublished && !(row.status === 'pending' && isAdmin(req.auth))) throw notFound();
     if (isPublished && !(await canSee(req.auth?.user, row))) throw notFound();
     const abs = row.blob_digest
       ? blobPathFor(config.dataDir, row.blob_digest)
@@ -745,8 +746,8 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     async (req, res) => {
       const { namespace, id } = req.params;
       if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
-      if (req.auth.tokenType !== 'session') {
-        throw forbidden('Automation tokens cannot access this endpoint.');
+      if (!req.auth.scopes.includes('read:source')) {
+        throw forbidden('This token is missing the required "read:source" scope.');
       }
       if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
         throw notFound('Only an owner or an admin can fetch the source.');

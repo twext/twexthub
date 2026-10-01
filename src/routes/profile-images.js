@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import express, { Router } from 'express';
-import { requireSession } from '../auth.js';
+import { requireScope } from '../auth.js';
 import {
   MAX_PROFILE_IMAGE_BYTES,
   profileImagePointer,
@@ -105,7 +105,7 @@ export function makeProfileImageRouter({ sql, config, load, mayWrite, serialize 
   });
 
   const upload = (kind) => [
-    requireSession,
+    requireScope('manage:account'),
     rawImageBody,
     async (req, res) => {
       const target = await load(req.params.namespace);
@@ -127,7 +127,7 @@ export function makeProfileImageRouter({ sql, config, load, mayWrite, serialize 
   // the image again; otherwise the avatar falls back to the identicon and the
   // banner disappears.
   const clear = (kind) => [
-    requireSession,
+    requireScope('manage:account'),
     async (req, res) => {
       const target = await load(req.params.namespace);
       if (!(await mayWrite(target, req))) {

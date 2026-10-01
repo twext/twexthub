@@ -55,7 +55,7 @@ test('deleting a session revokes it', async () => {
   await request(app).get('/v1/me').set(bearer(secondToken)).expect(401);
 });
 
-test('automation tokens cannot list sessions', async () => {
+test('listing sessions needs the manage:sessions scope', async () => {
   const { token } = await signupAndAccept(app, uniqNs());
   const created = await request(app)
     .post('/v1/tokens')
@@ -64,7 +64,18 @@ test('automation tokens cannot list sessions', async () => {
     .expect(201);
 
   const r = await request(app).get('/v1/sessions').set(bearer(created.body.token)).expect(403);
-  assert.match(r.body.detail, /Automation tokens/i);
+  assert.match(r.body.detail, /missing the required "manage:sessions" scope/);
+
+  const granted = await request(app)
+    .post('/v1/tokens')
+    .set(bearer(token))
+    .send({ name: 'sessionbot', scopes: ['manage:sessions'] })
+    .expect(201);
+  const list = await request(app)
+    .get('/v1/sessions')
+    .set(bearer(granted.body.token))
+    .expect(200);
+  assert.equal(list.body.data.length, 1);
 });
 
 test('admin can inspect another account sessions', async () => {

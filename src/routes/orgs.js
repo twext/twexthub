@@ -1,7 +1,7 @@
 import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import { Router } from 'express';
-import { requireSession } from '../auth.js';
+import { requireScope } from '../auth.js';
 import { removeBlobIfUnused } from '../blobs.js';
 import { removeProfileImageBlob } from '../profile-images.js';
 import { removeSourceIfUnused } from '../sources.js';
@@ -67,8 +67,10 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
   // limited like one, and it needs accepted terms since it publishes a profile
   // and an extension namespace. The caller becomes its first owner, which is
   // the only reason it exists -- an organization with no owner could not be
-  // changed by anyone.
-  router.post('/', requireSession, termsGate, async (req, res) => {
+  // changed by anyone. Every organization write below shares one scope, since
+  // they all answer the same question: may this credential act for an org it
+  // owns? `loadOrgForWrite` still checks that it does.
+  router.post('/', requireScope('manage:orgs'), termsGate, async (req, res) => {
     requireObjectBody(req);
     const { namespace, displayName } = req.body;
 
@@ -169,7 +171,7 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
   // Only the profile fields, and only from the owner list. An organization has
   // no password, no role and no terms of its own, so this is the whole of what
   // can be changed about it -- the members are changed through /owners.
-  router.patch('/:namespace', requireSession, termsGate, async (req, res) => {
+  router.patch('/:namespace', requireScope('manage:orgs'), termsGate, async (req, res) => {
     const org = await loadOrgForWrite(req);
     requireObjectBody(req);
     const { patch, columns } = profilePatch(req.body);
@@ -203,7 +205,7 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
   // Deleting the namespace takes its extensions, its images and its hooks with
   // it. The blobs and sources are content-addressed rather than filed under the
   // namespace, so keep their digests when deleting the version rows.
-  router.delete('/:namespace', requireSession, termsGate, async (req, res) => {
+  router.delete('/:namespace', requireScope('manage:orgs'), termsGate, async (req, res) => {
     const org = await loadOrgForWrite(req);
     const owned = await sql.begin(async (tx) => {
       await tx`SELECT id FROM users WHERE id = ${org.id} FOR UPDATE`;
@@ -298,7 +300,7 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
   // An owner is an account, never another organization: an organization owns
   // nothing but people, so a second ring of pseudo-accounts would be a way to
   // lose track of who is actually accountable.
-  router.put('/:namespace/owners/:ownerNamespace', requireSession, termsGate, async (req, res) => {
+  router.put('/:namespace/owners/:ownerNamespace', requireScope('manage:orgs'), termsGate, async (req, res) => {
     const org = await loadOrgForWrite(req);
     const candidate = req.params.ownerNamespace;
     if (!isValidNamespace(candidate)) throw notFound();
@@ -348,7 +350,7 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
   // is either handed on or the organization is deleted.
   router.delete(
     '/:namespace/owners/:ownerNamespace',
-    requireSession,
+    requireScope('manage:orgs'),
     termsGate,
     async (req, res) => {
       const org = await loadOrgForWrite(req);
@@ -402,7 +404,7 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
   // Namespace-wide webhooks: one hook that hears every version event under this
   // organization, instead of registering the same URL once per extension. The
   // per-extension hook at /@namespace/id/webhooks is unchanged.
-  const manageChain = [requireSession, termsGate];
+  const manageChain = [requireScope('manage:orgs'), termsGate];
 
   router.get('/:namespace/webhooks', ...manageChain, async (req, res) => {
     const org = await loadOrgForWrite(req);

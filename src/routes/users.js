@@ -2,7 +2,7 @@ import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import { Router } from 'express';
 import { hashPassword, verifyPassword } from '../password.js';
-import { requireSession } from '../auth.js';
+import { requireScope } from '../auth.js';
 import { removeBlobIfUnused } from '../blobs.js';
 import { removeProfileImageBlob } from '../profile-images.js';
 import { removeSourceIfUnused } from '../sources.js';
@@ -161,7 +161,7 @@ export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
     return onlyUngated ? next() : termsGate(req, res, next);
   }
 
-  router.patch('/:namespace', requireSession, skipTermsForAcceptance, async (req, res) => {
+  router.patch('/:namespace', requireScope('manage:account'), skipTermsForAcceptance, async (req, res) => {
     const target = await loadUserOr404(sql, req.params.namespace);
     if (target.kind === 'organization') {
       throw forbidden(`@${target.namespace} is an organization; change it through /orgs.`);
@@ -299,7 +299,7 @@ export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
     res.json(userToObject(updated, config));
   });
 
-  router.delete('/:namespace', requireSession, async (req, res) => {
+  router.delete('/:namespace', requireScope('manage:account'), async (req, res) => {
     const target = await loadUserOr404(sql, req.params.namespace);
     if (target.kind === 'organization') {
       throw forbidden(`@${target.namespace} is an organization; delete it through /orgs.`);

@@ -75,7 +75,7 @@ curl -X POST -H 'Authorization: Bearer <session-token>' \
   https://hub.example.com/v1/admin/notifications
 ```
 
-The message is capped at 280 characters. Fan-out happens at insert time — every account gets its own row, and accounts created later do not see old broadcasts. The response reports how many mailboxes the message reached. Automation tokens are rejected, like on every admin endpoint.
+The message is capped at 280 characters. Fan-out happens at insert time — every account gets its own row, and accounts created later do not see old broadcasts. The response reports how many mailboxes the message reached. This route needs the admin role and the `admin` scope, like every admin endpoint, so a token reaches it once it has been granted that scope.
 
 ## Retention
 

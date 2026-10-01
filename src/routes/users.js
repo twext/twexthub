@@ -18,6 +18,10 @@ import { audit } from '../audit.js';
 
 export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
   const router = Router();
+
+  // An account's own settings are a grantable capability, so a token can hold
+  // them; the route still checks that the caller is that account or an admin.
+  const manageAccount = requireScope('manage:account');
   const scrypt = config.auth.scrypt;
   const sessionTtlMs = config.auth.sessionTtlDays * 86_400_000;
 
@@ -161,7 +165,7 @@ export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
     return onlyUngated ? next() : termsGate(req, res, next);
   }
 
-  router.patch('/:namespace', requireScope('manage:account'), skipTermsForAcceptance, async (req, res) => {
+  router.patch('/:namespace', manageAccount, skipTermsForAcceptance, async (req, res) => {
     const target = await loadUserOr404(sql, req.params.namespace);
     if (target.kind === 'organization') {
       throw forbidden(`@${target.namespace} is an organization; change it through /orgs.`);
@@ -299,7 +303,7 @@ export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
     res.json(userToObject(updated, config));
   });
 
-  router.delete('/:namespace', requireScope('manage:account'), async (req, res) => {
+  router.delete('/:namespace', manageAccount, async (req, res) => {
     const target = await loadUserOr404(sql, req.params.namespace);
     if (target.kind === 'organization') {
       throw forbidden(`@${target.namespace} is an organization; delete it through /orgs.`);

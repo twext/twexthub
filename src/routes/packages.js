@@ -517,7 +517,10 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
       row.status === 'published' || row.status === 'yanked' || row.status === 'deprecated';
     if (!isVisible) {
       const isOwner = req.auth?.user.namespace === req.params.namespace;
-      if (!isOwner && req.auth?.user.role !== 'admin') throw notFound();
+      // An unreviewed version's metadata is as much part of the moderation
+      // queue as the queue listing itself, so an admin reaches it the same way:
+      // admin role and `admin` scope together. The owner still sees their own.
+      if (!isOwner && !isAdmin(req.auth)) throw notFound();
     }
     if (isVisible && !(await canSee(req.auth?.user, row))) throw notFound();
     res.json(versionToObject(row, config));

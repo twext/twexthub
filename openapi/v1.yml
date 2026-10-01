@@ -314,7 +314,7 @@ paths:
       summary: Revoke an automation token
       operationId: deleteAutomationToken
       tags: [Userspace]
-      description: Self or admin, session-authenticated only.
+      description: Self or admin, needs the `manage:tokens` scope.
       responses:
         '204': { description: Revoked }
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -2258,10 +2258,11 @@ paths:
       description: >
         Serves the raw compiled JS, including yanked and deprecated versions,
         so existing consumers keep working. Authentication is optional:
-        published, yanked, and deprecated versions are public, while a
-        session-authenticated admin may fetch a `pending` version for review.
-        Private versions require an authorized bearer token. 404 for any
-        other status or a missing blob.
+        published, yanked, and deprecated versions are public, while an admin
+        may fetch a `pending` version for review -- that being the admin role on
+        the account and the `admin` scope on the credential together, as on the
+        review route. Private versions require an authorized bearer token. 404
+        for any other status or a missing blob.
       responses:
         '200':
           description: Compiled extension

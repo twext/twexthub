@@ -2,7 +2,7 @@ import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import { Router } from 'express';
 import { hashPassword, verifyPassword } from '../password.js';
-import { requireScope } from '../auth.js';
+import { isAdmin, requireScope } from '../auth.js';
 import { removeBlobIfUnused } from '../blobs.js';
 import { removeProfileImageBlob } from '../profile-images.js';
 import { removeSourceIfUnused } from '../sources.js';
@@ -92,8 +92,12 @@ export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
 
   function serializePublicUser(row, req) {
     const isOwner = req.auth?.user.namespace === row.namespace;
-    const isAdmin = req.auth?.user.role === 'admin';
-    if ((isOwner || isAdmin) && row.kind !== 'organization') return userToObject(row, config);
+    // Whether to show another account's role and terms state, not whether the
+    // caller may act on it, so this is the role alone and not `isAdmin`.
+    const seesFullProfile = req.auth?.user.role === 'admin';
+    if ((isOwner || seesFullProfile) && row.kind !== 'organization') {
+      return userToObject(row, config);
+    }
     // An organization has no role and accepts no terms; whoever runs it is named
     // on its owner list, and a private extension in its namespace is a thing
     // its owners can see rather than a thing this row is.
@@ -170,7 +174,10 @@ export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
     if (target.kind === 'organization') {
       throw forbidden(`@${target.namespace} is an organization; change it through /orgs.`);
     }
-    if (req.auth.user.namespace !== target.namespace && req.auth.user.role !== 'admin') {
+    // Acting on another account is an administrative act, so it needs both
+    // halves: the admin role on this account and the `admin` scope on the
+    // credential. Same-account edits only need `manage:account`.
+    if (req.auth.user.namespace !== target.namespace && !isAdmin(req.auth)) {
       throw forbidden('Only an admin can update another account.');
     }
     requireObjectBody(req);
@@ -233,7 +240,7 @@ export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
     }
     if (errors.length > 0) throw fieldErrors(errors);
 
-    if (role !== undefined && req.auth.user.role !== 'admin') {
+    if (role !== undefined && !isAdmin(req.auth)) {
       throw forbidden('Only an admin can change a role.');
     }
 
@@ -251,7 +258,10 @@ export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
       columns.push('terms_accepted_version');
     }
     if (password !== undefined) {
-      if (req.auth.user.role !== 'admin') {
+      // The current-password confirmation is the self-service path. An admin
+      // resetting somebody else's password has no password to confirm, which
+      // is why this asks for authority rather than for a role alone.
+      if (!isAdmin(req.auth)) {
         const currentPassword = req.body.currentPassword;
         if (typeof currentPassword !== 'string' || currentPassword.length === 0) {
           throw fieldErrors([
@@ -308,7 +318,7 @@ export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
     if (target.kind === 'organization') {
       throw forbidden(`@${target.namespace} is an organization; delete it through /orgs.`);
     }
-    if (req.auth.user.namespace !== target.namespace && req.auth.user.role !== 'admin') {
+    if (req.auth.user.namespace !== target.namespace && !isAdmin(req.auth)) {
       throw forbidden('Only an admin can delete another account.');
     }
     const owned = await sql.begin(async (tx) => {

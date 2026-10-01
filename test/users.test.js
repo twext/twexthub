@@ -177,3 +177,94 @@ test('only admin can change a role', async () => {
     .expect(200);
   assert.equal(granted.body.role, 'admin');
 });
+
+test('manage:account alone does not reach another account, admin scope does', async () => {
+  const admin = await signupAndAccept(app, uniqNs());
+  const { user: other } = await signupAndAccept(app, uniqNs());
+
+  const scoped = await request(app)
+    .post('/v1/tokens')
+    .set(bearer(admin.token))
+    .send({ name: 'selfcare', scopes: ['manage:account'] })
+    .expect(201);
+  const selfOnly = scoped.body.token;
+
+  // Its own account is the point of the scope, and it keeps working.
+  await request(app)
+    .patch(`/v1/users/${admin.user.namespace}`)
+    .set(bearer(selfOnly))
+    .send({ bio: 'set by a token' })
+    .expect(200);
+
+  // Another account is an administrative act, which the scope alone does not cover.
+  const crossAccount = await request(app)
+    .patch(`/v1/users/${other.namespace}`)
+    .set(bearer(selfOnly))
+    .send({ displayName: 'Nope' });
+  assert.equal(crossAccount.status, 403);
+
+  // A role change is the sharpest edge of that, so it is checked on its own.
+  const promote = await request(app)
+    .patch(`/v1/users/${other.namespace}`)
+    .set(bearer(selfOnly))
+    .send({ role: 'admin' });
+  assert.equal(promote.status, 403);
+
+  const removal = await request(app).delete(`/v1/users/${other.namespace}`).set(bearer(selfOnly));
+  assert.equal(removal.status, 403);
+
+  // With the admin scope as well, the same account reaches all three.
+  const full = await request(app)
+    .post('/v1/tokens')
+    .set(bearer(admin.token))
+    .send({ name: 'ops', scopes: ['manage:account', 'admin'] })
+    .expect(201);
+  const ops = full.body.token;
+
+  await request(app)
+    .patch(`/v1/users/${other.namespace}`)
+    .set(bearer(ops))
+    .send({ displayName: 'Renamed' })
+    .expect(200);
+  await request(app)
+    .patch(`/v1/users/${other.namespace}`)
+    .set(bearer(ops))
+    .send({ role: 'normal' })
+    .expect(200);
+  await request(app).delete(`/v1/users/${other.namespace}`).set(bearer(ops)).expect(204);
+});
+
+test('an unreviewed version needs the admin scope, not just the role', async () => {
+  const ab = await signupAndAccept(app, uniqNs());
+  assert.equal(ab.user.role, 'admin');
+  const { user, token } = await signupAndAccept(app, uniqNs());
+  await publishProject(app, user.namespace, 'hello', token);
+
+  // The owner always sees their own pending version.
+  await request(app)
+    .get(`/v1/@${user.namespace}/hello/versions/1.0.0`)
+    .set(bearer(token))
+    .expect(200);
+
+  const unscoped = await request(app)
+    .post('/v1/tokens')
+    .set(bearer(ab.token))
+    .send({ name: 'curious', scopes: ['publish'] })
+    .expect(201);
+  const denied = await request(app).get(`/v1/@${user.namespace}/hello/versions/1.0.0`);
+  assert.equal(denied.status, 404, 'an unauthenticated caller cannot see it either');
+  const viaToken = await request(app)
+    .get(`/v1/@${user.namespace}/hello/versions/1.0.0`)
+    .set(bearer(unscoped.body.token));
+  assert.equal(viaToken.status, 404);
+
+  const scoped = await request(app)
+    .post('/v1/tokens')
+    .set(bearer(ab.token))
+    .send({ name: 'reviewer', scopes: ['admin'] })
+    .expect(201);
+  await request(app)
+    .get(`/v1/@${user.namespace}/hello/versions/1.0.0`)
+    .set(bearer(scoped.body.token))
+    .expect(200);
+});

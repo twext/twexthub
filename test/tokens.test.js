@@ -128,7 +128,9 @@ test('a token granted the management scopes can manage credentials', async () =>
   const tokens = await request(app).get('/v1/tokens').set(bearer(ops)).expect(200);
   assert.equal(tokens.body.data.length, 1);
 
-  // It can also end the session that minted it, and the one it is running on.
+  // It can end the session that minted it, but only by id. Ending its *own*
+  // session is the one thing no token can do, since that route deletes by the
+  // caller's token id and the two tables' id spaces overlap.
   await request(app).delete('/v1/sessions/current').set(bearer(ops)).expect(403);
   const [session] = sessions.body.data;
   await request(app).delete(`/v1/sessions/${session.id}`).set(bearer(ops)).expect(204);

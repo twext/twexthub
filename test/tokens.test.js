@@ -87,7 +87,10 @@ test('a token reaches only the endpoints its scopes cover', async () => {
   // `publish` says nothing about credentials, so both listings stay closed.
   for (const path of ['/v1/sessions', '/v1/tokens']) {
     const denied = await request(app).get(path).set(bearer(auto)).expect(403);
-    assert.match(denied.body.detail, /missing the required "(manage:sessions|manage:tokens)" scope/);
+    assert.match(
+      denied.body.detail,
+      /missing the required "(manage:sessions|manage:tokens)" scope/,
+    );
   }
 
   const org = await request(app)

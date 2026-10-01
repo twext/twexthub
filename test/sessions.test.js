@@ -71,10 +71,7 @@ test('listing sessions needs the manage:sessions scope', async () => {
     .set(bearer(token))
     .send({ name: 'sessionbot', scopes: ['manage:sessions'] })
     .expect(201);
-  const list = await request(app)
-    .get('/v1/sessions')
-    .set(bearer(granted.body.token))
-    .expect(200);
+  const list = await request(app).get('/v1/sessions').set(bearer(granted.body.token)).expect(200);
   assert.equal(list.body.data.length, 1);
 });
 

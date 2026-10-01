@@ -226,11 +226,12 @@ test('manage:account alone does not reach another account, admin scope does', as
     .set(bearer(ops))
     .send({ displayName: 'Renamed' })
     .expect(200);
-  await request(app)
+  const promoted = await request(app)
     .patch(`/v1/users/${other.namespace}`)
     .set(bearer(ops))
-    .send({ role: 'normal' })
+    .send({ role: 'admin' })
     .expect(200);
+  assert.equal(promoted.body.role, 'admin');
   await request(app).delete(`/v1/users/${other.namespace}`).set(bearer(ops)).expect(204);
 });
 

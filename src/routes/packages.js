@@ -749,11 +749,11 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     async (req, res) => {
       const { namespace, id } = req.params;
       if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
-      if (!req.auth.scopes.includes('read:source')) {
-        throw forbidden('This token is missing the required "read:source" scope.');
-      }
       if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
         throw notFound('Only an owner or an admin can fetch the source.');
+      }
+      if (!req.auth.scopes.includes('read:source')) {
+        throw forbidden('This token is missing the required "read:source" scope.');
       }
       const row = await resolveVersion(req.params, req.auth?.user ?? null);
       if (!row.source_path || !row.source_digest) {

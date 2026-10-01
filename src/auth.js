@@ -1,6 +1,22 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { forbidden, unauthorized } from './errors.js';
 
+// The permissions an automation token can be granted. A session satisfies every
+// one of them, so what a credential may do is decided by its scopes and by the
+// account's own authority (its role, the extensions it owns) rather than by
+// whether it is a session. A token granted all of them acts like a session in
+// everything but how it expires and how it is revoked.
+export const SCOPES = [
+  'publish',
+  'yank',
+  'read:source',
+  'manage:account',
+  'manage:orgs',
+  'manage:sessions',
+  'manage:tokens',
+  'admin',
+];
+
 export function hashToken(token) {
   return createHash('sha256').update(token).digest('hex');
 }
@@ -66,7 +82,9 @@ async function lookupToken(sql, hash) {
     return {
       tokenId: session.token_id,
       tokenType: 'session',
-      scopes: ['publish', 'yank'],
+      // A session is the full authority of the account, so it satisfies every
+      // scope. Copied per request so nothing can widen them in place.
+      scopes: [...SCOPES],
       lastUsedAt: session.last_used_at,
       user: session,
     };
@@ -167,14 +185,29 @@ export function requireSession(req, res, next) {
   next();
 }
 
-export function requireAdmin(req, res, next) {
-  if (!req.auth) throw unauthorized();
-  if (req.auth.tokenType !== 'session') {
-    throw forbidden('Automation tokens cannot access this endpoint.');
-  }
-  if (req.auth.user.role !== 'admin') {
+// Admin authority is two separate things: the account carries the admin role,
+// and the credential is allowed to use the admin surface. A session always has
+// every scope, so a session admin passes on the role alone. An automation token
+// has to have been granted `admin` as well, and the role check still runs
+// first, so a normal account cannot mint itself an admin token.
+export function isAdmin(auth) {
+  return Boolean(auth) && auth.user.role === 'admin' && auth.scopes.includes('admin');
+}
+
+// Throws the specific reason; the callers that have a message of their own to
+// add (a review, say) would rather call this than restate both checks.
+export function assertAdmin(auth) {
+  if (!auth) throw unauthorized();
+  if (auth.user.role !== 'admin') {
     throw forbidden('Admin privileges are required.');
   }
+  if (!auth.scopes.includes('admin')) {
+    throw forbidden('This token is missing the required "admin" scope.');
+  }
+}
+
+export function requireAdmin(req, res, next) {
+  assertAdmin(req.auth);
   next();
 }
 

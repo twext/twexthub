@@ -1,7 +1,7 @@
 import { existsSync, statSync } from 'node:fs';
 import { Router } from 'express';
 import { notFound } from '../errors.js';
-import { canSee } from '../auth.js';
+import { canSee, isAdmin } from '../auth.js';
 import { blobPathFor, hashFile } from '../blobs.js';
 
 // A digest is only as secret as the URL carrying it, so the blob route applies
@@ -39,8 +39,7 @@ export function makeBlobsRouter({ sql, config }) {
       // Same status rule as the download route, and it comes first: canSee
       // answers visibility, so asking it about a pending or staging row would
       // let its owner read a blob the download route refuses.
-      const isAdmin = req.auth?.user.role === 'admin' && req.auth.tokenType === 'session';
-      if (!PUBLIC_STATUSES.has(row.status) && !(row.status === 'pending' && isAdmin))
+      if (!PUBLIC_STATUSES.has(row.status) && !(row.status === 'pending' && isAdmin(req.auth)))
         throw notFound();
       if (!(await canSee(sql, req.auth?.user ?? null, row))) throw notFound();
       res.set('Cache-Control', 'private, no-store');

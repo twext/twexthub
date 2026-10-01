@@ -1,7 +1,7 @@
 import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import { Router } from 'express';
-import { requireSession } from '../auth.js';
+import { requireScope } from '../auth.js';
 import { removeBlobIfUnused } from '../blobs.js';
 import { removeProfileImageBlob } from '../profile-images.js';
 import { removeSourceIfUnused } from '../sources.js';
@@ -28,6 +28,11 @@ import { audit } from '../audit.js';
 // revoke apart from the account.
 export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtensions }) {
   const router = Router();
+
+  // One scope answers every organization write below, since they all ask the
+  // same question: may this credential act for an organization at all? Whether
+  // it may act for *this* one is `loadOrgForWrite`'s job, and it runs after.
+  const manageOrgs = requireScope('manage:orgs');
   const webhooks = makeWebhooks({ sql });
   const apiRoot = normalizeApiRoot(config.apiRoot);
   const orgPath = (namespace) =>
@@ -68,7 +73,7 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
   // and an extension namespace. The caller becomes its first owner, which is
   // the only reason it exists -- an organization with no owner could not be
   // changed by anyone.
-  router.post('/', requireSession, termsGate, async (req, res) => {
+  router.post('/', manageOrgs, termsGate, async (req, res) => {
     requireObjectBody(req);
     const { namespace, displayName } = req.body;
 
@@ -169,7 +174,7 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
   // Only the profile fields, and only from the owner list. An organization has
   // no password, no role and no terms of its own, so this is the whole of what
   // can be changed about it -- the members are changed through /owners.
-  router.patch('/:namespace', requireSession, termsGate, async (req, res) => {
+  router.patch('/:namespace', manageOrgs, termsGate, async (req, res) => {
     const org = await loadOrgForWrite(req);
     requireObjectBody(req);
     const { patch, columns } = profilePatch(req.body);
@@ -203,7 +208,7 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
   // Deleting the namespace takes its extensions, its images and its hooks with
   // it. The blobs and sources are content-addressed rather than filed under the
   // namespace, so keep their digests when deleting the version rows.
-  router.delete('/:namespace', requireSession, termsGate, async (req, res) => {
+  router.delete('/:namespace', manageOrgs, termsGate, async (req, res) => {
     const org = await loadOrgForWrite(req);
     const owned = await sql.begin(async (tx) => {
       await tx`SELECT id FROM users WHERE id = ${org.id} FOR UPDATE`;
@@ -298,7 +303,7 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
   // An owner is an account, never another organization: an organization owns
   // nothing but people, so a second ring of pseudo-accounts would be a way to
   // lose track of who is actually accountable.
-  router.put('/:namespace/owners/:ownerNamespace', requireSession, termsGate, async (req, res) => {
+  router.put('/:namespace/owners/:ownerNamespace', manageOrgs, termsGate, async (req, res) => {
     const org = await loadOrgForWrite(req);
     const candidate = req.params.ownerNamespace;
     if (!isValidNamespace(candidate)) throw notFound();
@@ -346,50 +351,45 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
   // The last owner cannot be removed. An organization nobody owns has no way
   // back: its namespace is published to and its profile is frozen, so the row
   // is either handed on or the organization is deleted.
-  router.delete(
-    '/:namespace/owners/:ownerNamespace',
-    requireSession,
-    termsGate,
-    async (req, res) => {
-      const org = await loadOrgForWrite(req);
-      const candidate = req.params.ownerNamespace;
-      if (!isValidNamespace(candidate)) throw notFound();
-      const [user] = await sql`SELECT * FROM users WHERE namespace = ${candidate}`;
-      if (!user) throw notFound('No such account.');
-      await sql.begin(async (tx) => {
-        await tx`SELECT id FROM users WHERE id = ${org.id} FOR UPDATE`;
-        const [deleted] = await tx`
+  router.delete('/:namespace/owners/:ownerNamespace', manageOrgs, termsGate, async (req, res) => {
+    const org = await loadOrgForWrite(req);
+    const candidate = req.params.ownerNamespace;
+    if (!isValidNamespace(candidate)) throw notFound();
+    const [user] = await sql`SELECT * FROM users WHERE namespace = ${candidate}`;
+    if (!user) throw notFound('No such account.');
+    await sql.begin(async (tx) => {
+      await tx`SELECT id FROM users WHERE id = ${org.id} FOR UPDATE`;
+      const [deleted] = await tx`
           DELETE FROM organization_owners
           WHERE org_id = ${org.id} AND user_id = ${user.id}
           RETURNING 1
         `;
-        if (!deleted) throw notFound('That account is not an owner.');
-        const [{ count }] = await tx`
+      if (!deleted) throw notFound('That account is not an owner.');
+      const [{ count }] = await tx`
           SELECT count(*)::int AS count FROM organization_owners WHERE org_id = ${org.id}
         `;
-        if (count === 0) {
-          throw conflict(
-            'That is the only owner. Add another owner, or delete the organization, before removing it.',
-          );
-        }
-        await notifyUser(
-          tx,
-          user.id,
-          'organization.owner.removed',
-          removedAsOrgOwnerMessage(req.auth.user.namespace, org.namespace),
-          { namespace: org.namespace },
+      if (count === 0) {
+        throw conflict(
+          'That is the only owner. Add another owner, or delete the organization, before removing it.',
         );
-        await audit(
-          tx,
-          req.auth.user,
-          'organization.owner.remove',
-          { namespace: org.namespace },
-          { removed: user.namespace },
-        );
-      });
-      res.status(204).end();
-    },
-  );
+      }
+      await notifyUser(
+        tx,
+        user.id,
+        'organization.owner.removed',
+        removedAsOrgOwnerMessage(req.auth.user.namespace, org.namespace),
+        { namespace: org.namespace },
+      );
+      await audit(
+        tx,
+        req.auth.user,
+        'organization.owner.remove',
+        { namespace: org.namespace },
+        { removed: user.namespace },
+      );
+    });
+    res.status(204).end();
+  });
 
   // What this organization publishes, newest first, using the registry listing
   // so the sort, license filter and cursor paging are the same ones the public
@@ -402,7 +402,7 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
   // Namespace-wide webhooks: one hook that hears every version event under this
   // organization, instead of registering the same URL once per extension. The
   // per-extension hook at /@namespace/id/webhooks is unchanged.
-  const manageChain = [requireSession, termsGate];
+  const manageChain = [manageOrgs, termsGate];
 
   router.get('/:namespace/webhooks', ...manageChain, async (req, res) => {
     const org = await loadOrgForWrite(req);

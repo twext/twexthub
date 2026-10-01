@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireSession } from '../auth.js';
+import { requireScope, requireSession } from '../auth.js';
 import { hashPassword, verifyPassword } from '../password.js';
 import { forbidden, notFound, unauthorized } from '../errors.js';
 import { decodeCursor, keysetPage, parseDir, parseLimit } from '../pagination.js';
@@ -9,7 +9,9 @@ import { createSession, requireObjectBody, resolveTargetUser } from './shared.js
 
 export function makeSessionsRouter({ sql, config, termsGate, rateLimiter }) {
   const router = Router();
-  const guard = [requireSession, termsGate];
+  // Listing and revoking other sessions is a grantable permission, so a token
+  // holding it can sign the account out everywhere but its own session.
+  const guard = [requireScope('manage:sessions'), termsGate];
   const scrypt = config.auth.scrypt;
   const sessionTtlMs = config.auth.sessionTtlDays * 86_400_000;
   let dummyHashPromise;
@@ -90,7 +92,11 @@ export function makeSessionsRouter({ sql, config, termsGate, rateLimiter }) {
   // `current` is the session making the request, so a client that never kept its
   // own id can still sign itself out. It is exempt from the terms gate, like
   // signing out always has to be: an account that has just been bumped to new
-  // terms is exactly the one that needs to be able to end its session.
+  // terms is exactly the one that needs to be able to end its session. It is
+  // also the one route that stays session-only, because the id it deletes is
+  // the caller's own token id and the two tables number their rows
+  // independently, so a token id matched against this table would end somebody
+  // else's session.
   router.delete('/current', requireSession, async (req, res) => {
     await sql`DELETE FROM sessions WHERE id = ${req.auth.tokenId}`;
     res.status(204).end();

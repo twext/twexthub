@@ -31,14 +31,24 @@ info:
     `POST /sessions` (sign in) or `POST /users` (create an account, which
     signs the new account in), expire after 7 days, and implicitly satisfy
     every scope. **Automation tokens** are created explicitly via
-    `POST /tokens`, are scoped to just `publish` and/or `yank` for CI use
-    (e.g. a `twext publish` GitHub Action), and never expire unless the
-    caller sets one. A caller can revoke the credential it is holding
-    without knowing its own id: `DELETE /sessions/current` ends the session
-    and `DELETE /tokens/current` revokes the automation token. Only a
-    session may manage sessions or automation tokens, act on `/admin/*`
-    endpoints, or change account settings — an automation token calling any
-    of those gets a `403`.
+    `POST /tokens`, carry their own expiration or none at all, and hold only
+    the scopes they were granted — `publish` and/or `yank` is the usual pair
+    for CI use (e.g. a `twext publish` GitHub Action), while the `manage:*`
+    scopes let one carry out the rest of a session's work. A credential can
+    only grant a scope it holds itself, so a token cannot be used to mint a
+    stronger one. A caller can revoke the credential it is holding without
+    knowing its own id: `DELETE /sessions/current` ends the session and
+    `DELETE /tokens/current` revokes the automation token; those two are the
+    only routes that still distinguish the two kinds, since each deletes the
+    caller's own row and the two tables number their rows independently.
+
+    A scope says what a credential may attempt; the account behind it still
+    says how far it gets. An automation token acts as the account that minted
+    it, so it can publish only the extensions that account owns, administer
+    only the organizations it owns, and reach `/admin/*` and version review
+    only if that account is an admin. The `admin` scope is the other half of
+    the admin check, never a substitute for the role. A credential missing
+    the scope a route needs gets a `403` naming the scope.
 
     Besides accounts, a namespace can belong to an **organization**: a
     pseudo-account that publishes under it, has a profile and holds webhooks,
@@ -130,7 +140,7 @@ paths:
       summary: List a caller's active sessions
       operationId: listSessions
       tags: [Userspace]
-      description: Session-authenticated only. `namespace` defaults to the caller; an admin may pass it to inspect another account's sessions.
+      description: Needs the `manage:sessions` scope. `namespace` defaults to the caller; an admin may pass it to inspect another account's sessions.
       parameters:
         - name: namespace
           in: query
@@ -164,7 +174,11 @@ paths:
         `current` is the session that authenticated the request, so a client
         that never kept its own id can still sign itself out. Exempt from the
         terms gate: an account that has just been bumped to new terms is exactly
-        the one that needs to be able to end its session.
+        the one that needs to be able to end its session. Session-authenticated
+        only, with no scope that would let a token in: the route deletes by the
+        caller's own token id and the `sessions` and `automation_tokens` id
+        sequences are independent, so a token reaching it could end another
+        account's session.
       responses:
         '204': { description: Revoked }
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -180,7 +194,7 @@ paths:
       summary: Revoke a session
       operationId: deleteSession
       tags: [Userspace]
-      description: Self or admin, session-authenticated only. To revoke the session making the request, use `DELETE /sessions/current` instead of looking up its id.
+      description: Self or admin, needs the `manage:sessions` scope. To revoke the session making the request, use `DELETE /sessions/current` instead of looking up its id.
       responses:
         '204': { description: Revoked }
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -192,7 +206,7 @@ paths:
       summary: List a caller's automation tokens
       operationId: listAutomationTokens
       tags: [Userspace]
-      description: Session-authenticated only. `namespace` defaults to the caller; an admin may pass it to inspect another account's tokens. Never returns token secrets.
+      description: Needs the `manage:tokens` scope. `namespace` defaults to the caller; an admin may pass it to inspect another account's tokens. Never returns token secrets.
       parameters:
         - name: namespace
           in: query
@@ -220,7 +234,7 @@ paths:
       summary: Create an automation token
       operationId: createAutomationToken
       tags: [Userspace]
-      description: Session-authenticated only. The `token` secret is returned exactly once, in this response.
+      description: Needs the `manage:tokens` scope. Every scope requested must be one the caller already holds. The `token` secret is returned exactly once, in this response.
       requestBody:
         required: true
         content:
@@ -254,7 +268,9 @@ paths:
       description: >
         The automation-token counterpart to `DELETE /sessions/current`, for CI
         that holds a single token and no id. Automation-token authenticated, so a
-        session gets a `403`: it has no token of its own to revoke.
+        session gets a `403`: it has no token of its own to revoke. This route
+        needs no scope, since revoking the credential in hand is something any
+        token may do for itself.
       responses:
         '204': { description: Revoked }
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -270,7 +286,7 @@ paths:
       summary: Rename or rescope an automation token
       operationId: updateAutomationToken
       tags: [Userspace]
-      description: Self or admin, session-authenticated only. Never returns or reissues the token secret.
+      description: Self or admin, needs the `manage:tokens` scope. New scopes must be ones the caller already holds. Never returns or reissues the token secret.
       requestBody:
         required: true
         content:
@@ -298,7 +314,7 @@ paths:
       summary: Revoke an automation token
       operationId: deleteAutomationToken
       tags: [Userspace]
-      description: Self or admin, session-authenticated only.
+      description: Self or admin, needs the `manage:tokens` scope.
       responses:
         '204': { description: Revoked }
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -2148,9 +2164,11 @@ paths:
         `deprecationMessage` to deprecate; sending both, or neither, is a `422`
         because the body has to say which edit it is.
 
-        `status` is admin-only, session-only, and applies to a `pending` version.
-        `deprecationMessage` is open to the owner or an admin and requires the
-        `publish` scope (sessions satisfy this implicitly). A non-null message
+        `status` applies to a `pending` version and needs the admin role on the
+        account plus the `admin` scope on the credential, which is how an
+        automation token gets to review. `deprecationMessage` is open to the
+        owner or an admin and requires the `publish` scope (sessions satisfy
+        this implicitly). A non-null message
         marks the version `deprecated` — still listable and downloadable, but
         flagged — and `null` clears the deprecation. Yanked versions cannot be
         deprecated.
@@ -2209,8 +2227,12 @@ paths:
       operationId: downloadVersionSource
       tags: [Userspace]
       description: >
-        Session-authenticated owners and admins only. Returns the exact
-        gzipped tarball that was published, for local rebuilds and review.
+        Owners and admins only, and the credential needs the `read:source`
+        scope, so an automation token can be given source access without
+        being given anything else. Returns the exact gzipped tarball that was
+        published, for local rebuilds and review. Someone who is neither the
+        owner nor an admin gets a `404` rather than a `403`, whether or not
+        they hold the scope.
       responses:
         '200':
           description: Gzipped project tarball
@@ -2236,10 +2258,11 @@ paths:
       description: >
         Serves the raw compiled JS, including yanked and deprecated versions,
         so existing consumers keep working. Authentication is optional:
-        published, yanked, and deprecated versions are public, while a
-        session-authenticated admin may fetch a `pending` version for review.
-        Private versions require an authorized bearer token. 404 for any
-        other status or a missing blob.
+        published, yanked, and deprecated versions are public, while an admin
+        may fetch a `pending` version for review -- that being the admin role on
+        the account and the `admin` scope on the credential together, as on the
+        review route. Private versions require an authorized bearer token. 404
+        for any other status or a missing blob.
       responses:
         '200':
           description: Compiled extension
@@ -2276,7 +2299,8 @@ paths:
         treating content addressing as permission. A digest reached by at least
         one public published, deprecated, or yanked version is public and served
         cacheable for a year; anything else needs a bearer token the same way
-        `/download` needs one, and a `pending` version stays admin-session-only.
+        `/download` needs one, and a `pending` version stays admin-only —
+        the admin role and the `admin` scope together, as on the review route.
 
         404 for a digest that is not 64 hex characters, names no version, has
         no bytes on disk, or fails the size and hash check against the digest
@@ -2655,8 +2679,27 @@ components:
 
     Scope:
       type: string
-      enum: [publish, yank]
-      description: Only meaningful for automation tokens — sessions implicitly satisfy every scope.
+      enum:
+        [
+          publish,
+          yank,
+          read:source,
+          manage:account,
+          manage:orgs,
+          manage:sessions,
+          manage:tokens,
+          admin,
+        ]
+      description: >-
+        Only meaningful for automation tokens — sessions implicitly satisfy
+        every scope. `publish` and `yank` cover the extension publish and
+        unpublish routes; `read:source` covers fetching a version's source;
+        `manage:account`, `manage:orgs`, `manage:sessions` and
+        `manage:tokens` cover the settings, organization and credential
+        routes a session would otherwise be the only caller of; `admin`
+        covers `/admin/*` and version review, and is required in addition to
+        the admin role rather than instead of it. A credential may only be
+        granted a scope it already holds.
 
     NotificationKind:
       type: string
@@ -3134,11 +3177,10 @@ components:
         Authenticated, but not allowed to perform this action — e.g. not the
         resource owner or an admin, a namespace mismatch on publish, the
         current Terms of Service haven't been accepted yet
-        (see `termsAcceptedVersion` on `PATCH /users/{namespace}`), an
-        automation token missing the
-        required scope, or an automation token used against a
-        session-only endpoint (session/token management, `/admin/*`,
-        account settings).
+        (see `termsAcceptedVersion` on `PATCH /users/{namespace}`), or a
+        credential missing the scope the route needs. The `detail` names the
+        scope. An automation token on `/admin/*` or a version review also needs
+        the `admin` scope on top of the account being an admin.
       content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
     NotFound:
       description: Resource not found

@@ -221,7 +221,7 @@ test('pending version source is gated to owners and admins', async () => {
   assert.equal(adminSource.status, 200);
 });
 
-test('automation tokens cannot read pending version source', async () => {
+test('reading version source needs the read:source scope', async () => {
   const { adminToken, ownerToken, ownerNs } = await makeAdminAndOwner();
   await publishProject(app, ownerNs, 'hello', ownerToken, {
     code: 'console.log("REVIEW_ONLY");',
@@ -233,6 +233,8 @@ test('automation tokens cannot read pending version source', async () => {
     .send({ name: 'ci', scopes: ['publish'] })
     .expect(201);
 
+  // The admin role alone is not what reads source, and neither is being able to
+  // download a pending build.
   const dl = await request(app)
     .get(`/v1/@${ownerNs}/hello/versions/1.0.0/download`)
     .set(bearer(created.body.token));
@@ -242,7 +244,32 @@ test('automation tokens cannot read pending version source', async () => {
     .get(`/v1/@${ownerNs}/hello/versions/1.0.0/source`)
     .set(bearer(created.body.token));
   assert.equal(src.status, 403);
-  assert.match(src.body.detail, /Automation tokens/i);
+  assert.match(src.body.detail, /missing the required "read:source" scope/);
+
+  // With the scope the same account reads it, and a pending version with it.
+  const granted = await request(app)
+    .post('/v1/tokens')
+    .set(bearer(adminToken))
+    .send({ name: 'srcbot', scopes: ['read:source'] })
+    .expect(201);
+  const ok = await request(app)
+    .get(`/v1/@${ownerNs}/hello/versions/1.0.0/source`)
+    .set(bearer(granted.body.token))
+    .expect(200);
+  assert.match(ok.headers['content-type'], /gzip/);
+
+  // The scope does not substitute for ownership, though: another account's
+  // extension stays invisible to it.
+  const stranger = await signupAndAccept(app, uniqNs());
+  const strangerToken = await request(app)
+    .post('/v1/tokens')
+    .set(bearer(stranger.token))
+    .send({ name: 'nosy', scopes: ['read:source'] })
+    .expect(201);
+  const denied = await request(app)
+    .get(`/v1/@${ownerNs}/hello/versions/1.0.0/source`)
+    .set(bearer(strangerToken.body.token));
+  assert.equal(denied.status, 404);
 });
 
 test('published versions expose digest and integrity, served from /blobs/:digest', async () => {

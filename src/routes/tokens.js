@@ -1,16 +1,22 @@
 import { Router } from 'express';
-import { hashToken, newToken, requireAuth, requireSession } from '../auth.js';
+import { hashToken, newToken, requireAuth, requireScope, SCOPES } from '../auth.js';
 import { decodeCursor, keysetPage, parseDir, parseLimit } from '../pagination.js';
 import { fieldErrors, forbidden, notFound } from '../errors.js';
 import { automationTokenToObject } from '../serialize.js';
 import { requireObjectBody, resolveTargetUser } from './shared.js';
 
-const SCOPES = ['publish', 'yank'];
-
 export function makeTokensRouter({ sql, config }) {
   const router = Router();
 
-  function validateScopes(scopes) {
+  // Mints, edits and revocations are a permission in their own right rather
+  // than a session privilege, so a token granted this can manage tokens within
+  // the authority of its own account.
+  const manageTokens = requireScope('manage:tokens');
+
+  // A credential can only pass on permissions it holds itself, so a leaked token
+  // can never be used to mint a stronger one. A session holds every scope, so
+  // for the dashboard this is a no-op.
+  function validateScopes(scopes, callerScopes) {
     const errors = [];
     if (!Array.isArray(scopes) || scopes.length < 1) {
       errors.push({ field: 'scopes', message: 'At least one scope is required.' });
@@ -18,6 +24,8 @@ export function makeTokensRouter({ sql, config }) {
       for (const scope of scopes) {
         if (!SCOPES.includes(scope)) {
           errors.push({ field: 'scopes', message: `Unknown scope "${scope}".` });
+        } else if (!callerScopes.includes(scope)) {
+          errors.push({ field: 'scopes', message: `This token is missing the "${scope}" scope.` });
         }
       }
     }
@@ -25,7 +33,7 @@ export function makeTokensRouter({ sql, config }) {
     return [...new Set(scopes)];
   }
 
-  router.get('/', requireSession, async (req, res) => {
+  router.get('/', manageTokens, async (req, res) => {
     const user = await resolveTargetUser(sql, req);
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor, { i: 'int' });
@@ -50,7 +58,7 @@ export function makeTokensRouter({ sql, config }) {
     );
   });
 
-  router.post('/', requireSession, async (req, res) => {
+  router.post('/', manageTokens, async (req, res) => {
     requireObjectBody(req);
     const { name, scopes, expiresInDays } = req.body;
 
@@ -76,7 +84,7 @@ export function makeTokensRouter({ sql, config }) {
     }
     if (errors.length > 0) throw fieldErrors(errors);
 
-    const cleanScopes = validateScopes(scopes);
+    const cleanScopes = validateScopes(scopes, req.auth.scopes);
     const token = newToken();
     const expiresAt =
       expiresInDays !== undefined ? new Date(Date.now() + expiresInDays * 86_400_000) : null;
@@ -90,7 +98,7 @@ export function makeTokensRouter({ sql, config }) {
     res.status(201).json({ ...automationTokenToObject(row), token });
   });
 
-  router.patch('/:id', requireSession, async (req, res) => {
+  router.patch('/:id', manageTokens, async (req, res) => {
     requireObjectBody(req);
     const { name, scopes } = req.body;
     if (name === undefined && scopes === undefined) {
@@ -122,7 +130,7 @@ export function makeTokensRouter({ sql, config }) {
       columns.push('name');
     }
     if (scopes !== undefined) {
-      patch.scopes = sql.json(validateScopes(scopes));
+      patch.scopes = sql.json(validateScopes(scopes, req.auth.scopes));
       columns.push('scopes');
     }
 
@@ -149,7 +157,7 @@ export function makeTokensRouter({ sql, config }) {
     res.status(204).end();
   });
 
-  router.delete('/:id', requireSession, async (req, res) => {
+  router.delete('/:id', manageTokens, async (req, res) => {
     const targetId = Number(req.params.id);
     const [row] =
       Number.isSafeInteger(targetId) && targetId > 0

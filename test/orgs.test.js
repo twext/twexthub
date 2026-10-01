@@ -148,7 +148,7 @@ describe('creating an organization', () => {
     assert.ok(owner.token);
   });
 
-  test('automation tokens cannot create or manage organizations', async () => {
+  test('managing organizations needs the manage:orgs scope', async () => {
     const { ns, owner } = await org();
     const created = await request(app)
       .post('/v1/tokens')
@@ -170,7 +170,7 @@ describe('creating an organization', () => {
         .set(bearer(created.body.token))
         .send(body)
         .expect(403);
-      assert.match(denied.body.detail, /Automation tokens/);
+      assert.match(denied.body.detail, /missing the required "manage:orgs" scope/);
     }
   });
 

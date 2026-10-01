@@ -28,7 +28,7 @@ curl -X POST -H 'Content-Type: application/json' \
   https://hub.example.com/v1/sessions
 ```
 
-The response includes `token`; every admin endpoint below takes it as `Authorization: Bearer <token>`. Automation tokens are rejected by admin endpoints.
+The response includes `token`; every admin endpoint below takes it as `Authorization: Bearer <token>`. An automation token works on these endpoints too, once it carries the `admin` scope — see [Automation tokens and CI](#automation-tokens-and-ci). The session is the shorter route, since it needs no grant.
 
 ## How the publish gate works
 
@@ -38,7 +38,7 @@ A submitted version moves `staging → pending → published`, or `pending → r
 - Once the namespace has a published version, later publishes to it skip review and go straight to `published`.
 - A publishing account can have only one version in the queue (`staging` or `pending`) at a time. To let a publisher correct and resubmit, reject the queued version — the rejection stores a reason and frees the slot.
 
-Rejected and staging versions are neither listed publicly nor downloadable. Pending versions are available to an admin with a session token for review.
+Rejected and staging versions are neither listed publicly nor downloadable. Pending versions are available to an admin for review, by session or by a token holding the `admin` scope.
 
 ## Reviewing the queue
 
@@ -91,8 +91,29 @@ Roles are `admin` and `normal`. Only admins change roles or act on other account
 - Resetting a password revokes every session and automation token on that account.
 - `DELETE /v1/users/:namespace` deletes the account and its versions. Unreferenced blobs and source tarballs are removed after the database delete; shared content remains available to other accounts.
 
-Sessions and automation tokens can be listed and revoked per account under `/v1/sessions` and `/v1/tokens`.
+Sessions and automation tokens can be listed and revoked per account under `/v1/sessions` and `/v1/tokens`, which take the `manage:sessions` and `manage:tokens` scopes respectively.
 
 ## Automation tokens and CI
 
-Publishers script publishing with long-lived automation tokens scoped to `publish` and `yank`, created through the `twext` CLI. The server stores only SHA-256 hashes of token values, so tokens cannot be read back from the database. To kill a leaked token, delete it, or reset the account's password, which revokes everything.
+Publishers script publishing with long-lived automation tokens created through the `twext` CLI. The server stores only SHA-256 hashes of token values, so tokens cannot be read back from the database. To kill a leaked token, delete it, or reset the account's password, which revokes everything.
+
+A token carries a list of scopes, and a session carries all of them. The scopes are:
+
+| Scope             | Opens                                                               |
+| ----------------- | ------------------------------------------------------------------- |
+| `publish`         | Publishing a version, its dist-tags, and its per-extension webhooks |
+| `yank`            | `DELETE /v1/@:namespace/:id/versions/:version`                      |
+| `read:source`     | Downloading a version's source tarball                              |
+| `manage:account`  | `PATCH`/`DELETE /v1/users/:namespace` and the profile images        |
+| `manage:orgs`     | The `/v1/orgs` routes, including owners and namespace webhooks      |
+| `manage:sessions` | Listing and revoking sessions                                       |
+| `manage:tokens`   | The `/v1/tokens` routes                                             |
+| `admin`           | `/v1/admin/*` and version review                                    |
+
+A CI token that only publishes wants `publish` and nothing else. A token that also archives sources wants `read:source` alongside it. That is the whole design: give a token the scopes its job needs and no more, and the rest of the account stays out of its reach.
+
+Two rules keep the grants honest. A token can only be granted a scope it already holds, so a leaked token cannot be spent minting a more powerful one — the same limit keeps an operator from handing a narrow token to a contractor and having it hand back a wider one. And `admin` is never enough on its own: the account behind the token must carry the `admin` role as well, so a regular account cannot reach the admin surface however it was signed. Both checks run on every admin request.
+
+A token acts as the account that minted it, never above it. It publishes only the extensions that account owns, administers only the organizations it owns, and a token holding every scope is a session in everything but how it expires and how it is revoked.
+
+The two self-revocation routes stay keyed to the kind of credential rather than a scope, because each deletes the caller's own row and the `sessions` and `automation_tokens` id sequences are independent. `DELETE /v1/sessions/current` is session-only; a token that reached it would delete whatever session shared its id. `DELETE /v1/tokens/current` refuses a session for the mirror reason.

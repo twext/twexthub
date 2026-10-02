@@ -486,6 +486,26 @@ describe('what the move carries', () => {
     assert.equal(Number(recipient.blob_bytes), Number(charged.blob_bytes));
   });
 
+  test("the transferred extension's author display name follows the new owner", async () => {
+    const { ns, owner } = await publishedExtension('hello', { author: 'Sender Name' });
+    const other = await signupAndAccept(app, uniqNs());
+
+    await request(app)
+      .patch(`/v1/users/${other.user.namespace}`)
+      .set(bearer(other.token))
+      .send({ displayName: 'Receiver Name' })
+      .expect(200);
+
+    const before = await request(app).get(`/v1/@${ns}/hello`).expect(200);
+    assert.equal(before.body.author, 'Sender Name');
+
+    await offer(ns, 'hello', other.user.namespace, owner.token).expect(201);
+    await accept(ns, 'hello', other.user.namespace, other.token);
+
+    const after = await request(app).get(`/v1/@${other.user.namespace}/hello`).expect(200);
+    assert.equal(after.body.author, 'Receiver Name');
+  });
+
   test('receiving an extension does not buy the recipient out of review', async () => {
     const { ns, owner } = await publishedExtension();
     const other = await signupAndAccept(app, uniqNs());

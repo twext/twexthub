@@ -72,7 +72,7 @@ export async function mayReceiveTransfer(sql, user, toNamespace) {
 
 export async function loadNamespaceAccount(sql, namespace) {
   const [row] = await sql`
-    SELECT id, namespace, kind, blob_bytes, max_blob_bytes
+    SELECT id, namespace, display_name, kind, blob_bytes, max_blob_bytes
     FROM users WHERE namespace = ${namespace}
   `;
   return row ?? null;
@@ -243,6 +243,10 @@ export async function acceptTransfer(tx, { config, actor, namespace, id, toNames
       WHERE namespace = ${namespace} AND extension_id = ${id}
     `;
   }
+  await tx`
+    UPDATE versions SET author = ${recipient.display_name}
+    WHERE namespace = ${toNamespace} AND extension_id = ${id}
+  `;
 
   await tx`
     INSERT INTO extension_owners (owner_id, namespace, extension_id, added_by)
